@@ -38,6 +38,31 @@ def _normalizar_tipo(tipo: str) -> str:
     """Convierte un tipo al español. Si ya está en español lo devuelve tal cual."""
     return _TIPOS_EN_ES.get(tipo, tipo)
 
+
+def _normalizar_para_busqueda(nombre: str) -> str:
+    """
+    Normaliza un nombre de Pokémon para búsqueda insensible a formato.
+
+    Convierte a minúsculas, elimina tildes/diéresis y descarta cualquier
+    carácter que no sea letra o dígito.  El resultado es una clave compacta
+    que hace coincidir variantes como:
+
+        "Calyrex-Shadow"  →  "calyrexshadow"
+        "Calyrex Shadow"  →  "calyrexshadow"
+        "calyrexshadow"   →  "calyrexshadow"
+        "Nidoran♀"        →  "nidoranf"
+        "Mr. Mime"        →  "mrmime"
+    """
+    tildes = str.maketrans(
+        "áéíóúàèìòùâêîôûãñüÁÉÍÓÚÀÈÌÒÙÂÊÎÔÛÃÑÜ",
+        "aeiouaeiouaeiouanuAEIOUAEIOUAEIOUANU",
+    )
+    return "".join(
+        c for c in nombre.lower().strip().translate(tildes)
+        if c.isalnum()
+    )
+
+
 # ---------------------------------------------------------------------------
 # Modificadores de naturaleza
 # ---------------------------------------------------------------------------
@@ -354,6 +379,40 @@ class PokedexService:
         }
         inicio, fin = rangos.get(region.upper(), (1, 151))
         return [i for i in range(inicio, fin + 1) if self.existe(i)]
+
+    def buscar_id_por_nombre(self, nombre: str) -> Optional[int]:
+        """
+        Busca el ID numérico de una especie Pokémon por nombre.
+
+        La búsqueda es insensible a mayúsculas/minúsculas, tildes y
+        separadores (guiones, espacios).  Esto permite encontrar:
+
+            "Calyrex-Shadow"  →  ID si la Pokédex tiene "Calyrex-Shadow"
+            "calyrex shadow"  →  ídem
+            "Gardevoir"       →  ID independientemente de capitalización
+
+        Recorre self._pokedex linealmente (cargado en memoria al arrancar).
+        O(n) aceptable porque este método solo lo invoca el comando admin
+        /crearpokemon, nunca en rutas hot de batalla o spawn.
+
+        Args:
+            nombre: Nombre de la especie tal como viene del paste de Smogon.
+
+        Returns:
+            ID numérico de la especie, o None si no se encontró ninguna
+            coincidencia.  Jamás lanza excepción.
+        """
+        if not nombre or not nombre.strip():
+            return None
+
+        busqueda = _normalizar_para_busqueda(nombre)
+
+        for id_str, data in self._pokedex.items():
+            nombre_pokedex = data.get("nombre", "")
+            if _normalizar_para_busqueda(nombre_pokedex) == busqueda:
+                return int(id_str)
+
+        return None
 
 
 # Instancia global — se crea al importar pokemon/services/__init__.py

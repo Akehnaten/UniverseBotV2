@@ -4,19 +4,21 @@ handlers/admin_handlers.py
 Comandos de administración y utilidades de usuario.
 
 Comandos:
-  /editar  TABLA @etiqueta campo valor  — owner only
-  /nuevomes                             — owner only
-  /cargar  @usuario cantidad            — admins
-  /quitar  @usuario cantidad            — admins
-  /remover @usuario [motivo]            — admins
-  /alerta  mensaje                      — admins
+  /editar       TABLA @etiqueta campo valor  — owner only
+  /nuevomes                                  — owner only
+  /cargar       @usuario cantidad            — admins
+  /quitar       @usuario cantidad            — admins
+  /remover      @usuario [motivo]            — admins
+  /alerta       mensaje                      — admins
+  /crearpokemon @usuario [bloque Smogon]     — admins
 """
 
+import re
 import threading
 import time
 import logging
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, NamedTuple, Optional
 from utils.thread_utils import get_thread_id
 import telebot
 
@@ -141,6 +143,258 @@ def _resolve_userid_for_edit(message, bot) -> Optional[int]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Constantes y helpers para el parser de formato Smogon
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Mapeo de abreviaturas de stat Smogon → claves internas del sistema
+_SMOGON_STAT_MAP: Dict[str, str] = {
+    "hp":  "hp",
+    "atk": "atq",
+    "def": "def",
+    "spa": "atq_sp",
+    "spd": "def_sp",
+    "spe": "vel",
+}
+
+# Set de naturalezas válidas (Gen 3+, las mismas que usa pokemon_service)
+_NATURALEZAS_VALIDAS: frozenset = frozenset({
+    "Hardy",   "Lonely",  "Brave",   "Adamant", "Naughty",
+    "Bold",    "Docile",  "Relaxed", "Impish",  "Lax",
+    "Timid",   "Hasty",   "Serious", "Jolly",   "Naive",
+    "Modest",  "Mild",    "Quiet",   "Bashful", "Rash",
+    "Calm",    "Gentle",  "Sassy",   "Careful", "Quirky",
+})
+
+
+class _SmogonSet(NamedTuple):
+    """Resultado inmutable del parser de un bloque en formato Smogon."""
+    especie_raw:   str             # Nombre limpio de la especie (sin marcador de sexo)
+    item:          Optional[str]   # Normalizado: lowercase sin espacios (o None)
+    habilidad_raw: str             # Nombre de habilidad tal como vino en el paste
+    nivel:         int
+    shiny:         bool
+    evs:           Dict[str, int]  # Claves: hp, atq, def, atq_sp, def_sp, vel
+    naturaleza:    str
+    ivs:           Dict[str, int]  # Claves: hp, atq, def, atq_sp, def_sp, vel
+    movimientos:   List[str]       # Normalizados: lowercase, sin espacios ni guiones
+    sexo:          Optional[str]   # "M", "F", o None (determinar_sexo decide)
+
+
+def _smogon_normalizar_move(nombre: str) -> str:
+    """
+    Normaliza un nombre de movimiento al formato de la BD del bot.
+
+    La BD almacena los movimientos en minúsculas y sin espacios ni guiones,
+    igual que la clave canónica del resto del sistema.
+
+        "Energy Ball"     →  "energyball"
+        "Astral Barrage"  →  "astralbarrage"
+        "U-turn"          →  "uturn"
+    """
+    return nombre.lower().replace(" ", "").replace("-", "")
+
+
+def _smogon_normalizar_habilidad(nombre: str) -> str:
+    """
+    Normaliza el nombre de una habilidad eliminando el sufijo de forma
+    que Smogon incluye entre paréntesis y convirtiéndolo a clave interna.
+
+        "As One (Spectrier)"  →  "asone"
+        "Intimidate"          →  "intimidate"
+        "Sand Stream"         →  "sandstream"
+    """
+    nombre_limpio = re.sub(r"\(.*?\)", "", nombre).strip()
+    return nombre_limpio.lower().replace(" ", "").replace("-", "")
+
+
+def _smogon_normalizar_item(nombre: str) -> str:
+    """
+    Normaliza un nombre de objeto al formato de la BD del bot.
+
+        "Choice Scarf"  →  "choicescarf"
+        "Life Orb"      →  "lifeorb"
+    """
+    return nombre.lower().replace(" ", "").replace("-", "")
+
+
+def _parsear_smogon(texto: str) -> _SmogonSet:
+    """
+    Parsea un bloque completo en formato Smogon y devuelve un _SmogonSet.
+
+    Formato esperado (exportado por Pokémon Showdown / Smogon):
+
+        EspecieName @ Item           ← Item opcional
+        Ability: NombreHabilidad
+        Level: N                     ← Opcional; default 50
+        Shiny: Yes                   ← Opcional; default False
+        EVs: 252 SpA / 4 SpD / 252 Spe   ← Opcional; default 0 en todo
+        NaturalezaName Nature
+        IVs: 0 Atk                   ← Opcional; sin esta línea todos los IVs = 31
+                                       Con esta línea, solo los listados difieren de 31
+        - Movimiento1
+        - Movimiento2
+        ...
+
+    Args:
+        texto: El bloque Smogon en crudo, sin la línea del comando /crearpokemon.
+
+    Returns:
+        _SmogonSet con todos los datos parseados.
+
+    Raises:
+        ValueError: Con mensaje descriptivo si el formato es inválido o
+                    falta información obligatoria.
+    """
+    lineas = [l.strip() for l in texto.strip().splitlines() if l.strip()]
+    if not lineas:
+        raise ValueError("El bloque Smogon está vacío.")
+
+    # ── Línea 1: EspecieName [(F)|(M)] [@Item] ───────────────────────────────
+    # Formato completo:  "Arcanine (F) @ Rocky Helmet"
+    # Formato sin item:  "Pikachu (M)"
+    # Formato sin sexo:  "Calyrex-Shadow @ Choice Scarf"
+    primera = lineas[0]
+    if "@" in primera:
+        partes = primera.split("@", 1)
+        especie_parte: str  = partes[0].strip()
+        item: Optional[str] = _smogon_normalizar_item(partes[1].strip())
+    else:
+        especie_parte = primera.strip()
+        item          = None
+
+    # Detectar marcador de sexo: "(M)" o "(F)", case-insensitive, en la parte
+    # de especie (antes del "@"). Se elimina del nombre antes de buscarlo en
+    # la Pokédex para no contaminar la búsqueda.
+    _sexo_match = re.search(r"\(\s*(M|F)\s*\)", especie_parte, re.IGNORECASE)
+    if _sexo_match:
+        sexo: Optional[str] = _sexo_match.group(1).upper()
+        especie_raw: str = re.sub(r"\(\s*(M|F)\s*\)", "", especie_parte,
+                                  flags=re.IGNORECASE).strip()
+    else:
+        sexo        = None          # determinar_sexo() decidirá en crear_pokemon
+        especie_raw = especie_parte
+
+    if not especie_raw:
+        raise ValueError(
+            "La primera línea del bloque Smogon no contiene el nombre de la especie."
+        )
+
+    # ── Valores por defecto ───────────────────────────────────────────────────
+    habilidad_raw: str = ""
+    nivel:   int  = 50
+    shiny:   bool = False
+    evs: Dict[str, int] = {s: 0  for s in ("hp", "atq", "def", "atq_sp", "def_sp", "vel")}
+    # IVs: default 31 en todo; la fila "IVs:" solo lista los que difieren de 31
+    ivs: Dict[str, int] = {s: 31 for s in ("hp", "atq", "def", "atq_sp", "def_sp", "vel")}
+    naturaleza: str = "Hardy"
+    movimientos: List[str] = []
+
+    # ── Parsear líneas 2..N ───────────────────────────────────────────────────
+    for linea in lineas[1:]:
+        l_lower = linea.lower()
+
+        # Ability: NombreHabilidad
+        if l_lower.startswith("ability:"):
+            habilidad_raw = linea.split(":", 1)[1].strip()
+
+        # Level: N
+        elif l_lower.startswith("level:"):
+            raw_nivel = linea.split(":", 1)[1].strip()
+            try:
+                nivel = max(1, min(100, int(raw_nivel)))
+            except ValueError:
+                raise ValueError(
+                    f"Nivel inválido: '{raw_nivel}'. "
+                    f"Debe ser un número entero entre 1 y 100."
+                )
+
+        # Shiny: Yes / No
+        elif l_lower.startswith("shiny:"):
+            shiny = linea.split(":", 1)[1].strip().lower() == "yes"
+
+        # EVs: 252 SpA / 4 SpD / 252 Spe
+        elif l_lower.startswith("evs:"):
+            segmentos = linea.split(":", 1)[1].strip().split("/")
+            for seg in segmentos:
+                tokens = seg.strip().split()
+                if len(tokens) < 2:
+                    continue
+                try:
+                    cantidad = int(tokens[0])
+                except ValueError:
+                    raise ValueError(f"Valor de EV inválido en '{seg.strip()}'.")
+                stat_key = _SMOGON_STAT_MAP.get(tokens[1].lower())
+                if stat_key is None:
+                    raise ValueError(
+                        f"Estadística desconocida en EVs: '{tokens[1]}'. "
+                        f"Válidas: HP, Atk, Def, SpA, SpD, Spe."
+                    )
+                evs[stat_key] = cantidad
+
+        # "Timid Nature" / "Modest Nature" / etc.
+        elif "nature" in l_lower:
+            # Extraer la palabra antes de "Nature" (puede ser "Timid Nature" o solo "Timid")
+            nat_nombre = re.split(r"nature", linea, flags=re.IGNORECASE)[0].strip()
+            nat_nombre = nat_nombre.capitalize()
+            if nat_nombre not in _NATURALEZAS_VALIDAS:
+                raise ValueError(
+                    f"Naturaleza desconocida: '{nat_nombre}'. "
+                    f"Verificá la ortografía (en inglés, ej: Timid, Modest, Jolly)."
+                )
+            naturaleza = nat_nombre
+
+        # IVs: 0 Atk   ← solo se listan los que difieren de 31
+        elif l_lower.startswith("ivs:"):
+            segmentos = linea.split(":", 1)[1].strip().split("/")
+            for seg in segmentos:
+                tokens = seg.strip().split()
+                if len(tokens) < 2:
+                    continue
+                try:
+                    cantidad = int(tokens[0])
+                except ValueError:
+                    raise ValueError(f"Valor de IV inválido en '{seg.strip()}'.")
+                stat_key = _SMOGON_STAT_MAP.get(tokens[1].lower())
+                if stat_key is None:
+                    raise ValueError(
+                        f"Estadística desconocida en IVs: '{tokens[1]}'. "
+                        f"Válidas: HP, Atk, Def, SpA, SpD, Spe."
+                    )
+                ivs[stat_key] = cantidad
+
+        # - NombreMovimiento
+        elif linea.startswith("-"):
+            nombre_mov = linea[1:].strip()
+            if nombre_mov:
+                movimientos.append(_smogon_normalizar_move(nombre_mov))
+
+    # ── Validaciones de campos obligatorios ───────────────────────────────────
+    if not habilidad_raw:
+        raise ValueError(
+            "No se encontró la línea 'Ability:'. "
+            "¿Está el bloque Smogon completo?"
+        )
+    if not movimientos:
+        raise ValueError(
+            "No se encontraron movimientos (líneas que empiezan con '- '). "
+            "¿Está el bloque Smogon completo?"
+        )
+
+    return _SmogonSet(
+        especie_raw=especie_raw,
+        item=item,
+        habilidad_raw=habilidad_raw,
+        nivel=nivel,
+        shiny=shiny,
+        evs=evs,
+        naturaleza=naturaleza,
+        ivs=ivs,
+        movimientos=movimientos,
+        sexo=sexo,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Handler principal
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -154,13 +408,14 @@ class AdminHandlers:
 
     def _register_handlers(self) -> None:
         r = self.bot.register_message_handler
-        r(self.cmd_cargar,   commands=["cargar"])
-        r(self.cmd_quitar,   commands=["quitar"])
-        r(self.cmd_remover,  commands=["remover"])
-        r(self.cmd_alerta,   commands=["alerta"])
-        r(self.cmd_editar,   commands=["editar"])
-        r(self.cmd_nuevomes, commands=["nuevomes"])
-        r(self.cmd_limpiar,  commands=["limpiar"])
+        r(self.cmd_cargar,        commands=["cargar"])
+        r(self.cmd_quitar,        commands=["quitar"])
+        r(self.cmd_remover,       commands=["remover"])
+        r(self.cmd_alerta,        commands=["alerta"])
+        r(self.cmd_editar,        commands=["editar"])
+        r(self.cmd_nuevomes,      commands=["nuevomes"])
+        r(self.cmd_limpiar,       commands=["limpiar"])
+        r(self.cmd_crearpokemon,  commands=["crearpokemon"])
 
     def _is_admin(self, message) -> bool:
         uid = message.from_user.id
@@ -922,6 +1177,370 @@ class AdminHandlers:
         )
 
         self._send_temp(cid, tid, texto, delay=60)
+
+    # =========================================================================
+    # /crearpokemon  →  crea un Pokémon con datos exactos de un paste Smogon
+    # =========================================================================
+
+    def cmd_crearpokemon(self, message) -> None:
+        """
+        Crea un Pokémon con los datos exactos de un paste en formato Smogon
+        y lo asigna al usuario indicado.  Solo admins pueden ejecutarlo.
+
+        Uso en Telegram (el bloque Smogon va en el mismo mensaje, con saltos
+        de línea naturales tal como se pega desde Showdown/Smogon):
+
+            /crearpokemon @usuario
+            Calyrex-Shadow @ Choice Scarf
+            Ability: As One (Spectrier)
+            Level: 50
+            Shiny: Yes
+            EVs: 252 SpA / 4 SpD / 252 Spe
+            Timid Nature
+            IVs: 0 Atk
+            - Astral Barrage
+            - Dark Pulse
+            - Energy Ball
+            - Expanding Force
+
+        Notas sobre el formato:
+          · La fila "IVs:" es opcional.  Si se omite, todos los IVs = 31.
+          · Si se incluye, solo lista los IVs que difieren de 31; el resto
+            queda en 31 automáticamente.
+          · La fila "Shiny:" es opcional (default False).
+          · La fila "Level:" es opcional (default 50).
+          · El item (@) es opcional.
+
+        Flujo interno:
+          1. Verificar que el autor es admin.
+          2. Separar la línea del comando (con @usuario) del bloque Smogon.
+          3. Resolver el usuario objetivo — debe estar registrado en la BD.
+          4. Parsear el bloque con _parsear_smogon().
+          5. Buscar la especie en la Pokédex por nombre — error explícito
+             si no existe, sin fallbacks silenciosos.
+          6. Crear el Pokémon base con pokemon_service.crear_pokemon()
+             (usa IVs y naturaleza del paste; EVs=0 y movimientos por nivel).
+          7. Sobreescribir EVs, habilidad, objeto y movimientos en BD.
+          8. Recalcular y persistir las stats finales con los EVs reales.
+          9. Responder con resumen y loguear en el grupo de administración.
+        """
+        cid = message.chat.id
+        tid = _thread_id(message)
+        uid = message.from_user.id
+
+        self._try_delete(cid, message.message_id)
+
+        if not self._is_admin(message):
+            self._send_temp(cid, tid, "❌ Este comando es solo para administradores.", delay=5)
+            return
+
+        # ── Separar línea del comando del bloque Smogon ───────────────────────
+        # La primera línea contiene "/crearpokemon @usuario"; el resto es el
+        # bloque Smogon que el admin pegó directamente en el mismo mensaje.
+        texto_completo = (message.text or "").strip()
+        lineas = texto_completo.splitlines()
+
+        if len(lineas) < 3:
+            self._send_temp(
+                cid, tid,
+                "❌ <b>Uso correcto:</b>\n\n"
+                "<code>/crearpokemon @usuario\n"
+                "NombrePokemon @ Item\n"
+                "Ability: Habilidad\n"
+                "Level: 50\n"
+                "Shiny: Yes\n"
+                "EVs: 252 SpA / 4 SpD / 252 Spe\n"
+                "Timid Nature\n"
+                "IVs: 0 Atk\n"
+                "- Movimiento1\n"
+                "- Movimiento2\n"
+                "- Movimiento3\n"
+                "- Movimiento4</code>\n\n"
+                "⚠️ La fila IVs es opcional; si se omite todos los IVs = 31.\n"
+                "Con la fila IVs, solo se listan los que difieren de 31.",
+                delay=30,
+            )
+            return
+
+        bloque_smogon = "\n".join(lineas[1:]).strip()
+
+        # ── Resolver usuario objetivo ─────────────────────────────────────────
+        # IMPORTANTE: se extrae el @usuario SOLO de la primera línea del mensaje
+        # (la que contiene el comando).  Si se usara _resolver_target sobre todo
+        # el texto, el "@" de la línea Smogon "Pokemon @ Item" sería tomado
+        # erróneamente como mención de usuario y fallaría la resolución.
+        #
+        # Estrategia (idéntica a cmd_cargar):
+        #   1. Buscar el primer token con "@" en lineas[0].
+        #   2. Resolverlo con resolver_username_crudo (BD → API).
+        #   3. Sin "@" en lineas[0], intentar reply_to_message como fallback
+        #      legítimo (admin respondió al mensaje del destinatario).
+        primera_linea_tokens = lineas[0].split()
+        mention_raw = next(
+            (t.lstrip("@") for t in primera_linea_tokens
+             if t.startswith("@") and len(t) > 1),
+            None,
+        )
+
+        target_id:     Optional[int] = None
+        target_nombre: Optional[str] = None
+
+        if mention_raw:
+            target_id = resolver_username_crudo(mention_raw, cid, self.bot)
+            if target_id:
+                target_nombre = f"@{mention_raw}"
+                logger.info(
+                    "[CREARPOKEMON] Target resuelto por @mention → %s (%s)",
+                    target_id, target_nombre,
+                )
+            else:
+                logger.warning(
+                    "[CREARPOKEMON] @%s no pudo resolverse — operación abortada.",
+                    mention_raw,
+                )
+                self._send_temp(
+                    cid, tid,
+                    f"❌ No pude encontrar a <b>@{mention_raw}</b>.\n"
+                    "Debe haber escrito en el grupo al menos una vez, "
+                    "o respondé directamente a su mensaje.",
+                    delay=10,
+                )
+                return
+        else:
+            # Sin @username → intentar reply_to_message
+            target_id, target_nombre, error = self._resolver_target(
+                message, prefer_mention=True
+            )
+            if not target_id:
+                self._send_temp(
+                    cid, tid,
+                    error or "❌ No se pudo identificar al usuario. "
+                             "Mencionalo con @ en la primera línea o respondé su mensaje.",
+                    delay=8,
+                )
+                return
+
+        if not db_manager.user_exists(target_id):
+            self._send_temp(
+                cid, tid,
+                f"❌ El usuario <code>{target_id}</code> no está registrado "
+                f"en el sistema.",
+                delay=8,
+            )
+            return
+
+        # ── Parsear bloque Smogon ─────────────────────────────────────────────
+        try:
+            poke_set = _parsear_smogon(bloque_smogon)
+        except ValueError as exc:
+            self._send_temp(
+                cid, tid,
+                f"❌ <b>Error al parsear el formato Smogon:</b>\n"
+                f"<code>{exc}</code>",
+                delay=20,
+            )
+            logger.warning("[CREARPOKEMON] Parse error (admin %s): %s", uid, exc)
+            return
+
+        # ── Buscar la especie en la Pokédex ───────────────────────────────────
+        # Error explícito y visible — ningún fallback silencioso.
+        from pokemon.services.pokedex_service import pokedex_service as _pdex
+
+        pokemon_id = _pdex.buscar_id_por_nombre(poke_set.especie_raw)
+        if pokemon_id is None:
+            self._send_temp(
+                cid, tid,
+                f"❌ <b>Especie no encontrada en la Pokédex:</b> "
+                f"<code>{poke_set.especie_raw}</code>\n\n"
+                f"Verificá que el nombre coincide con el de la Pokédex del bot.\n"
+                f"Si la Pokédex usa el nombre en español, probá con ese.",
+                delay=25,
+            )
+            logger.warning(
+                "[CREARPOKEMON] Especie no encontrada: '%s' (admin %s)",
+                poke_set.especie_raw, uid,
+            )
+            return
+
+        nombre_especie = _pdex.obtener_nombre(pokemon_id)
+        logger.info(
+            "[CREARPOKEMON] Admin %s → user %s | %s (pokID=%s) | "
+            "Nv.%s | Shiny=%s | Naturaleza=%s",
+            uid, target_id, nombre_especie, pokemon_id,
+            poke_set.nivel, poke_set.shiny, poke_set.naturaleza,
+        )
+
+        # ── Crear Pokémon base ────────────────────────────────────────────────
+        # crear_pokemon fija EVs=0 y elige movimientos por nivel; ambos se
+        # sobreescriben en el paso siguiente con los datos exactos del paste.
+        from pokemon.services.pokemon_service import pokemon_service as _pksvc
+
+        id_unico = _pksvc.crear_pokemon(
+            user_id=target_id,
+            pokemon_id=pokemon_id,
+            nivel=poke_set.nivel,
+            shiny=poke_set.shiny,
+            ivs=poke_set.ivs,
+            naturaleza=poke_set.naturaleza,
+            sexo=poke_set.sexo,
+        )
+
+        if id_unico is None:
+            self._send_temp(
+                cid, tid,
+                "❌ Error interno al crear el Pokémon. "
+                "Revisá los logs del servidor para más detalles.",
+                delay=10,
+            )
+            logger.error(
+                "[CREARPOKEMON] pokemon_service.crear_pokemon devolvió None "
+                "(admin %s, pokID %s, userID %s)",
+                uid, pokemon_id, target_id,
+            )
+            return
+
+        # ── Sobreescribir EVs, habilidad, objeto y movimientos ────────────────
+        habilidad_norm = _smogon_normalizar_habilidad(poke_set.habilidad_raw)
+        moves = (poke_set.movimientos + [None, None, None, None])[:4]
+
+        try:
+            db_manager.execute_update(
+                """
+                UPDATE POKEMON_USUARIO SET
+                    ev_hp     = ?, ev_atq    = ?, ev_def    = ?,
+                    ev_atq_sp = ?, ev_def_sp = ?, ev_vel    = ?,
+                    habilidad = ?,
+                    objeto    = ?,
+                    move1     = ?, move2     = ?, move3     = ?, move4     = ?
+                WHERE id_unico = ?
+                """,
+                (
+                    poke_set.evs["hp"],     poke_set.evs["atq"],    poke_set.evs["def"],
+                    poke_set.evs["atq_sp"], poke_set.evs["def_sp"], poke_set.evs["vel"],
+                    habilidad_norm,
+                    poke_set.item,
+                    moves[0], moves[1], moves[2], moves[3],
+                    id_unico,
+                ),
+            )
+        except Exception as exc:
+            # El Pokémon ya fue creado; se informa sin revertir para no dejar
+            # la BD inconsistente. El admin puede corregir con /editar.
+            logger.error(
+                "[CREARPOKEMON] Error al actualizar EVs/movs (id_unico=%s): %s",
+                id_unico, exc,
+            )
+            self._send_temp(
+                cid, tid,
+                f"⚠️ El Pokémon fue creado (id_unico=<code>{id_unico}</code>) "
+                f"pero falló la actualización de EVs/movimientos:\n"
+                f"<code>{exc}</code>\n\n"
+                f"Podés corregirlo con <code>/editar POKEMON_USUARIO ...</code>.",
+                delay=25,
+            )
+            return
+
+        # ── Recalcular stats con los EVs definitivos ──────────────────────────
+        # crear_pokemon calculó las stats con EVs=0; hay que actualizarlas con
+        # los EVs reales del paste para que las batallas sean correctas.
+        try:
+            stats = _pdex.calcular_stats(
+                pokemon_id,
+                poke_set.nivel,
+                poke_set.ivs,
+                poke_set.evs,
+                poke_set.naturaleza,
+            )
+            db_manager.execute_update(
+                """
+                UPDATE POKEMON_USUARIO SET
+                    ps     = ?, atq    = ?, def    = ?,
+                    atq_sp = ?, def_sp = ?, vel    = ?,
+                    hp_actual = ?
+                WHERE id_unico = ?
+                """,
+                (
+                    stats["hp"],     stats["atq"],    stats["def"],
+                    stats["atq_sp"], stats["def_sp"], stats["vel"],
+                    stats["hp"],  # recién creado → HP lleno
+                    id_unico,
+                ),
+            )
+            logger.info(
+                "[CREARPOKEMON] Stats recalculadas con EVs reales "
+                "(id_unico=%s): %s",
+                id_unico, stats,
+            )
+        except Exception as exc:
+            # No es fatal: el Pokémon combatirá con stats levemente distintas
+            # hasta un próximo recálculo (ej: subida de nivel).
+            logger.error(
+                "[CREARPOKEMON] Error recalculando stats (id_unico=%s): %s",
+                id_unico, exc,
+            )
+
+        # ── Respuesta de éxito ────────────────────────────────────────────────
+        shiny_tag = " ✨" if poke_set.shiny else ""
+        item_tag  = f" @ <b>{poke_set.item}</b>" if poke_set.item else ""
+        sexo_tag  = {"M": " ♂", "F": " ♀"}.get(poke_set.sexo or "", "")
+
+        _ev_label = {
+            "hp": "HP", "atq": "Atk", "def": "Def",
+            "atq_sp": "SpA", "def_sp": "SpD", "vel": "Spe",
+        }
+        evs_no_cero = {k: v for k, v in poke_set.evs.items() if v > 0}
+        evs_str = (
+            " / ".join(f"{v} {_ev_label[k]}" for k, v in evs_no_cero.items())
+            if evs_no_cero else "Sin EVs"
+        )
+        ivs_no_31 = {k: v for k, v in poke_set.ivs.items() if v != 31}
+        ivs_str = (
+            " / ".join(f"{v} {_ev_label[k]}" for k, v in ivs_no_31.items())
+            if ivs_no_31 else "Todos 31"
+        )
+        movs_str = "\n".join(f"  • {m}" for m in poke_set.movimientos)
+
+        self._send_temp(
+            cid, tid,
+            f"✅ <b>Pokémon creado correctamente</b>\n\n"
+            f"🐾 <b>{nombre_especie}</b>{sexo_tag}{shiny_tag}{item_tag}\n"
+            f"👤 Asignado a: <b>{target_nombre}</b>\n"
+            f"🔢 ID único en BD: <code>{id_unico}</code>\n\n"
+            f"📊 <b>Nivel:</b> {poke_set.nivel}\n"
+            f"🌿 <b>Naturaleza:</b> {poke_set.naturaleza}\n"
+            f"⚡ <b>Habilidad:</b> {habilidad_norm}\n"
+            f"📈 <b>EVs:</b> {evs_str}\n"
+            f"🔩 <b>IVs especiales:</b> {ivs_str}\n\n"
+            f"⚔️ <b>Movimientos:</b>\n{movs_str}",
+            delay=30,
+        )
+
+        # ── Log en grupo de administración ────────────────────────────────────
+        sexo_log = poke_set.sexo if poke_set.sexo else "auto"
+        log_texto = (
+            f"✏️ #CREARPOKEMON\n"
+            f"• Admin: [{uid}]\n"
+            f"• Para: {target_nombre} [{target_id}]\n"
+            f"• Pokémon: {nombre_especie} (pokID=#{pokemon_id})\n"
+            f"• id_unico: {id_unico} | Nv.{poke_set.nivel} | "
+            f"{'Shiny' if poke_set.shiny else 'Normal'} | Sexo: {sexo_log}\n"
+            f"• Naturaleza: {poke_set.naturaleza} | Habilidad: {habilidad_norm}\n"
+            f"• EVs: {evs_str} | IVs especiales: {ivs_str}\n"
+            f"• Movimientos: {', '.join(poke_set.movimientos)}"
+        )
+        try:
+            self.bot.send_message(LOG_GROUP_ID, log_texto, parse_mode="HTML")
+        except Exception as exc:
+            logger.warning(
+                "[CREARPOKEMON] No se pudo enviar log al grupo %s: %s",
+                LOG_GROUP_ID, exc,
+            )
+
+        logger.info(
+            "[CREARPOKEMON] ✅ Completado — Admin %s → user %s | "
+            "%s (id_unico=%s)",
+            uid, target_id, nombre_especie, id_unico,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
