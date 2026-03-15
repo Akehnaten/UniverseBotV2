@@ -1,0 +1,12 @@
+# Ejemplos comunes de caché
+__pycache__/
+.sass-cache/
+.eslintcache
+node_modules/
+*.log
+
+# Base de datos específica
+database/universebot.db
+
+# Opcional: ignorar cualquier archivo .db (ya lo tenías, pero esto es más general)
+*.db

@@ -1,0 +1,478 @@
+# -*- coding: utf-8 -*-
+"""
+handlers/photocards_handlers.py
+Solo el dueño del mensaje puede usar los botones.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import List, Optional
+
+import telebot
+from telebot import types
+
+from funciones import economy_service
+from funciones.photocards_service import photocards_service, COSTO_SOBRE
+from database import db_manager
+
+logger = logging.getLogger(__name__)
+
+COLUMNAS          = 2
+FILAS_POR_PAGINA  = 5
+CARTAS_POR_PAGINA = COLUMNAS * FILAS_POR_PAGINA  # 10
+
+RAREZA_EMOJI = {"comun": "⚪", "rara": "🔵", "legendaria": "🟡"}
+ORDEN_RAREZA = {"legendaria": 0, "rara": 1, "comun": 2}
+
+
+class PhotocardsHandlers:
+
+    def __init__(self, bot: telebot.TeleBot) -> None:
+        self.bot = bot
+        self._register_handlers()
+
+    def _register_handlers(self) -> None:
+        self.bot.register_message_handler(self.cmd_menu, commands=["menu"])
+        self.bot.register_callback_query_handler(
+            self.handle_callback,
+            func=lambda c: c.data.startswith("pc_"),
+        )
+
+    # ── helpers ──────────────────────────────────────────────────────────────
+
+    def _answer(self, call: types.CallbackQuery, text: str = "", alert: bool = False) -> None:
+        try:
+            self.bot.answer_callback_query(call.id, text, show_alert=alert)
+        except Exception:
+            pass
+
+    def _edit(self, call: types.CallbackQuery, texto: str,
+              markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
+        try:
+            self.bot.edit_message_text(
+                texto, call.message.chat.id, call.message.message_id,
+                parse_mode="HTML", reply_markup=markup,
+            )
+        except Exception as exc:
+            logger.debug(f"_edit: {exc}")
+
+    def _delete(self, chat_id: int, message_id: int) -> None:
+        try:
+            self.bot.delete_message(chat_id, message_id)
+        except Exception:
+            pass
+
+    def _send_text(self, call: types.CallbackQuery, texto: str,
+                   markup: Optional[types.InlineKeyboardMarkup] = None) -> None:
+        """
+        Borra el mensaje actual (puede ser foto o texto) y envía uno nuevo de texto.
+        Usar cuando se vuelve de una vista de foto a una vista de texto, ya que
+        edit_message_text falla si el mensaje original es una foto.
+        """
+        thread_id = getattr(call.message, "message_thread_id", None)
+        self._delete(call.message.chat.id, call.message.message_id)
+        try:
+            self.bot.send_message(
+                call.message.chat.id,
+                texto,
+                parse_mode="HTML",
+                reply_markup=markup,
+                message_thread_id=thread_id,
+            )
+        except Exception as exc:
+            logger.error(f"_send_text: {exc}", exc_info=True)
+
+    def _check_owner(self, call: types.CallbackQuery, owner_id: int) -> bool:
+        if call.from_user.id != owner_id:
+            self._answer(call, "🚫 Este menú no es tuyo.", alert=True)
+            return False
+        return True
+
+    # ── /menu ────────────────────────────────────────────────────────────────
+
+    def cmd_menu(self, message: types.Message) -> None:
+        if not message.from_user:
+            return
+        uid = message.from_user.id
+        if not db_manager.user_exists(uid):
+            self.bot.reply_to(message, "⚠️ Registrate primero con /registrar")
+            return
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("📦 Abrir Sobre",  callback_data=f"pc_sobres:{uid}"),
+            types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+            types.InlineKeyboardButton("❌ Cerrar",        callback_data=f"pc_cerrar:{uid}"),
+        )
+        self.bot.send_message(
+            message.chat.id,
+            f"🎴 <b>Photocards</b>\n\n💰 Precio por sobre: <b>{COSTO_SOBRE} cosmos</b> · 5 cartas",
+            parse_mode="HTML",
+            reply_markup=markup,
+            message_thread_id=getattr(message, "message_thread_id", None),
+        )
+
+    # ── dispatch ──────────────────────────────────────────────────────────────
+
+    def handle_callback(self, call: types.CallbackQuery) -> None:
+        # formato: pc_<accion>:<owner_id>[:<extra1>[:<extra2>]]
+        if not call.data or not call.from_user:
+            return
+        partes = call.data.split(":")
+        accion = partes[0]
+
+        try:
+            owner_id = int(partes[1])
+        except (IndexError, ValueError):
+            return
+
+        if not self._check_owner(call, owner_id):
+            return
+
+        try:
+            if accion == "pc_cerrar":
+                self._answer(call)
+                self._delete(call.message.chat.id, call.message.message_id)
+
+            elif accion == "pc_menu":
+                self._show_menu(call, owner_id)
+
+            elif accion == "pc_sobres":
+                self._show_albums_sobre(call, owner_id)
+
+            elif accion == "pc_abrir":
+                # pc_abrir:<owner>:<album_key>
+                album_key = partes[2] if len(partes) > 2 else ""
+                self._abrir_sobre(call, owner_id, album_key)
+
+            elif accion == "pc_coleccion":
+                self._show_coleccion(call, owner_id)
+
+            elif accion == "pc_album":
+                # pc_album:<owner>:<album_key>:<pagina>[:<from_photo>]
+                # from_photo=1 indica que el mensaje actual es una foto (carta detalle)
+                # y hay que borrar+enviar en lugar de editar.
+                album_key  = partes[2] if len(partes) > 2 else ""
+                pagina     = int(partes[3]) if len(partes) > 3 else 0
+                from_photo = len(partes) > 4 and partes[4] == "1"
+                self._show_cartas_album(call, owner_id, album_key, pagina, from_photo=from_photo)
+
+            elif accion == "pc_carta":
+                # pc_carta:<owner>:<carta_id>
+                carta_id = int(partes[2]) if len(partes) > 2 else 0
+                self._show_carta_detalle(call, owner_id, carta_id)
+
+            elif accion == "pc_vender_todo":
+                carta_id = int(partes[2]) if len(partes) > 2 else 0
+                self._vender_todo(call, owner_id, carta_id)
+
+            elif accion == "pc_vender_rep":
+                carta_id = int(partes[2]) if len(partes) > 2 else 0
+                self._vender_repetidas(call, owner_id, carta_id)
+
+            elif accion == "pc_intercambiar":
+                carta_id = int(partes[2]) if len(partes) > 2 else 0
+                self._intercambiar(call, owner_id, carta_id)
+
+        except Exception as exc:
+            logger.error(f"handle_callback ({call.data}): {exc}", exc_info=True)
+            self._answer(call, "❌ Error inesperado.", alert=True)
+
+    # ── menú principal ────────────────────────────────────────────────────────
+
+    def _show_menu(self, call: types.CallbackQuery, uid: int) -> None:
+        self._answer(call)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("📦 Abrir Sobre",  callback_data=f"pc_sobres:{uid}"),
+            types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+            types.InlineKeyboardButton("❌ Cerrar",        callback_data=f"pc_cerrar:{uid}"),
+        )
+        self._edit(
+            call,
+            f"🎴 <b>Photocards</b>\n\n💰 Precio por sobre: <b>{COSTO_SOBRE} cosmos</b> · 5 cartas",
+            markup,
+        )
+
+    # ── abrir sobre ───────────────────────────────────────────────────────────
+
+    def _show_albums_sobre(self, call: types.CallbackQuery, uid: int) -> None:
+        self._answer(call)
+        albums = photocards_service.obtener_albums_disponibles()
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        for alb in albums:
+            markup.add(types.InlineKeyboardButton(
+                f"🎴 {alb['name']}  ({alb['total_cartas']} cartas)",
+                callback_data=f"pc_abrir:{uid}:{alb['key']}",
+            ))
+        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_menu:{uid}"))
+        self._edit(call, f"📦 <b>Elegí el álbum</b>\nCosto: <b>{COSTO_SOBRE} cosmos</b> · 5 cartas", markup)
+
+    def _abrir_sobre(self, call: types.CallbackQuery, uid: int, album_key: str) -> None:
+        self._answer(call)
+        volver = types.InlineKeyboardMarkup().add(
+            types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_sobres:{uid}")
+        )
+        saldo = economy_service.get_balance(uid)
+        if saldo < COSTO_SOBRE:
+            self._edit(call, f"❌ Necesitás <b>{COSTO_SOBRE}</b> cosmos, tenés <b>{saldo}</b>.", volver)
+            return
+        if not economy_service.subtract_credits(uid, COSTO_SOBRE, "Apertura sobre photocards"):
+            self._edit(call, "❌ Error al descontar cosmos.", volver)
+            return
+        exito, _, cartas = photocards_service.abrir_sobre(uid, album_key)
+        if not exito or not cartas:
+            economy_service.add_credits(uid, COSTO_SOBRE, "Reembolso sobre fallido")
+            self._edit(call, "❌ Error al abrir el sobre. Cosmos reembolsados.", volver)
+            return
+        nombre_album = photocards_service.config_albums.get(album_key, {}).get("name", album_key)
+        lineas = [f"{RAREZA_EMOJI.get(c.rareza,'⚪')} <b>{c.nombre}</b> — {c.rareza.capitalize()}" for c in cartas]
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("📦 Otro sobre",   callback_data=f"pc_abrir:{uid}:{album_key}"),
+            types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+        )
+        markup.add(types.InlineKeyboardButton("⬅️ Menú", callback_data=f"pc_menu:{uid}"))
+        self._edit(call,
+            f"🎉 <b>¡Sobre de {nombre_album} abierto!</b>\n"
+            f"💰 Saldo restante: <b>{economy_service.get_balance(uid)} cosmos</b>\n\n"
+            "🃏 <b>Cartas obtenidas:</b>\n" + "\n".join(lineas), markup)
+
+    # ── mi colección ──────────────────────────────────────────────────────────
+
+    def _show_coleccion(self, call: types.CallbackQuery, uid: int) -> None:
+        self._answer(call)
+
+        albums_usuario = photocards_service.get_albums_usuario(uid)
+
+        if not albums_usuario:
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("📦 Abrir Sobre", callback_data=f"pc_sobres:{uid}"),
+                types.InlineKeyboardButton("⬅️ Volver",      callback_data=f"pc_menu:{uid}"),
+            )
+            self._edit(call, "📭 <b>Mi Colección</b>\n\nNo tenés ninguna photocard todavía.", markup)
+            return
+
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        lineas: List[str] = []
+
+        for album_key in albums_usuario:
+            nombre_album = photocards_service.config_albums[album_key]["name"]
+            # total = archivos contados al indexar
+            total        = photocards_service.get_total_album(album_key)
+            # obtenidas = cartaIDs distintos del usuario en este álbum
+            obtenidas    = len(photocards_service.get_cartas_usuario_en_album(uid, album_key))
+
+            lineas.append(f"📂 <b>{nombre_album}</b>: {obtenidas}/{total}")
+            markup.add(types.InlineKeyboardButton(
+                f"📂 {nombre_album} ({obtenidas}/{total})",
+                callback_data=f"pc_album:{uid}:{album_key}:0",
+            ))
+
+        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_menu:{uid}"))
+        self._edit(call, "🗂️ <b>Mi Colección</b>\n\n" + "\n".join(lineas), markup)
+
+    # ── cartas del álbum ──────────────────────────────────────────────────────
+
+    def _show_cartas_album(self, call: types.CallbackQuery, uid: int, album_key: str, pagina: int, from_photo: bool = False) -> None:
+        self._answer(call)
+
+        cartas = photocards_service.get_cartas_usuario_en_album(uid, album_key)
+
+        nombre_album = photocards_service.config_albums.get(album_key, {}).get("name", album_key)
+        total        = photocards_service.get_total_album(album_key)
+
+        # Elegir el método correcto según el tipo de mensaje origen:
+        # Si venimos de una foto (carta detalle), hay que borrar y enviar texto nuevo.
+        # Si venimos de texto (paginación), podemos editar directamente.
+        render = self._send_text if from_photo else self._edit
+
+        if not cartas:
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_coleccion:{uid}"))
+            render(call, f"📭 No tenés cartas en <b>{nombre_album}</b>.", markup)
+            return
+
+        obtenidas = len(cartas)
+
+        # ordenar legendaria → rara → común, A→Z
+        def sort_key(cid: int):
+            pc = photocards_service.get_carta_by_id(cid)
+            return (ORDEN_RAREZA.get(pc.rareza, 9), pc.nombre) if pc else (9, "")
+
+        ids_ordenados = sorted(cartas.keys(), key=sort_key)
+        total_pags    = max(1, (len(ids_ordenados) + CARTAS_POR_PAGINA - 1) // CARTAS_POR_PAGINA)
+        pagina        = max(0, min(pagina, total_pags - 1))
+        ids_pagina    = ids_ordenados[pagina * CARTAS_POR_PAGINA:(pagina + 1) * CARTAS_POR_PAGINA]
+
+        markup = types.InlineKeyboardMarkup(row_width=COLUMNAS)
+        fila: List[types.InlineKeyboardButton] = []
+
+        for cid in ids_pagina:
+            pc    = photocards_service.get_carta_by_id(cid)
+            cant  = cartas[cid]
+            if pc is None:
+                # ID en DB pero no en índice en memoria: mostrar placeholder
+                # para que el usuario pueda verla (puede ocurrir si las imágenes
+                # no estaban disponibles al arrancar).
+                logger.warning(f"_show_cartas_album: cartaID={cid} no está en todas_las_cartas")
+                fila.append(types.InlineKeyboardButton(
+                    f"❓ Carta #{cid} ×{cant}",
+                    callback_data=f"pc_carta:{uid}:{cid}",
+                ))
+            else:
+                emoji = RAREZA_EMOJI.get(pc.rareza, "⚪")
+                fila.append(types.InlineKeyboardButton(
+                    f"{emoji} {pc.nombre} ×{cant}",
+                    callback_data=f"pc_carta:{uid}:{cid}",
+                ))
+            if len(fila) == COLUMNAS:
+                markup.row(*fila)
+                fila = []
+        if fila:
+            markup.row(*fila)
+
+        # paginación
+        nav: List[types.InlineKeyboardButton] = []
+        if pagina > 0:
+            nav.append(types.InlineKeyboardButton("⬅️", callback_data=f"pc_album:{uid}:{album_key}:{pagina-1}"))
+        if pagina < total_pags - 1:
+            nav.append(types.InlineKeyboardButton("➡️", callback_data=f"pc_album:{uid}:{album_key}:{pagina+1}"))
+        if nav:
+            markup.row(*nav)
+
+        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_coleccion:{uid}"))
+
+        render(call,
+            f"📂 <b>{nombre_album}</b>  ({obtenidas}/{total})\n"
+            f"Página {pagina+1}/{total_pags} — tocá una carta:",
+            markup)
+
+    # ── detalle de carta ──────────────────────────────────────────────────────
+
+    def _show_carta_detalle(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
+        self._answer(call)
+        pc = photocards_service.get_carta_by_id(carta_id)
+        if pc is None:
+            self._edit(call, "❌ Carta no encontrada.")
+            return
+        cantidad = photocards_service.get_cantidad_carta(uid, carta_id)
+        if cantidad == 0:
+            self._edit(call, "❌ No tenés esta carta.")
+            return
+
+        precio_unit  = photocards_service.precios_venta.get(pc.rareza, 2)
+        nombre_album = photocards_service.config_albums.get(pc.album, {}).get("name", pc.album)
+        emoji        = RAREZA_EMOJI.get(pc.rareza, "⚪")
+
+        caption = (
+            f"{emoji} <b>{pc.nombre}</b>\n"
+            f"📀 Álbum: <b>{nombre_album}</b>  ·  ✨ <b>{pc.rareza.capitalize()}</b>\n"
+            f"🔢 Cantidad: <b>{cantidad}</b>  ·  💰 <b>{precio_unit} cosmos</b> c/u"
+        )
+
+        markup = types.InlineKeyboardMarkup(row_width=2)
+        markup.add(
+            types.InlineKeyboardButton("🔄 Intercambiar",      callback_data=f"pc_intercambiar:{uid}:{carta_id}"),
+            types.InlineKeyboardButton("💰 Vender todo",       callback_data=f"pc_vender_todo:{uid}:{carta_id}"),
+        )
+        if cantidad > 1:
+            markup.add(types.InlineKeyboardButton(
+                f"🃏 Liquidar repetidas (×{cantidad-1})",
+                callback_data=f"pc_vender_rep:{uid}:{carta_id}",
+            ))
+        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_album:{uid}:{pc.album}:0:1"))
+
+        thread_id = getattr(call.message, "message_thread_id", None)
+        try:
+            with open(pc.path, "rb") as foto:
+                self.bot.send_photo(
+                    call.message.chat.id,
+                    foto,
+                    caption=caption,
+                    parse_mode="HTML",
+                    reply_markup=markup,
+                    message_thread_id=thread_id,
+                )
+            self._delete(call.message.chat.id, call.message.message_id)
+        except FileNotFoundError:
+            # Imagen no disponible en disco: mostrar detalle solo con texto
+            logger.warning(f"Imagen no encontrada: {pc.path}")
+            self._edit(call, caption, markup)
+        except Exception as exc:
+            logger.error(f"_show_carta_detalle send_photo: {exc}", exc_info=True)
+            self._edit(call, caption, markup)
+
+    # ── vender ────────────────────────────────────────────────────────────────
+
+    def _vender_todo(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
+        self._answer(call)
+        cantidad = photocards_service.get_cantidad_carta(uid, carta_id)
+        if cantidad == 0:
+            self._edit(call, "❌ No tenés esta carta.")
+            return
+        exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, cantidad)
+        pc     = photocards_service.get_carta_by_id(carta_id)
+        nombre = pc.nombre if pc else f"#{carta_id}"
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+            types.InlineKeyboardButton("⬅️ Menú",          callback_data=f"pc_menu:{uid}"),
+        )
+        if exito:
+            self._edit(call, f"✅ Vendiste <b>{nombre} ×{cantidad}</b>\n💰 +<b>{cosmos} cosmos</b>  |  Saldo: <b>{economy_service.get_balance(uid)}</b>", markup)
+        else:
+            self._edit(call, f"❌ {msg}", markup)
+
+    def _vender_repetidas(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
+        self._answer(call)
+        cantidad = photocards_service.get_cantidad_carta(uid, carta_id)
+        pc       = photocards_service.get_carta_by_id(carta_id)
+        nombre   = pc.nombre if pc else f"#{carta_id}"
+        markup   = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+            types.InlineKeyboardButton("⬅️ Menú",          callback_data=f"pc_menu:{uid}"),
+        )
+        if cantidad <= 1:
+            self._edit(call, "ℹ️ Solo tenés 1 copia, no hay repetidas.", markup)
+            return
+        vender = cantidad - 1
+        exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, vender)
+        if exito:
+            self._edit(call, f"✅ Liquidaste <b>{vender} copia(s) de {nombre}</b> — te quedás con 1.\n💰 +<b>{cosmos} cosmos</b>  |  Saldo: <b>{economy_service.get_balance(uid)}</b>", markup)
+        else:
+            self._edit(call, f"❌ {msg}", markup)
+
+    # ── intercambiar ──────────────────────────────────────────────────────────
+
+    def _intercambiar(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
+        """
+        Punto de entrada al flujo de intercambio DIRECTO P2P.
+
+        Pide al usuario A que mencione con quién quiere intercambiar.
+        Toda la lógica de sesión y confirmaciones vive en IntercambioHandler
+        (_pcd_*). Este método solo arranca el flujo.
+        """
+        self._answer(call)
+        pc = photocards_service.get_carta_by_id(carta_id)
+        if pc is None:
+            self._edit(call, "❌ Carta no encontrada.")
+            return
+        emoji = RAREZA_EMOJI.get(pc.rareza, "⚪")
+
+        from handlers.intercambio_handler import _pc_direct_iniciar_oferta
+        _pc_direct_iniciar_oferta(
+            bot        = self.bot,
+            call       = call,
+            oferente_id= uid,
+            carta_id   = carta_id,
+            pc         = pc,
+            emoji      = emoji,
+        )
+
+
+def setup(bot: telebot.TeleBot) -> None:
+    PhotocardsHandlers(bot)
+    logger.info("✅ PhotocardsHandlers registrados.")
