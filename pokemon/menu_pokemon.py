@@ -1860,6 +1860,29 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_centro(user_id: int, message, bot):
+        # No se puede usar el Centro Pokémon durante una batalla activa.
+        try:
+            from pokemon.wild_battle_system import wild_battle_manager
+            from pokemon.gym_battle_system import gym_manager
+            from pokemon.pvp_battle_system import pvp_manager
+            if (
+                wild_battle_manager.has_active_battle(user_id)
+                or gym_manager.has_active_battle(user_id)
+                or pvp_manager.has_active_battle(user_id)
+            ):
+                markup = types.InlineKeyboardMarkup()
+                markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+                MenuPokemon._edit_or_send(
+                    message, bot, user_id,
+                    "⚔️ <b>¡Estás en combate!</b>\n\n"
+                    "No puedes usar el Centro Pokémon durante una batalla.\n"
+                    "Termina o huye del combate primero.",
+                    markup,
+                )
+                return
+        except Exception:
+            pass
+
         estado = centro_pokemon.verificar_estado_equipo(user_id)
 
         texto = f"⭐ <b>CENTRO POKÉMON</b>\n\n💰 Costo: <b>{centro_pokemon.COSTO_CURACION}</b> cosmos\n\n"
@@ -1889,6 +1912,26 @@ class MenuPokemon:
     @staticmethod
     def _procesar_curacion(user_id: int, call, bot):
         """Ejecuta la curación y actualiza el mensaje con el resultado."""
+        # Doble chequeo: el botón puede presionarse aunque la sesión de menú
+        # fuera abierta antes de iniciar el combate.
+        try:
+            from pokemon.wild_battle_system import wild_battle_manager
+            from pokemon.gym_battle_system import gym_manager
+            from pokemon.pvp_battle_system import pvp_manager
+            if (
+                wild_battle_manager.has_active_battle(user_id)
+                or gym_manager.has_active_battle(user_id)
+                or pvp_manager.has_active_battle(user_id)
+            ):
+                bot.answer_callback_query(
+                    call.id,
+                    "⚔️ No puedes curar durante un combate.",
+                    show_alert=True,
+                )
+                return
+        except Exception:
+            pass
+
         ok, msg = centro_pokemon.curar_equipo(user_id)
         try:
             bot.answer_callback_query(call.id, "✅ Curado!" if ok else "❌ Error", show_alert=False)
