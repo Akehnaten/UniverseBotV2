@@ -80,10 +80,29 @@ class PokemonHandlers:
         self.bot.register_message_handler(self.cmd_salvaje,  commands=['salvaje'])
         self.bot.register_message_handler(self.cmd_pokedex, commands=['pokedex'])
 
-        # Contar pasos de guardería en mensajes de texto del DM
+        # ── Pasos de guardería: mensajes de TEXTO en GRUPO (excluye comandos) ─
+        # Solo mensajes que no son comandos — los comandos los manejan sus
+        # propios handlers. Si este handler captura comandos, los consumiría
+        # antes de que lleguen a /pokemon, /salvaje, etc.
+        self.bot.register_message_handler(
+            self._handle_texto_grupo,
+            func=lambda m: (
+                m.chat.type in ('group', 'supergroup')
+                and m.content_type == 'text'
+                and not (m.text or '').startswith('/')
+            ),
+        )
+
+        # ── Captura de mote tras eclosión: solo en DM (excluye comandos) ────────
+        # Sin este filtro, /pokemon y otros comandos enviados en privado
+        # son capturados aquí antes de llegar a sus handlers de comando.
         self.bot.register_message_handler(
             self._handle_texto_privado,
-            func=lambda m: m.chat.id == m.from_user.id and m.content_type == 'text',
+            func=lambda m: (
+                m.chat.id == m.from_user.id
+                and m.content_type == 'text'
+                and not (m.text or '').startswith('/')
+            ),
         )
 
         @self.bot.callback_query_handler(func=lambda call: call.data.startswith('mt_'))
@@ -148,16 +167,33 @@ class PokemonHandlers:
     # TEXTO PRIVADO (mote de guardería + pasos)
     # ──────────────────────────────────────────────────────────────────────────
 
+    # ──────────────────────────────────────────────────────────────────────────
+    # TEXTO EN GRUPO (pasos de guardería)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    def _handle_texto_grupo(self, message):
+        """
+        Intercepta mensajes de texto en el grupo para sumar pasos a los huevos
+        del usuario.  Cada palabra del mensaje cuenta como 1 paso base.
+
+        Multiplicadores aplicados en crianza_service.sumar_pasos():
+          - Amuleto Iris (usuario):          x2 global.
+          - Cuerpo Llama (Pokémon en equipo): x2 global.
+        """
+        from pokemon.guarderia_steps import sumar_pasos_mensaje
+        sumar_pasos_mensaje(self.bot, message)
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # TEXTO PRIVADO (captura de mote tras eclosión)
+    # ──────────────────────────────────────────────────────────────────────────
+
     def _handle_texto_privado(self, message):
         """
-        Intercepta mensajes de texto en chat privado:
-        1. Si el usuario espera poner mote a un Pokémon recién nacido, lo consume.
-        2. En cualquier caso, suma pasos de guardería.
+        Intercepta mensajes de texto en chat privado para capturar el apodo
+        de un Pokémon recién nacido.  Si no hay apodo pendiente, ignora.
         """
-        from pokemon.guarderia_steps import interceptar_mote, sumar_pasos_mensaje
-        if interceptar_mote(self.bot, message):
-            return
-        sumar_pasos_mensaje(self.bot, message)
+        from pokemon.guarderia_steps import interceptar_mote
+        interceptar_mote(self.bot, message)
 
     # ──────────────────────────────────────────────────────────────────────────
     # /pokemon

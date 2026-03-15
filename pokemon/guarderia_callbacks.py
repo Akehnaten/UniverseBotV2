@@ -145,11 +145,8 @@ class GuarderiaCallbacks:
                 self.bot.answer_callback_query(call.id, "❌ ID inválido")
                 return
 
-            db_manager.execute_update(
-                "DELETE FROM HUEVOS WHERE id = ? AND userID = ?",
-                (huevo_id, user_id)
-            )
-            self.bot.answer_callback_query(call.id, "🥚 Huevo retirado.")
+            ok, msg = crianza_service.retirar_huevo(user_id, huevo_id)
+            self.bot.answer_callback_query(call.id, msg, show_alert=not ok)
             MenuPokemon._mostrar_guarderia(user_id, call.message, self.bot)
 
         else:

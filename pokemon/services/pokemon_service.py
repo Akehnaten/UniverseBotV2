@@ -176,7 +176,33 @@ class PokemonService:
     
     def obtener_equipo(self, user_id: int) -> List["Pokemon"]:
         """
-        Obtiene el equipo Pokémon del usuario (máximo 6).
+        Obtiene los Pokémon del equipo aptos para combatir (excluye huevos).
+
+        El filtro de huevos se aplica en Python (no en SQL) para que funcione
+        de forma segura incluso si la columna es_huevo aún no existe en DBs
+        antiguas — row.get('es_huevo') devuelve None, que se trata como 0.
+        """
+        results = self.db.execute_query(
+            """
+            SELECT * FROM POKEMON_USUARIO
+            WHERE userID = ? AND en_equipo = 1
+            ORDER BY COALESCE(posicion_equipo, id_unico)
+            LIMIT 6
+            """,
+            (user_id,)
+        )
+        return [
+            self._row_a_pokemon(dict(row))
+            for row in results
+            if not int(dict(row).get('es_huevo') or 0)
+        ]
+
+    def obtener_equipo_completo(self, user_id: int) -> List["Pokemon"]:
+        """
+        Obtiene todos los slots del equipo del usuario, incluyendo huevos.
+
+        Usar para mostrar el equipo en la UI (menú Pokémon) y para calcular
+        cuántos slots libres hay antes de agregar un Pokémon o huevo.
         """
         results = self.db.execute_query(
             """
@@ -588,10 +614,46 @@ class PokemonService:
         """
         Convierte una fila de POKEMON_USUARIO al dataclass Pokemon.
 
-        Prioriza los stats persistidos en BD (columnas ps/atq/def/…).
-        Si las columnas son 0 (BD antigua o fila sin stats), recalcula
-        en tiempo real como fallback — no falla la sesión.
+        Si la fila es un placeholder de huevo (es_huevo=1), devuelve un
+        objeto especial con nombre "🥚 Huevo de X", stats en 0 y hp_actual=0.
+        Estos objetos aparecen en obtener_equipo_completo() pero no en
+        obtener_equipo() (que excluye huevos para que no combatan).
+
+        Para filas normales: prioriza stats persistidos en BD.
+        Si las columnas son 0 (BD antigua), recalcula en tiempo real como
+        fallback sin romper la sesión.
         """
+        es_huevo = bool(int(row.get("es_huevo") or 0))
+
+        if es_huevo:
+            # Nombre de la especie que nacerá del huevo
+            nombre_especie = self.pokedex.obtener_nombre(row.get("pokemonID", 0))
+            # El apodo almacenado es "Huevo de X" — si no está, construirlo
+            nombre_display = row.get("apodo") or f"Huevo de {nombre_especie}"
+            stats_vacias = {k: 0 for k in ("hp", "atq", "def", "atq_sp", "def_sp", "vel")}
+            ivs_vacias   = {k: 0 for k in ("hp", "atq", "def", "atq_sp", "def_sp", "vel")}
+            return self.Pokemon(
+                id_unico      = row["id_unico"],
+                pokemonID     = row.get("pokemonID", 0),
+                usuario_id    = row["userID"],
+                nombre        = "🥚 " + nombre_display,
+                mote          = nombre_display,
+                nivel         = 0,
+                exp           = 0,
+                hp_actual     = 0,
+                stats         = stats_vacias,
+                ivs           = ivs_vacias,
+                evs           = ivs_vacias.copy(),
+                naturaleza    = "Hardy",
+                habilidad     = None,
+                shiny         = bool(row.get("shiny", 0)),
+                sexo          = None,
+                movimientos   = [],
+                en_equipo     = bool(row.get("en_equipo", 0)),
+                objeto        = None,
+                fecha_captura = None,
+            )
+
         nombre = self.pokedex.obtener_nombre(row.get("pokemonID", 0))
 
         movimientos = [
