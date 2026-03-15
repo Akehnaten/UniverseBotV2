@@ -35,6 +35,7 @@ from telebot import types
 from config import MSG_USUARIO_NO_REGISTRADO
 from funciones import economy_service, user_service
 from funciones.roulette_service import (
+    NUMEROS_ROJOS as _ROJOS,
     PAGOS,
     TIPOS_APUESTA,
     color_numero,
@@ -124,64 +125,53 @@ def _detalle_legible(tipo: str, detalle: str) -> str:
 
 # ─── Teclados inline ─────────────────────────────────────────────────────────
 
-def _kb_menu_principal() -> types.InlineKeyboardMarkup:
-    """Menú raíz: selección del tipo de apuesta."""
-    kb = types.InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        types.InlineKeyboardButton("🎯 Pleno (35×)",      callback_data="rl:tipo:pleno"),
-        types.InlineKeyboardButton("🐴 Caballo (17×)",    callback_data="rl:tipo:caballo"),
-        types.InlineKeyboardButton("🛣️ Calle (11×)",      callback_data="rl:tipo:calle"),
-        types.InlineKeyboardButton("⬛ Cuadro (8×)",      callback_data="rl:tipo:cuadro"),
-        types.InlineKeyboardButton("📏 Línea (5×)",       callback_data="rl:tipo:linea"),
-        types.InlineKeyboardButton("🏛️ Columna (2×)",     callback_data="rl:tipo:columna"),
-        types.InlineKeyboardButton("📦 Docena (2×)",      callback_data="rl:tipo:docena"),
-        types.InlineKeyboardButton("🔴⚫ Color (1×)",     callback_data="rl:tipo:color"),
-        types.InlineKeyboardButton("2️⃣ Par / Impar (1×)", callback_data="rl:tipo:paridad"),
-        types.InlineKeyboardButton("⬆️ Baja / Alta (1×)", callback_data="rl:tipo:mitad"),
-    )
-    kb.add(types.InlineKeyboardButton("❌ Cancelar", callback_data="rl:cancelar"))
-    return kb
+
 
 
 def _fila_pano(fila: int, cb_prefix: str) -> list:
     """
-    Genera los 12 botones de una fila del paño de ruleta.
+    Genera los 3 botones de una fila del paño vertical.
 
-    Layout del paño (igual que roulette_service.numeros_adyacentes):
-      fila 3 (tope):  3,  6,  9, 12, 15, 18, 21, 24, 27, 30, 33, 36
-      fila 2 (medio): 2,  5,  8, 11, 14, 17, 20, 23, 26, 29, 32, 35
-      fila 1 (base):  1,  4,  7, 10, 13, 16, 19, 22, 25, 28, 31, 34
+    Layout real del paño (igual que la imagen física, de arriba a abajo):
+      fila  1:  1  2  3
+      fila  2:  4  5  6
+      fila  3:  7  8  9
+      ...
+      fila 12: 34 35 36
+
+    Cada fila tiene 3 números consecutivos: base = (fila-1)*3 + 1.
 
     Args:
-        fila:      3, 2 o 1
+        fila:      1..12
         cb_prefix: prefijo del callback_data ("rl:num" o "rl:cab1")
     """
-    # Cada columna del paño agrupa 3 números: col k → k*3-2, k*3-1, k*3
-    # La fila indica el offset dentro de cada grupo: fila 1=base, 2=medio, 3=tope
-    nums = [col * 3 - (3 - fila) for col in range(1, 13)]
-    btns = []
-    for n in nums:
-        emoji = "🔴" if n in _ROJOS else "⚫"
-        btns.append(
-            types.InlineKeyboardButton(f"{emoji}{n}", callback_data=f"{cb_prefix}:{n}")
+    base = (fila - 1) * 3 + 1
+    nums = [base, base + 1, base + 2]
+    return [
+        types.InlineKeyboardButton(
+            f"{'🔴' if n in _ROJOS else '⚫'}{n}",
+            callback_data=f"{cb_prefix}:{n}",
         )
-    return btns
+        for n in nums
+    ]
 
 
 def _kb_numeros_pleno() -> types.InlineKeyboardMarkup:
     """
-    Grilla numérica para elegir pleno.
-    Respeta el layout real del paño: 3 filas × 12 columnas + 0 aparte.
+    Grilla numérica para elegir pleno — layout vertical del paño real.
 
-      Fila 3:  3  6  9 12 15 18 21 24 27 30 33 36
-      Fila 2:  2  5  8 11 14 17 20 23 26 29 32 35
-      Fila 1:  1  4  7 10 13 16 19 22 25 28 31 34
+    12 filas de 3 botones, igual que el paño físico (de arriba a abajo):
+      fila  1:  🔴1  ⚫2  🔴3
+      fila  2:  ⚫4  🔴5  ⚫6
+      ...
+      fila 12:  ⚫34 ⚫35 🔴36
+
+    El 0 se muestra solo en la parte superior, como en el paño real.
     """
-    kb = types.InlineKeyboardMarkup(row_width=12)
-    kb.add(types.InlineKeyboardButton("0 💚", callback_data="rl:num:0"))
-    kb.row(*_fila_pano(3, "rl:num"))
-    kb.row(*_fila_pano(2, "rl:num"))
-    kb.row(*_fila_pano(1, "rl:num"))
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    kb.add(types.InlineKeyboardButton("💚 0", callback_data="rl:num:0"))
+    for fila in range(1, 13):
+        kb.row(*_fila_pano(fila, "rl:num"))
     kb.add(types.InlineKeyboardButton("↩️ Volver", callback_data="rl:volver"))
     return kb
 
@@ -189,12 +179,11 @@ def _kb_numeros_pleno() -> types.InlineKeyboardMarkup:
 def _kb_numeros_caballo_1() -> types.InlineKeyboardMarkup:
     """
     Paso 1 del caballo: elige el primer número.
-    Misma grilla real del paño que _kb_numeros_pleno.
+    Mismo layout vertical del paño real (sin el 0, no aplica para split).
     """
-    kb = types.InlineKeyboardMarkup(row_width=12)
-    kb.row(*_fila_pano(3, "rl:cab1"))
-    kb.row(*_fila_pano(2, "rl:cab1"))
-    kb.row(*_fila_pano(1, "rl:cab1"))
+    kb = types.InlineKeyboardMarkup(row_width=3)
+    for fila in range(1, 13):
+        kb.row(*_fila_pano(fila, "rl:cab1"))
     kb.add(types.InlineKeyboardButton("↩️ Volver", callback_data="rl:volver"))
     return kb
 
@@ -337,8 +326,82 @@ def _kb_confirmar() -> types.InlineKeyboardMarkup:
     return kb
 
 
-# Set auxiliar para el teclado numérico (evita importar el módulo dos veces)
-from funciones.roulette_service import NUMEROS_ROJOS as _ROJOS  # noqa: E402
+def _kb_tablero() -> types.InlineKeyboardMarkup:
+    """
+    Tablero completo de ruleta, equivalente al paño físico.
+
+    Layout (de arriba a abajo):
+      ── 0 (pleno directo) ─────────────────────────────────────
+      ── Números 1-36 · 12 filas × 3 botones (pleno directo) ──
+      ── Docenas  1ª / 2ª / 3ª  (apuesta directa, 2×) ─────────
+      ── Columnas 1 / 2 / 3     (apuesta directa, 2×) ─────────
+      ── 1-18 · PAR · 🔴 · ⚫ · IMPAR · 19-36  (directa, 1×) ──
+      ── Caballo · Calle · Cuadro · Línea  (sub-menú) ──────────
+      ── ❌ Cancelar ────────────────────────────────────────────
+
+    Callbacks:
+      rl:pltab:<n>          → pleno directo al número n
+      rl:extab:<tipo>:<det> → apuesta externa directa (tipo+detalle ya definidos)
+      rl:tipo:<tipo>        → abre sub-menú de detalle (caballo/calle/cuadro/línea)
+    """
+    kb = types.InlineKeyboardMarkup(row_width=3)
+
+    # ── 0 ─────────────────────────────────────────────────────────────────────
+    kb.row(types.InlineKeyboardButton("💚 0  (Pleno 35×)", callback_data="rl:pltab:0"))
+
+    # ── Números 1-36 ──────────────────────────────────────────────────────────
+    for fila in range(1, 13):
+        base = (fila - 1) * 3 + 1
+        kb.row(*[
+            types.InlineKeyboardButton(
+                ("🔴" if n in _ROJOS else "⚫") + str(n),
+                callback_data=f"rl:pltab:{n}",
+            )
+            for n in (base, base + 1, base + 2)
+        ])
+
+    # ── Docenas ───────────────────────────────────────────────────────────────
+    kb.row(
+        types.InlineKeyboardButton("📦 1ª Doc  1-12",  callback_data="rl:extab:docena:1"),
+        types.InlineKeyboardButton("📦 2ª Doc 13-24",  callback_data="rl:extab:docena:2"),
+        types.InlineKeyboardButton("📦 3ª Doc 25-36",  callback_data="rl:extab:docena:3"),
+    )
+
+    # ── Columnas ──────────────────────────────────────────────────────────────
+    kb.row(
+        types.InlineKeyboardButton("🏛️ Col.1  2to1", callback_data="rl:extab:columna:1"),
+        types.InlineKeyboardButton("🏛️ Col.2  2to1", callback_data="rl:extab:columna:2"),
+        types.InlineKeyboardButton("🏛️ Col.3  2to1", callback_data="rl:extab:columna:3"),
+    )
+
+    # ── Apuestas simples ──────────────────────────────────────────────────────
+    kb.row(
+        types.InlineKeyboardButton("⬇️ 1-18",  callback_data="rl:extab:mitad:baja"),
+        types.InlineKeyboardButton("2️⃣ PAR",   callback_data="rl:extab:paridad:par"),
+        types.InlineKeyboardButton("🔴 Rojo",  callback_data="rl:extab:color:rojo"),
+        types.InlineKeyboardButton("⚫ Negro", callback_data="rl:extab:color:negro"),
+        types.InlineKeyboardButton("1️⃣ IMPAR", callback_data="rl:extab:paridad:impar"),
+        types.InlineKeyboardButton("⬆️ 19-36", callback_data="rl:extab:mitad:alta"),
+    )
+
+    # ── Apuestas con sub-menú ─────────────────────────────────────────────────
+    kb.row(
+        types.InlineKeyboardButton("🐴 Caballo 17×", callback_data="rl:tipo:caballo"),
+        types.InlineKeyboardButton("🛣️ Calle 11×",   callback_data="rl:tipo:calle"),
+    )
+    kb.row(
+        types.InlineKeyboardButton("⬛ Cuadro 8×",   callback_data="rl:tipo:cuadro"),
+        types.InlineKeyboardButton("📏 Línea 5×",    callback_data="rl:tipo:linea"),
+    )
+
+    # ── Cancelar ──────────────────────────────────────────────────────────────
+    kb.row(types.InlineKeyboardButton("❌ Cancelar", callback_data="rl:cancelar"))
+
+    return kb
+
+
+# Alias: todo el código que llamaba _kb_menu_principal sigue funcionando sin cambios
+_kb_menu_principal = _kb_tablero
 
 
 # ─── Clase principal ──────────────────────────────────────────────────────────
@@ -675,39 +738,20 @@ class RouletteHandlers:
         if accion == "repetir":
             self._repetir_apuestas(uid, call)
             return
-        
-        if accion == "nueva_apuesta":
-            # Volver al menú principal sin borrar apuestas_ronda
-            self._ir_al_menu(uid, call.message, reset_apuestas=False)
+
+        if accion == "pltab":
+            # Pleno desde el tablero: el número es el detalle directo
+            self._paso_tipo_y_detalle(uid, "pleno", valor, call.message)
             return
 
-        if accion == "listo":
-            # El usuario terminó de apostar — mostrar resumen final
-            with _sessions_lock:
-                apuestas = _sessions.get(uid, {}).get("apuestas_ronda", [])
-            total = sum(a["cosmos"] for a in apuestas)
-            resumen = "\n".join(
-                f"  • {a['tipo'].capitalize()} → {_detalle_legible(a['tipo'], a['detalle'])}"
-                f"  ({a['cosmos']:,} ✨)"
-                for a in apuestas
-            ) or "  (ninguna)"
-            self._editar(
-                call.message.chat.id, call.message.message_id,
-                f"🎡 <b>Ronda #{roulette_service.ronda}</b>\n\n"
-                f"<b>Apuestas confirmadas:</b>\n{resumen}\n\n"
-                f"💸 Total: <b>{total:,} ✨</b>\n\n"
-                "¡El resultado se publicará cuando gire la ruleta! 🍀",
-                None,
-            )
-            with _sessions_lock:
-                _sessions.pop(uid, None)
+        if accion == "extab":
+            # Apuesta externa directa desde el tablero: "extab:tipo:detalle"
+            # valor ya contiene "tipo:detalle" gracias al split(":", 2)
+            partes_ext = valor.split(":", 1)
+            if len(partes_ext) == 2:
+                self._paso_tipo_y_detalle(uid, partes_ext[0], partes_ext[1], call.message)
             return
 
-        if accion == "repetir":
-            # Repetir todas las apuestas de la ronda anterior
-            self._repetir_apuestas(uid, call)
-            return
-        
         # Verificar que la ruleta siga activa antes de continuar
         if not roulette_service.activa:
             self._editar(
@@ -758,6 +802,51 @@ class RouletteHandlers:
             message.chat.id, message.message_id,
             f"🎡 <b>{TIPOS_APUESTA[tipo]}</b>\n\n{instruccion}",
             kb,
+        )
+
+    def _paso_tipo_y_detalle(
+        self, uid: int, tipo: str, detalle: str, message: types.Message
+    ) -> None:
+        """
+        Shortcut para apuestas directas del tablero (pltab / extab).
+
+        Salta los pasos intermedios de selección de tipo y detalle:
+        inicializa la sesión con tipo+detalle ya definidos y va directo
+        al paso de monto, igual que si el usuario hubiera navegado el
+        sub-menú completo.
+        """
+        if not roulette_service.activa:
+            self._editar(
+                message.chat.id, message.message_id,
+                "⚠️ La ruleta ya no está activa.", None,
+            )
+            return
+
+        balance = economy_service.get_balance(uid)
+
+        with _sessions_lock:
+            sesion = _sessions.get(uid)
+            if sesion is None:
+                # Sesión expirada: recrear antes de continuar
+                _sessions[uid] = {
+                    "step": "monto", "tipo": tipo, "detalle": detalle,
+                    "cosmos": None, "msg_id": message.message_id,
+                    "apuestas_ronda": [],
+                }
+            else:
+                sesion["tipo"]    = tipo
+                sesion["detalle"] = detalle
+                sesion["step"]    = "monto"
+                sesion["cosmos"]  = None
+
+        det_leg = _detalle_legible(tipo, detalle)
+        self._editar(
+            message.chat.id, message.message_id,
+            f"🎡 <b>{TIPOS_APUESTA[tipo]}</b>\n"
+            f"📌 Elección: <b>{det_leg}</b>\n"
+            f"💰 Saldo disponible: <b>{balance:,} ✨</b>\n\n"
+            "¿Cuántos Cosmos apostás?",
+            _kb_montos(balance),
         )
 
     def _teclado_para_tipo(self, tipo: str):
