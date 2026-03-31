@@ -11,10 +11,10 @@ DATABASE_PATH = str(BASE_DIR / "database" / "universebot.db")
 LOG_FILE = str(BASE_DIR / "universebot.log")
 
 # ============== TELEGRAM ==============
-#TELEGRAM_TOKEN = "7075385886:AAHRz6Q5UMv6O2Ja2SKxa2GpHRQukGjtnlc" #Pruebas
-#CANAL_ID = -1002069915034 #Pruebas
-TELEGRAM_TOKEN = "7199716836:AAFjgZuL5EuIzHgLRKJUJ_zcXgzMei2ZD3w"
-CANAL_ID = -1003159895833
+TELEGRAM_TOKEN = "7075385886:AAHRz6Q5UMv6O2Ja2SKxa2GpHRQukGjtnlc" #Pruebas
+CANAL_ID = -1002069915034 #Pruebas
+#TELEGRAM_TOKEN = "7199716836:AAFjgZuL5EuIzHgLRKJUJ_zcXgzMei2ZD3w"
+#CANAL_ID = -1003159895833
 TOKEN = TELEGRAM_TOKEN  # Alias para compatibilidad
 LOG_GROUP_ID = -1002002779047
 
@@ -30,8 +30,8 @@ ROLES = 735
 ENTREVISTAS = 2856
 EVENTOS = 2655
 DEPORTES = 3056
-POKECLUB = 406145
-#POKECLUB = 884 #TEST
+#POKECLUB = 406145
+POKECLUB = 884 #TEST
 
 # ============== ENTREVISTAS ==============
 CANAL_ENTREVISTAS = ENTREVISTAS
@@ -40,7 +40,7 @@ INVITADOS_TEMPORALES = []
 
 # ============== POKÉMON ==============
 POKEMON_THREAD = POKECLUB
-POKEMON_REGION_SERVIDOR = "KANTO"  # ✅ Agregado para batalla_vgc_service
+POKEMON_REGION_SERVIDOR = "JHOTO"  # ✅ Agregado para batalla_vgc_service
 # Multiplicador de EXP respecto a los juegos oficiales.
 # 1.0 = idéntico a los juegos. 2.0 = la mitad de batallas necesarias para subir de nivel.
 POKEMON_EXP_MULTIPLIER = 10.0
@@ -81,7 +81,7 @@ MSG_SIN_PERMISOS = "❌ No tienes permisos"
 
 # ============== ADMINISTRACIÓN ==============
 ADMIN_IDS = []
-APOSTADOR: int = 1315980894   # puede abrir/cerrar mesas de apuestas
+APOSTADOR: int = 7767552612   # puede abrir/cerrar mesas de apuestas
 LOG_LEVEL = "INFO"
 
 # ============== RUTAS DE DATOS ==============

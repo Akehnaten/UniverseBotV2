@@ -139,6 +139,14 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ ItemUse callbacks: {e}", exc_info=True)
         
+    try:
+        from handlers.apodo_handler import ApodoHandler
+        ApodoHandler(bot)
+        handlers_initialized.append("Apodo")
+        logger.info("✅ Apodo handler configurado")
+    except Exception as e:
+        logger.error(f"❌ Apodo handler: {e}", exc_info=True)
+    
     logger.info(f"[HANDLERS] {len(handlers_initialized)} módulos configurados: {', '.join(handlers_initialized)}")
 
 

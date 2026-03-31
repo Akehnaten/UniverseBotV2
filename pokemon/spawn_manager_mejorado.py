@@ -119,37 +119,43 @@ class SpawnManager:
 
     def _generar_spawn_misterioso(self) -> bool:
         """
-        Genera un spawn público con sprite desconocido.
-
-        Retorna True si el spawn se generó con éxito, False si se saltó
-        (ya había un spawn activo para este thread) o si falló.
-
-        Nota: esta función SOLO comprueba el spawn activo bajo la clave
-        self.thread_id.  Los spawns privados (/salvaje) usan la clave
-        user_id y no afectan esta comprobación.
+        Genera un spawn público filtrando los Pokémon por la región del servidor.
+        Solo pueden aparecer Pokémon válidos para la región actual (config.py).
         """
         try:
-            # Solo verificar spawn PÚBLICO (thread_id).
-            # Los privados (user_id) son independientes y no nos importan aquí.
             if spawn_service.obtener_spawn_activo(self.thread_id):
                 logger.debug("[SPAWN] Spawn público activo — ciclo omitido.")
                 return False
-
+ 
+            # ── Obtener IDs válidos para la región actual ─────────────────
+            from config import POKEMON_REGION_SERVIDOR
+            from pokemon.region_config import get_wild_ids
+ 
+            ids_validos = get_wild_ids(POKEMON_REGION_SERVIDOR)
+            if not ids_validos:
+                logger.error("[SPAWN] No hay IDs válidos para la región.")
+                return False
+ 
+            import random
+            pokemon_id_elegido = random.choice(ids_validos)
+ 
+            # Generar spawn con el ID filtrado por región
             exito, spawn = spawn_service.generar_spawn(
-                canal_id=self.thread_id,
-                pokemon_id=None,
+                canal_id   = self.thread_id,
+                pokemon_id = pokemon_id_elegido,
             )
-
+ 
             if not exito or not spawn:
                 return False
-
+ 
             shiny_text = " ✨" if spawn.shiny else ""
             caption = (
                 f"🌟 <b>¡Un Pokémon salvaje apareció!{shiny_text}</b>\n\n"
                 f"❓ Un Pokémon misterioso te está observando...\n"
                 f"⚔️ ¿Te atreves a combatirlo?"
             )
-
+ 
+            from telebot import types
             keyboard = types.InlineKeyboardMarkup()
             keyboard.add(
                 types.InlineKeyboardButton(
@@ -157,20 +163,19 @@ class SpawnManager:
                     callback_data=f"combatir_{self.thread_id}_{spawn.pokemon_id}",
                 )
             )
-
+ 
             msg = self._enviar_sprite_o_texto(caption, keyboard)
             if msg:
                 self.spawn_messages[self.thread_id] = msg.message_id
                 logger.info(
-                    f"[SPAWN] Spawn generado — #{spawn.pokemon_id} "
-                    f"({spawn.nombre}) en thread {self.thread_id}"
+                    f"[SPAWN] #{spawn.pokemon_id} ({spawn.nombre}) "
+                    f"en {POKEMON_REGION_SERVIDOR} — thread {self.thread_id}"
                 )
                 return True
-
-            # Si no se pudo enviar el mensaje, limpiar el spawn generado
+ 
             spawn_service.limpiar_spawn(self.thread_id)
             return False
-
+ 
         except Exception as exc:
             logger.error(f"[SPAWN] Error en _generar_spawn_misterioso: {exc}", exc_info=True)
             spawn_service.limpiar_spawn(self.thread_id)

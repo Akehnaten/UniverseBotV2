@@ -326,17 +326,27 @@ class CasinoHandlers:
         # ── 4. Calcular resultado ─────────────────────────────────────────
         result = girar(apuesta)
 
-       # ── 6. Acreditar ganancias ────────────────────────────────────────
+       # ── 6. Acreditar ganancias / devolver apuesta en empate ────────────
         if result.ganancia_neta > 0:
-            # En giro normal la apuesta fue descontada → devolver apuesta + ganancia.
-            # En giro gratis la apuesta NO fue descontada → devolver solo la ganancia.
+            # Ganancia real: devolver apuesta + ganancia neta (giro normal),
+            # o solo la ganancia neta (giro gratis, donde la apuesta no se descontó).
             pago = result.ganancia_neta if es_giro_gratis else result.ganancia_neta + result.apuesta
- 
             economy_service.add_credits(uid, pago, "slots_ganancia")
             logger.info(
                 "🎰 GANANCIA | %s (%d) | apuesta: %d | neta: +%d | pago: %d | jackpot: %s",
                 nombre, uid, apuesta, result.ganancia_neta, pago, result.jackpot,
             )
+ 
+        elif result.ganancia_neta == 0 and not es_giro_gratis:
+            # Empate (ganancia_bruta == apuesta): la apuesta fue descontada en el
+            # paso 2 pero el multiplicador total cubrió exactamente el costo.
+            # Se devuelve la apuesta íntegra; el usuario no gana ni pierde.
+            economy_service.add_credits(uid, result.apuesta, "slots_empate")
+            logger.info(
+                "🎰 EMPATE   | %s (%d) | apuesta: %d | devuelta íntegra",
+                nombre, uid, apuesta,
+            )
+ 
         else:
             logger.info(
                 "🎰 PÉRDIDA  | %s (%d) | apuesta: %d | neta: %d",

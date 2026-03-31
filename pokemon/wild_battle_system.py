@@ -2226,7 +2226,7 @@ class WildBattleManager:
                     es_salvaje         = True,
                     es_entrenador      = False,
                 )
-                money_reward = random.randint(1, 10) * wild.nivel
+                money_reward = max(10, min(50, 10 + wild.nivel * 40 // 100))
 
                 exp_result = ExperienceSystem.aplicar_experiencia(
                     battle.player_pokemon_id, exp_ganada
@@ -2918,7 +2918,7 @@ class WildBattleManager:
                 es_salvaje         = True,
                 es_entrenador      = False,
             )
-            money_reward = random.randint(1, 10) * wild.nivel
+            money_reward = max(10, min(50, 10 + wild.nivel * 40 // 100))
             economy_service.add_credits(user_id, money_reward, "Victoria en batalla Pokémon")
 
             linea_exp = _repartir_experiencia(battle, exp_ganada, user_id, bot, delay=2.5)

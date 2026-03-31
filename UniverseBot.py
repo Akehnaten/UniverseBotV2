@@ -344,6 +344,10 @@ try:
     setup_wild_battle_callbacks(bot)
     logger.info("✅ Sistema de combate salvaje inicializado")
 
+    from pokemon.mote_callbacks import setup_mote_callbacks
+    setup_mote_callbacks(bot)
+    logger.info("✅ Sistema de motes/apodos inicializado")
+
     from pokemon.guarderia_callbacks import setup_guarderia_callbacks
     setup_guarderia_callbacks(bot)
     logger.info("✅ Sistema de guardería inicializado")

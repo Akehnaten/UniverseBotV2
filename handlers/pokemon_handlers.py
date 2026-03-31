@@ -287,140 +287,205 @@ class PokemonHandlers:
     # ──────────────────────────────────────────────────────────────────────────
 
     def cmd_profesor(self, message):
-        """Comando /profesor - Elige el Pokémon inicial."""
+        """
+        /profesor — Elige starter UNA VEZ por región.
+        Al elegir nuevo starter, todos los Pokémon del equipo van al PC.
+        """
         uid = message.from_user.id
         cid = message.chat.id
-        from config import CANAL_ID, POKECLUB
-
+        from config import CANAL_ID, POKECLUB, POKEMON_REGION_SERVIDOR
+        from database import db_manager
+        from pokemon.region_config import get_starters
+ 
         tid = get_thread_id(message)
-        es_privado   = message.chat.type == 'private'
-        es_pokeclub  = (message.chat.id == CANAL_ID and tid == POKECLUB)
-
+        es_privado  = message.chat.type == 'private'
+        es_pokeclub = (message.chat.id == CANAL_ID and tid == POKECLUB)
+ 
         if not es_privado and not es_pokeclub:
             try:
                 self.bot.delete_message(message.chat.id, message.message_id)
-                m = self.bot.send_message(cid, "❌ Solo puedes usar este comando en pokeclub!.",message_thread_id=tid,)
+                m = self.bot.send_message(
+                    cid, "❌ Solo puedes usar este comando en pokeclub!.",
+                    message_thread_id=tid,
+                )
                 time.sleep(5)
                 self.bot.delete_message(cid, m.message_id)
             except Exception:
                 pass
             return
-
-        try:
-            equipo = pokemon_service.obtener_equipo(uid)
-            pc     = pokemon_service.obtener_pc(uid, limit=1)
-
-            if equipo or pc:
-                m = self.bot.send_message(
-                    cid, "❌ Ya tienes Pokémon. No puedes elegir otro inicial.",
-                    message_thread_id=tid,
-                )
-                time.sleep(5)
-                try:
-                    self.bot.delete_message(cid, m.message_id)
-                except Exception:
-                    pass
-                return
-
-            markup = types.InlineKeyboardMarkup(row_width=3)
-            markup.add(
-                types.InlineKeyboardButton("🌿 Bulbasaur", callback_data="starter_1"),
-                types.InlineKeyboardButton("🔥 Charmander", callback_data="starter_4"),
-                types.InlineKeyboardButton("💧 Squirtle",   callback_data="starter_7"),
-            )
-
-            texto = (
-                "🎓 <b>¡Bienvenido al mundo Pokémon!</b>\n\n"
-                "Antes de comenzar tu aventura, necesitas elegir tu primer Pokémon:\n\n"
-                "🌿 <b>Bulbasaur</b> (#1) - Tipo Planta/Veneno\n"
-                "🔥 <b>Charmander</b> (#4) - Tipo Fuego\n"
-                "💧 <b>Squirtle</b> (#7) - Tipo Agua\n\n"
-                "Elige sabiamente, solo podrás hacerlo una vez."
-            )
-            self.bot.send_message(
-                cid, texto,
+ 
+        region_actual = POKEMON_REGION_SERVIDOR.upper()
+ 
+        # Verificar si ya tiene Pokémon en ESTA región
+        ya_tiene = db_manager.execute_query(
+            "SELECT COUNT(*) as total FROM POKEMON_USUARIO "
+            "WHERE userID = ? AND region = ?",
+            (uid, region_actual),
+        )
+        if ya_tiene and ya_tiene[0]["total"] > 0:
+            m = self.bot.send_message(
+                cid,
+                f"❌ Ya elegiste tu Pokémon inicial en <b>{region_actual}</b>.\n"
+                "Solo puedes elegir un starter una vez por región.",
                 parse_mode="HTML",
-                reply_markup=markup,
                 message_thread_id=tid,
             )
-
+            time.sleep(5)
+            try:
+                self.bot.delete_message(cid, m.message_id)
+            except Exception:
+                pass
+            return
+ 
+        try:
+            starters = get_starters(region_actual)
+            markup   = types.InlineKeyboardMarkup(row_width=3)
+            markup.add(*[
+                types.InlineKeyboardButton(
+                    f"{s['emoji']} {s['nombre']}",
+                    callback_data=s["callback"],
+                )
+                for s in starters
+            ])
+            descripciones = "\n".join(
+                f"{s['emoji']} <b>{s['nombre']}</b> (#{s['id']})"
+                for s in starters
+            )
+            # Avisar que el equipo actual irá al PC
+            equipo_actual = pokemon_service.obtener_equipo(uid)
+            aviso_pc = ""
+            if equipo_actual:
+                nombres = ", ".join(p.mote or p.nombre for p in equipo_actual)
+                aviso_pc = (
+                    f"\n\n⚠️ Tu equipo actual (<b>{nombres}</b>) "
+                    f"será guardado en el PC."
+                )
+ 
+            texto = (
+                f"🎓 <b>¡Bienvenido a la región {region_actual}!</b>\n\n"
+                f"Elige tu Pokémon inicial:\n\n"
+                f"{descripciones}"
+                f"{aviso_pc}\n\n"
+                "Elige sabiamente — solo una vez por región."
+            )
+            self.bot.send_message(
+                cid, texto, parse_mode="HTML",
+                reply_markup=markup, message_thread_id=tid,
+            )
         except Exception as e:
             logger.error(f"Error en cmd_profesor: {e}")
             self.bot.send_message(cid, f"❌ Error: {str(e)}", message_thread_id=tid)
 
     def callback_elegir_starter(self, call):
-        """Callback para elegir Pokémon inicial."""
+        """
+        Al elegir starter de nueva región:
+          1. Mueve TODO el equipo actual al PC.
+          2. Crea el nuevo starter con la región actual.
+          3. Lo pone en el equipo (slot 0).
+        """
         uid = call.from_user.id
         cid = call.message.chat.id
-
+ 
+        from config import POKEMON_REGION_SERVIDOR
+        from database import db_manager
+        from pokemon.services.pokedex_service import pokedex_service as _pdex
+ 
         try:
-            pokemon_id = int(call.data.split('_')[1])
-
-            equipo = pokemon_service.obtener_equipo(uid)
-            pc     = pokemon_service.obtener_pc(uid, limit=1)
-            if equipo or pc:
-                self.bot.answer_callback_query(call.id, "❌ Ya tienes Pokémon", show_alert=True)
-                return
-
-            pokemon_creado_id = pokemon_service.crear_pokemon(
-                user_id=uid, pokemon_id=pokemon_id, nivel=5,
-                region='KANTO', shiny=False,
+            pokemon_id    = int(call.data.split('_')[1])
+            region_actual = POKEMON_REGION_SERVIDOR.upper()
+ 
+            # Verificar que no haya starter de esta región ya
+            ya_tiene = db_manager.execute_query(
+                "SELECT COUNT(*) as total FROM POKEMON_USUARIO "
+                "WHERE userID = ? AND region = ?",
+                (uid, region_actual),
             )
-
-            if pokemon_creado_id:
-                pokemon_service.mover_a_equipo(pokemon_creado_id, uid)
-
-                from pokemon.services import items_service
-                try:
-                    items_service.agregar_item(uid, 'pokeball', 10)
-                    items_service.agregar_item(uid, 'pocion', 3)
-                except Exception:
-                    pass
-
-                nombres_starters = {1: "Bulbasaur", 4: "Charmander", 7: "Squirtle"}
-                nombre = nombres_starters.get(pokemon_id, f"Pokémon #{pokemon_id}")
-
-                texto = (
-                    f"✅ <b>¡Felicidades!</b>\n\n"
-                    f"Has elegido a <b>{nombre}</b> como tu compañero inicial.\n\n"
-                    f"🎁 <b>Items recibidos:</b>\n"
-                    f"• 10× Pokéball\n"
-                    f"• 3× Poción\n\n"
-                    f"Tu aventura Pokémon comienza ahora. ¡Buena suerte!\n\n"
-                    f"Usa /pokemon para ver tu menú completo."
-                )
-                self.bot.edit_message_text(
-                    texto, cid, call.message.message_id, parse_mode='HTML'
-                )
-                self.bot.answer_callback_query(call.id, f"✅ {nombre} elegido!")
-                logger.info(f"🎉 Usuario {uid} eligió {nombre} como starter")
-
-                nuevo_poke = pokemon_service.obtener_pokemon(pokemon_creado_id)
-                if nuevo_poke:
-                    from pokemon.pokemon_class import pedir_mote_pokemon
-
-                    def _guardar_mote_starter(mote):
-                        if mote:
-                            from database import db_manager as _db
-                            _db.execute_update(
-                                "UPDATE POKEMON_USUARIO SET apodo = ? WHERE id_unico = ?",
-                                (mote, pokemon_creado_id),
-                            )
-
-                    pedir_mote_pokemon(
-                        bot=self.bot,
-                        user_id=uid,
-                        pokemon=nuevo_poke,
-                        mensaje_callback=_guardar_mote_starter,
-                        chat_id=cid,
-                        message_thread_id=getattr(call.message, "message_thread_id", None),
-                    )
-            else:
+            if ya_tiene and ya_tiene[0]["total"] > 0:
                 self.bot.answer_callback_query(
-                    call.id, "❌ Error al crear Pokémon. Intenta de nuevo.", show_alert=True
+                    call.id,
+                    f"❌ Ya tienes Pokémon en {region_actual}",
+                    show_alert=True,
                 )
-                logger.error(f"Error: crear_pokemon retornó None para usuario {uid}")
-
+                return
+ 
+            # ── 1. Mover equipo actual al PC ──────────────────────────────
+            db_manager.execute_update(
+                "UPDATE POKEMON_USUARIO "
+                "SET en_equipo = 0, posicion_equipo = NULL "
+                "WHERE userID = ? AND en_equipo = 1",
+                (uid,),
+            )
+            logger.info(f"[STARTER] Equipo de {uid} movido al PC para nueva región {region_actual}")
+ 
+            # ── 2. Crear nuevo starter con la región actual ───────────────
+            pokemon_creado_id = pokemon_service.crear_pokemon(
+                user_id    = uid,
+                pokemon_id = pokemon_id,
+                nivel      = 5,
+                region     = region_actual,
+                shiny      = False,
+            )
+ 
+            if not pokemon_creado_id:
+                self.bot.answer_callback_query(
+                    call.id, "❌ Error al crear Pokémon.", show_alert=True
+                )
+                return
+ 
+            # ── 3. Poner en el equipo (slot 0) ────────────────────────────
+            pokemon_service.mover_a_equipo(pokemon_creado_id, uid)
+ 
+            # ── Items de bienvenida ───────────────────────────────────────
+            from pokemon.services import items_service
+            try:
+                items_service.agregar_item(uid, 'pokeball', 10)
+                items_service.agregar_item(uid, 'pocion', 3)
+            except Exception:
+                pass
+ 
+            # ── Nombre del Pokémon desde Pokédex ─────────────────────────
+            pokemon_data = _pdex.obtener_pokemon(pokemon_id)
+            nombre = (
+                pokemon_data.get('nombre', f'Pokémon #{pokemon_id}')
+                if pokemon_data else f'Pokémon #{pokemon_id}'
+            )
+ 
+            texto = (
+                f"✅ <b>¡{nombre} elegido!</b>\n\n"
+                f"🗺️ Región: <b>{region_actual}</b>\n\n"
+                f"🎁 <b>Items recibidos:</b>\n"
+                f"• 10× Pokéball\n"
+                f"• 3× Poción\n\n"
+                f"¡Tu aventura en {region_actual} comienza ahora!\n"
+                f"Usa /pokemon para ver tu menú."
+            )
+            self.bot.edit_message_text(
+                texto, cid, call.message.message_id, parse_mode='HTML'
+            )
+            self.bot.answer_callback_query(call.id, f"✅ {nombre} elegido!")
+            logger.info(f"[STARTER] {uid} eligió {nombre} en {region_actual}")
+ 
+            # ── Pedir mote ────────────────────────────────────────────────
+            nuevo_poke = pokemon_service.obtener_pokemon(pokemon_creado_id)
+            if nuevo_poke:
+                from pokemon.pokemon_class import pedir_mote_pokemon
+ 
+                def _guardar_mote(mote):
+                    if mote:
+                        db_manager.execute_update(
+                            "UPDATE POKEMON_USUARIO SET apodo = ? WHERE id_unico = ?",
+                            (mote, pokemon_creado_id),
+                        )
+ 
+                pedir_mote_pokemon(
+                    bot=self.bot,
+                    user_id=uid,
+                    pokemon=nuevo_poke,
+                    mensaje_callback=_guardar_mote,
+                    chat_id=cid,
+                    message_thread_id=getattr(call.message, "message_thread_id", None),
+                )
+ 
         except Exception as e:
             logger.error(f"Error en callback_elegir_starter: {e}", exc_info=True)
             self.bot.answer_callback_query(call.id, f"❌ Error: {str(e)}", show_alert=True)
