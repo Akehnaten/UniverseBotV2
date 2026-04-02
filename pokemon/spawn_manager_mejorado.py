@@ -275,7 +275,18 @@ class SpawnManager:
 
     def iniciar_combate(self, call: types.CallbackQuery, bot) -> None:
         """Inicia combate con el Pokémon salvaje público activo."""
+        if not call or not call.data:
+            return
+
         user_id = call.from_user.id
+        
+        # 1. Validar que exista el mensaje para obtener IDs de chat
+        if not call.message:
+            bot.answer_callback_query(call.id, "❌ Error: El mensaje original no está disponible.", show_alert=True)
+            return
+
+        chat_id = call.message.chat.id
+        message_id = call.message.message_id
 
         try:
             thread_id = int(call.data.split("_")[1])
@@ -285,19 +296,12 @@ class SpawnManager:
 
         spawn = spawn_service.obtener_spawn_activo(thread_id)
         if not spawn:
-            bot.answer_callback_query(
-                call.id, "❌ Este Pokémon ya escapó...", show_alert=True
-            )
+            bot.answer_callback_query(call.id, "❌ Este Pokémon ya escapó...", show_alert=True)
             try:
-                bot.delete_message(call.message.chat.id, call.message.message_id)
+                bot.delete_message(chat_id, message_id)
             except Exception:
                 pass
             return
-
-        try:
-            bot.answer_callback_query(call.id, "⚔️ ¡Iniciando batalla!", show_alert=False)
-        except Exception:
-            pass
 
         try:
             from pokemon.wild_battle_system import wild_battle_manager
@@ -321,11 +325,11 @@ class SpawnManager:
 
             battle = wild_battle_manager.get_battle(user_id)
             if battle:
-                battle.group_chat_id    = call.message.chat.id
-                battle.group_message_id = call.message.message_id
+                battle.group_chat_id    = chat_id
+                battle.group_message_id = message_id
 
             try:
-                bot.delete_message(call.message.chat.id, call.message.message_id)
+                bot.delete_message(chat_id, message_id)
             except Exception:
                 pass
 
@@ -335,7 +339,6 @@ class SpawnManager:
                 bot.send_message(user_id, "❌ Error iniciando combate. Intenta de nuevo.")
             except Exception:
                 pass
-
 
 # ──────────────────────────────────────────────────────────────────────────────
 # INICIALIZACIÓN

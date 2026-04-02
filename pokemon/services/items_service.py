@@ -159,6 +159,15 @@ class ItemsService:
             "baya yatay": {"precio": 8, "tipo": "baya_mitigacion", "efecto": "occa_berry", "reduce_tipo": "Fuego", "reduce": 0.5, "consumible": True, "desc": "Reduce Fuego x0.5"},
             "baya charti": {"precio": 8, "tipo": "baya_mitigacion", "efecto": "charti_berry", "reduce_tipo": "Roca", "reduce": 0.5, "consumible": True, "desc": "Reduce Roca x0.5"},
             "baya anjiro": {"precio": 8, "tipo": "baya_mitigacion", "efecto": "passho_berry", "reduce_tipo": "Agua", "reduce": 0.5, "consumible": True, "desc": "Reduce Agua x0.5"},
+
+            # ========== BAYAS REDUCTORAS DE EVs ==========
+            # Reducen 10 EVs del stat correspondiente (mínimo 0)
+            "baya drenar": {"precio": 5, "reduce_ev": "hp",     "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs PS"},
+            "baya keler":  {"precio": 5, "reduce_ev": "atq",    "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs Ataque"},
+            "baya qualot": {"precio": 5, "reduce_ev": "def",    "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs Defensa"},
+            "baya tomato": {"precio": 5, "reduce_ev": "atq_sp", "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs At.Especial"},
+            "baya adroc":  {"precio": 5, "reduce_ev": "def_sp", "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs Def.Especial"},
+            "baya tamato": {"precio": 5, "reduce_ev": "vel",    "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs Velocidad"},
         }
     
     def _cargar_categorias(self) -> Dict:
@@ -243,7 +252,12 @@ class ItemsService:
                 "nombre": "🌦️ Clima y Terreno",
                 "items": ["heatrock", "damprock", "smoothrock", "icyrock"],
                 "orden": 16
-            }
+            },
+            "bayas_ev": {
+                "nombre": "🫐 Bayas Reductoras de EVs",
+                "items": ["baya drenar", "baya keler", "baya qualot", "baya tomato", "baya adroc", "baya tamato"],
+                "orden": 17
+            },
 
 
 
@@ -415,6 +429,7 @@ class ItemsService:
             return {'exito': False, 'mensaje': 'Item no existe'}
 
         from pokemon.services import pokemon_service
+        from database import db_manager
         pokemon = pokemon_service.obtener_pokemon(pokemon_id)
 
         if not pokemon:
@@ -422,18 +437,36 @@ class ItemsService:
 
         resultado = {'exito': True, 'mensaje': '', 'efectos': []}
 
+        # Mapa de clave interna → columna BD para EVs
+        _EV_COL = {
+            "hp":     "ev_hp",
+            "atq":    "ev_atq",
+            "def":    "ev_def",
+            "atq_sp": "ev_atq_sp",
+            "def_sp": "ev_def_sp",
+            "vel":    "ev_vel",
+        }
+        _EV_NOMBRE = {
+            "hp": "PS", "atq": "Ataque", "def": "Defensa",
+            "atq_sp": "At.Especial", "def_sp": "Def.Especial", "vel": "Velocidad",
+        }
+
         # ── Curar HP ──────────────────────────────────────────────────────
         if 'cura_hp' in item_data:
-            hp_max    = pokemon.stats.get('hp', 100)  # ✅ atributo, no key
-            hp_actual = pokemon.hp_actual              # ✅ atributo, no key
+            hp_max    = pokemon.stats.get('hp', 100)
+            hp_actual = pokemon.hp_actual
 
             if hp_actual >= hp_max:
                 return {'exito': False, 'mensaje': f'{pokemon.nombre} ya tiene HP completo.'}
 
-            hp_curado = min(item_data['cura_hp'], hp_max - hp_actual)
+            cura = item_data['cura_hp']
+            # Si es fracción (bayas como 0.25) calculamos sobre hp_max
+            if isinstance(cura, float) and cura <= 1.0:
+                cura = int(hp_max * cura)
+
+            hp_curado = min(cura, hp_max - hp_actual)
             nuevo_hp  = hp_actual + hp_curado
 
-            from database import db_manager
             db_manager.execute_update(
                 "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
                 (nuevo_hp, pokemon_id)
@@ -446,13 +479,11 @@ class ItemsService:
                 return {'exito': False, 'mensaje': f'{pokemon.nombre} no está debilitado.'}
             hp_max   = pokemon.stats.get('hp', 100)
             nuevo_hp = int(hp_max * item_data['revive'])
-            from database import db_manager
             db_manager.execute_update(
                 "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
                 (nuevo_hp, pokemon_id)
             )
             resultado['efectos'].append(f"Revivió con {nuevo_hp} HP")
-            resultado['exito'] = True
 
         # ── Curar estado ──────────────────────────────────────────────────
         if 'cura_estado' in item_data:
@@ -466,13 +497,156 @@ class ItemsService:
             resultado['efectos'].append(f"Restauró {item_data['pp']} PP a un movimiento")
 
         if 'pp_todos' in item_data:
-            resultado['efectos'].append(f"Restauró PP a todos los movimientos")
+            resultado['efectos'].append("Restauró PP a todos los movimientos")
+
+        # ── Vitamina: AUMENTAR EVs (+10) ──────────────────────────────────
+        # Lee siempre de BD para no depender del objeto en memoria
+        if 'ev' in item_data and 'cantidad' in item_data:
+            stat_key    = item_data['ev']
+            cantidad_ev = int(item_data['cantidad'])
+            col         = _EV_COL.get(stat_key)
+            nombre_stat = _EV_NOMBRE.get(stat_key, stat_key)
+
+            if not col:
+                return {'exito': False, 'mensaje': f'Stat desconocido: {stat_key}'}
+
+            # Leer EV actual DIRECTO de BD (no del objeto — evita bug de redondeo)
+            rows = db_manager.execute_query(
+                f"SELECT {col}, "
+                f"ev_hp+ev_atq+ev_def+ev_atq_sp+ev_def_sp+ev_vel AS total_evs "
+                f"FROM POKEMON_USUARIO WHERE id_unico = ?",
+                (pokemon_id,),
+            )
+            if not rows:
+                return {'exito': False, 'mensaje': 'Pokémon no encontrado en BD.'}
+
+            ev_actual  = int(rows[0].get(col) or 0)
+            total_evs  = int(rows[0].get('total_evs') or 0)
+
+            # Límite: 252 por stat, 510 en total
+            if ev_actual >= 252:
+                return {'exito': False, 'mensaje': f'<b>{nombre_stat}</b> ya tiene el máximo de EVs (252).'}
+            if total_evs >= 510:
+                return {'exito': False, 'mensaje': 'Este Pokémon ya tiene el máximo total de EVs (510).'}
+
+            # Calcular cuánto se puede realmente agregar
+            puede_stat  = min(cantidad_ev, 252 - ev_actual)
+            puede_total = min(puede_stat, 510 - total_evs)
+            nuevo_ev    = ev_actual + puede_total
+
+            db_manager.execute_update(
+                f"UPDATE POKEMON_USUARIO SET {col} = ? WHERE id_unico = ?",
+                (nuevo_ev, pokemon_id),
+            )
+
+            # Recalcular stats con los EVs nuevos
+            self._recalcular_stats(pokemon_id)
+
+            resultado['efectos'].append(
+                f"⬆️ <b>{nombre_stat}</b>: {ev_actual} → {nuevo_ev} EVs (+{puede_total})"
+            )
+
+        # ── Baya reductora: REDUCIR EVs (-10) ────────────────────────────
+        # FIX PRINCIPAL: lee de BD directamente, jamás del stat calculado
+        if 'reduce_ev' in item_data:
+            stat_key    = item_data['reduce_ev']
+            cantidad_ev = int(item_data.get('cantidad', 10))
+            col         = _EV_COL.get(stat_key)
+            nombre_stat = _EV_NOMBRE.get(stat_key, stat_key)
+
+            if not col:
+                return {'exito': False, 'mensaje': f'Stat desconocido: {stat_key}'}
+
+            # ── Leer EV real directamente de la columna BD ────────────────
+            # NUNCA usar pokemon.stats ni pokemon.evs — ambos pueden mostrar
+            # 0 cuando el EV real es 1-9 (el stat calculado no cambia con
+            # pocos EVs por el redondeo de la fórmula Gen 3+)
+            rows = db_manager.execute_query(
+                f"SELECT {col} FROM POKEMON_USUARIO WHERE id_unico = ?",
+                (pokemon_id,),
+            )
+            if not rows:
+                return {'exito': False, 'mensaje': 'Pokémon no encontrado en BD.'}
+
+            ev_actual = int(rows[0].get(col) or 0)
+
+            if ev_actual <= 0:
+                return {
+                    'exito':   False,
+                    'mensaje': f'<b>{nombre_stat}</b> ya está en 0 EVs, no hay nada que reducir.',
+                }
+
+            nuevo_ev   = max(0, ev_actual - cantidad_ev)
+            reduccion  = ev_actual - nuevo_ev   # cuánto bajó realmente (1-10)
+
+            db_manager.execute_update(
+                f"UPDATE POKEMON_USUARIO SET {col} = ? WHERE id_unico = ?",
+                (nuevo_ev, pokemon_id),
+            )
+
+            # Recalcular stats con los EVs nuevos
+            self._recalcular_stats(pokemon_id)
+
+            resultado['efectos'].append(
+                f"⬇️ <b>{nombre_stat}</b>: {ev_actual} → {nuevo_ev} EVs (-{reduccion})"
+            )
 
         if not resultado['efectos']:
             return {'exito': False, 'mensaje': 'Este item no tiene efecto en batalla.'}
 
-        resultado['mensaje'] = ', '.join(resultado['efectos'])
+        resultado['mensaje'] = '\n'.join(resultado['efectos'])
         return resultado
+
+    def _recalcular_stats(self, pokemon_id: int) -> None:
+        """
+        Recalcula y persiste todas las stats de un Pokémon después de cambiar sus EVs.
+        Lee los datos actuales de BD para garantizar consistencia total.
+        """
+        try:
+            from database import db_manager
+            from pokemon.services.pokedex_service import pokedex_service
+
+            rows = db_manager.execute_query(
+                """SELECT pokemonID, nivel, naturaleza,
+                          iv_hp, iv_atq, iv_def, iv_atq_sp, iv_def_sp, iv_vel,
+                          ev_hp, ev_atq, ev_def, ev_atq_sp, ev_def_sp, ev_vel,
+                          hp_actual
+                   FROM POKEMON_USUARIO WHERE id_unico = ?""",
+                (pokemon_id,),
+            )
+            if not rows:
+                return
+
+            r = rows[0]
+            ivs = {
+                "hp": r["iv_hp"], "atq": r["iv_atq"], "def": r["iv_def"],
+                "atq_sp": r["iv_atq_sp"], "def_sp": r["iv_def_sp"], "vel": r["iv_vel"],
+            }
+            evs = {
+                "hp": r["ev_hp"], "atq": r["ev_atq"], "def": r["ev_def"],
+                "atq_sp": r["ev_atq_sp"], "def_sp": r["ev_def_sp"], "vel": r["ev_vel"],
+            }
+
+            stats = pokedex_service.calcular_stats(
+                r["pokemonID"], r["nivel"], ivs, evs, r["naturaleza"] or "Hardy"
+            )
+
+            # hp_actual no puede superar el nuevo hp_max
+            nuevo_hp_max = stats["hp"]
+            hp_actual    = min(int(r["hp_actual"] or 0), nuevo_hp_max)
+
+            db_manager.execute_update(
+                """UPDATE POKEMON_USUARIO
+                   SET ps=?, atq=?, def=?, atq_sp=?, def_sp=?, vel=?, hp_actual=?
+                   WHERE id_unico=?""",
+                (
+                    stats["hp"], stats["atq"], stats["def"],
+                    stats["atq_sp"], stats["def_sp"], stats["vel"],
+                    hp_actual, pokemon_id,
+                ),
+            )
+        except Exception as e:
+            logger.error(f"[ITEMS] Error recalculando stats para id={pokemon_id}: {e}")
 
 
 # Instancia global

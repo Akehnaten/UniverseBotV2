@@ -6,7 +6,7 @@ Comandos: /pokemon, /profesor, /spawn, /salvaje
 import telebot
 from telebot import types
 import time
-import threading 
+import threading
 import logging
 
 from funciones import user_service
@@ -28,6 +28,7 @@ def _delete_after(bot, chat_id: int, message_id: int, delay: float = 10.0) -> No
         except Exception:
             pass
     threading.Timer(delay, _del).start()
+
 
 def calcular_costo_salvaje(user_id: int) -> int:
     """
@@ -78,12 +79,9 @@ class PokemonHandlers:
         self.bot.register_message_handler(self.cmd_pokemon,  commands=['pokemon'])
         self.bot.register_message_handler(self.cmd_profesor, commands=['profesor'])
         self.bot.register_message_handler(self.cmd_salvaje,  commands=['salvaje'])
-        self.bot.register_message_handler(self.cmd_pokedex, commands=['pokedex'])
+        self.bot.register_message_handler(self.cmd_pokedex,  commands=['pokedex'])
 
         # ── Pasos de guardería: mensajes de TEXTO en GRUPO (excluye comandos) ─
-        # Solo mensajes que no son comandos — los comandos los manejan sus
-        # propios handlers. Si este handler captura comandos, los consumiría
-        # antes de que lleguen a /pokemon, /salvaje, etc.
         self.bot.register_message_handler(
             self._handle_texto_grupo,
             func=lambda m: (
@@ -93,9 +91,7 @@ class PokemonHandlers:
             ),
         )
 
-        # ── Captura de mote tras eclosión: solo en DM (excluye comandos) ────────
-        # Sin este filtro, /pokemon y otros comandos enviados en privado
-        # son capturados aquí antes de llegar a sus handlers de comando.
+        # ── Captura de mote tras eclosión: solo en DM (excluye comandos) ──────
         self.bot.register_message_handler(
             self._handle_texto_privado,
             func=lambda m: (
@@ -155,7 +151,7 @@ class PokemonHandlers:
         def callback_salvaje_combatir(call):
             self._callback_salvaje_combatir(call)
 
-        # ── Mts  ──────────────────────────────────────────────────────────────
+        # ── MTs ───────────────────────────────────────────────────────────────
         @self.bot.callback_query_handler(
             func=lambda call: call.data.startswith('mt_')
         )
@@ -164,21 +160,13 @@ class PokemonHandlers:
             handle_mt_callback(call, self.bot)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # TEXTO PRIVADO (mote de guardería + pasos)
-    # ──────────────────────────────────────────────────────────────────────────
-
-    # ──────────────────────────────────────────────────────────────────────────
     # TEXTO EN GRUPO (pasos de guardería)
     # ──────────────────────────────────────────────────────────────────────────
 
     def _handle_texto_grupo(self, message):
         """
         Intercepta mensajes de texto en el grupo para sumar pasos a los huevos
-        del usuario.  Cada palabra del mensaje cuenta como 1 paso base.
-
-        Multiplicadores aplicados en crianza_service.sumar_pasos():
-          - Amuleto Iris (usuario):          x2 global.
-          - Cuerpo Llama (Pokémon en equipo): x2 global.
+        del usuario.
         """
         from pokemon.guarderia_steps import sumar_pasos_mensaje
         sumar_pasos_mensaje(self.bot, message)
@@ -190,7 +178,7 @@ class PokemonHandlers:
     def _handle_texto_privado(self, message):
         """
         Intercepta mensajes de texto en chat privado para capturar el apodo
-        de un Pokémon recién nacido.  Si no hay apodo pendiente, ignora.
+        de un Pokémon recién nacido.
         """
         from pokemon.guarderia_steps import interceptar_mote
         interceptar_mote(self.bot, message)
@@ -202,7 +190,7 @@ class PokemonHandlers:
     def cmd_pokemon(self, message):
         """
         Comando /pokemon — Menú principal de Pokémon.
-        Bloqueado si el usuario tiene una batalla activa (salvaje, PvP o gimnasio).
+        Bloqueado si el usuario tiene una batalla activa.
         """
         from funciones import user_service
         from pokemon.menu_pokemon import MenuPokemon
@@ -220,7 +208,10 @@ class PokemonHandlers:
         if not es_privado and not es_pokeclub:
             try:
                 self.bot.delete_message(message.chat.id, message.message_id)
-                m = self.bot.send_message(cid, "❌ Solo puedes usar este comando en pokeclub!.",message_thread_id=tid,)
+                m = self.bot.send_message(
+                    cid, "❌ Solo puedes usar este comando en pokeclub!.",
+                    message_thread_id=tid,
+                )
                 time.sleep(5)
                 self.bot.delete_message(cid, m.message_id)
             except Exception:
@@ -283,27 +274,32 @@ class PokemonHandlers:
         MenuPokemon.mostrar_menu_principal(uid, self.bot, message)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # /profesor
+    # /profesor — Elige starter según la región activa del servidor
     # ──────────────────────────────────────────────────────────────────────────
 
     def cmd_profesor(self, message):
         """
         /profesor — Elige starter UNA VEZ por región.
-        Al elegir nuevo starter, todos los Pokémon del equipo van al PC.
+
+        - Lee la región activa desde config.POKEMON_REGION_SERVIDOR.
+        - Carga los starters dinámicamente desde pokemon.region_config.get_starters().
+        - Verifica que el usuario NO tenga ya Pokémon en esa región.
+        - Advierte qué Pokémon del equipo actual irán al PC antes de confirmar.
         """
-        uid = message.from_user.id
-        cid = message.chat.id
         from config import CANAL_ID, POKECLUB, POKEMON_REGION_SERVIDOR
         from database import db_manager
         from pokemon.region_config import get_starters
- 
+
+        uid = message.from_user.id
+        cid = message.chat.id
         tid = get_thread_id(message)
+
         es_privado  = message.chat.type == 'private'
-        es_pokeclub = (message.chat.id == CANAL_ID and tid == POKECLUB)
- 
+        es_pokeclub = (cid == CANAL_ID and tid == POKECLUB)
+
         if not es_privado and not es_pokeclub:
             try:
-                self.bot.delete_message(message.chat.id, message.message_id)
+                self.bot.delete_message(cid, message.message_id)
                 m = self.bot.send_message(
                     cid, "❌ Solo puedes usar este comando en pokeclub!.",
                     message_thread_id=tid,
@@ -313,88 +309,147 @@ class PokemonHandlers:
             except Exception:
                 pass
             return
- 
-        region_actual = POKEMON_REGION_SERVIDOR.upper()
- 
-        # Verificar si ya tiene Pokémon en ESTA región
-        ya_tiene = db_manager.execute_query(
-            "SELECT COUNT(*) as total FROM POKEMON_USUARIO "
-            "WHERE userID = ? AND region = ?",
-            (uid, region_actual),
-        )
-        if ya_tiene and ya_tiene[0]["total"] > 0:
-            m = self.bot.send_message(
-                cid,
-                f"❌ Ya elegiste tu Pokémon inicial en <b>{region_actual}</b>.\n"
-                "Solo puedes elegir un starter una vez por región.",
-                parse_mode="HTML",
-                message_thread_id=tid,
-            )
-            time.sleep(5)
-            try:
-                self.bot.delete_message(cid, m.message_id)
-            except Exception:
-                pass
-            return
- 
+
+        # ── Región activa ─────────────────────────────────────────────────────
+        # POKEMON_REGION_SERVIDOR puede cambiar mientras el bot corre; se lee
+        # en tiempo de ejecución para siempre reflejar el valor actual.
+        region_actual = POKEMON_REGION_SERVIDOR.upper().strip()
+
+        # ── Verificar si ya tiene Pokémon en ESTA región ──────────────────────
         try:
+            ya_tiene = db_manager.execute_query(
+                "SELECT COUNT(*) as total FROM POKEMON_USUARIO "
+                "WHERE userID = ? AND region = ?",
+                (uid, region_actual),
+            )
+            if ya_tiene and ya_tiene[0]["total"] > 0:
+                m = self.bot.send_message(
+                    cid,
+                    f"❌ Ya elegiste tu Pokémon inicial en <b>{region_actual.capitalize()}</b>.\n"
+                    "Solo puedes elegir un starter una vez por región.",
+                    parse_mode="HTML",
+                    message_thread_id=tid,
+                )
+                _delete_after(self.bot, cid, m.message_id, 8)
+                return
+        except Exception as e:
+            logger.error(f"[PROFESOR] Error verificando región: {e}")
+
+        try:
+            # ── Cargar starters de la región activa ───────────────────────────
             starters = get_starters(region_actual)
-            markup   = types.InlineKeyboardMarkup(row_width=3)
+
+            if not starters:
+                m = self.bot.send_message(
+                    cid,
+                    f"⚠️ No se encontraron starters para la región <b>{region_actual}</b>.\n"
+                    "Contacta a un administrador.",
+                    parse_mode="HTML",
+                    message_thread_id=tid,
+                )
+                _delete_after(self.bot, cid, m.message_id, 10)
+                return
+
+            # ── Botones inline ────────────────────────────────────────────────
+            markup = types.InlineKeyboardMarkup(row_width=3)
             markup.add(*[
                 types.InlineKeyboardButton(
                     f"{s['emoji']} {s['nombre']}",
-                    callback_data=s["callback"],
+                    callback_data=s["callback"],   # ej: "starter_152"
                 )
                 for s in starters
             ])
+
+            # ── Descripción de cada starter ───────────────────────────────────
             descripciones = "\n".join(
                 f"{s['emoji']} <b>{s['nombre']}</b> (#{s['id']})"
                 for s in starters
             )
-            # Avisar que el equipo actual irá al PC
+
+            # ── Aviso: equipo actual irá al PC ────────────────────────────────
             equipo_actual = pokemon_service.obtener_equipo(uid)
             aviso_pc = ""
             if equipo_actual:
                 nombres = ", ".join(p.mote or p.nombre for p in equipo_actual)
                 aviso_pc = (
                     f"\n\n⚠️ Tu equipo actual (<b>{nombres}</b>) "
-                    f"será guardado en el PC."
+                    f"será guardado en el PC al elegir."
                 )
- 
+
+            # ── Texto del mensaje ─────────────────────────────────────────────
+            region_display = region_actual.capitalize()
             texto = (
-                f"🎓 <b>¡Bienvenido a la región {region_actual}!</b>\n\n"
+                f"🎓 <b>¡Bienvenido a la región {region_display}!</b>\n\n"
                 f"Elige tu Pokémon inicial:\n\n"
                 f"{descripciones}"
                 f"{aviso_pc}\n\n"
-                "Elige sabiamente — solo una vez por región."
+                f"<i>Elige sabiamente — solo puedes elegir una vez por región.</i>"
             )
+
             self.bot.send_message(
-                cid, texto, parse_mode="HTML",
-                reply_markup=markup, message_thread_id=tid,
+                cid, texto,
+                parse_mode="HTML",
+                reply_markup=markup,
+                message_thread_id=tid,
             )
+
+            logger.info(
+                f"[PROFESOR] Usuario {uid} solicitó starter en región {region_actual} "
+                f"({len(starters)} starters disponibles)"
+            )
+
         except Exception as e:
-            logger.error(f"Error en cmd_profesor: {e}")
-            self.bot.send_message(cid, f"❌ Error: {str(e)}", message_thread_id=tid)
+            logger.error(f"[PROFESOR] Error en cmd_profesor: {e}", exc_info=True)
+            try:
+                m = self.bot.send_message(
+                    cid, f"❌ Error cargando la pantalla del profesor: {str(e)}",
+                    message_thread_id=tid,
+                )
+                _delete_after(self.bot, cid, m.message_id, 10)
+            except Exception:
+                pass
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # callback_elegir_starter — procesa la elección del starter
+    # ──────────────────────────────────────────────────────────────────────────
 
     def callback_elegir_starter(self, call):
         """
-        Al elegir starter de nueva región:
-          1. Mueve TODO el equipo actual al PC.
-          2. Crea el nuevo starter con la región actual.
-          3. Lo pone en el equipo (slot 0).
+        Procesa la elección del starter.
+
+        Flujo:
+          1. Verifica que el callback venga del usuario correcto.
+          2. Comprueba que no exista ya un starter para la región activa.
+          3. Mueve TODO el equipo actual al PC (en_equipo=0, posicion_equipo=NULL).
+          4. Crea el nuevo starter con la región activa.
+          5. Lo agrega al equipo (slot 0).
+          6. Entrega items de bienvenida.
+          7. Pide apodo al usuario.
         """
-        uid = call.from_user.id
-        cid = call.message.chat.id
- 
         from config import POKEMON_REGION_SERVIDOR
         from database import db_manager
         from pokemon.services.pokedex_service import pokedex_service as _pdex
- 
+
+        uid = call.from_user.id
+        cid = call.message.chat.id
+
         try:
-            pokemon_id    = int(call.data.split('_')[1])
-            region_actual = POKEMON_REGION_SERVIDOR.upper()
- 
-            # Verificar que no haya starter de esta región ya
+            # ── Parsear el ID del starter desde callback_data ─────────────────
+            # callback_data tiene el formato "starter_<pokemon_id>"
+            pokemon_id = int(call.data.split('_')[1])
+        except (IndexError, ValueError) as e:
+            logger.error(f"[STARTER] callback_data inválido: {call.data} — {e}")
+            self.bot.answer_callback_query(
+                call.id, "❌ Datos inválidos.", show_alert=True
+            )
+            return
+
+        # ── Región activa (leída en tiempo real) ──────────────────────────────
+        region_actual = POKEMON_REGION_SERVIDOR.upper().strip()
+
+        try:
+            # ── 1. Re-verificar que no tenga ya un starter de esta región ─────
+            #    (edge case: dos clicks rápidos desde distintos devices)
             ya_tiene = db_manager.execute_query(
                 "SELECT COUNT(*) as total FROM POKEMON_USUARIO "
                 "WHERE userID = ? AND region = ?",
@@ -403,21 +458,24 @@ class PokemonHandlers:
             if ya_tiene and ya_tiene[0]["total"] > 0:
                 self.bot.answer_callback_query(
                     call.id,
-                    f"❌ Ya tienes Pokémon en {region_actual}",
+                    f"❌ Ya tienes un Pokémon en {region_actual.capitalize()}.",
                     show_alert=True,
                 )
                 return
- 
-            # ── 1. Mover equipo actual al PC ──────────────────────────────
+
+            # ── 2. Mover equipo actual al PC ──────────────────────────────────
             db_manager.execute_update(
                 "UPDATE POKEMON_USUARIO "
                 "SET en_equipo = 0, posicion_equipo = NULL "
                 "WHERE userID = ? AND en_equipo = 1",
                 (uid,),
             )
-            logger.info(f"[STARTER] Equipo de {uid} movido al PC para nueva región {region_actual}")
- 
-            # ── 2. Crear nuevo starter con la región actual ───────────────
+            logger.info(
+                f"[STARTER] Equipo de {uid} movido al PC "
+                f"para nueva región {region_actual}"
+            )
+
+            # ── 3. Crear el nuevo starter con la región activa ────────────────
             pokemon_creado_id = pokemon_service.crear_pokemon(
                 user_id    = uid,
                 pokemon_id = pokemon_id,
@@ -425,58 +483,64 @@ class PokemonHandlers:
                 region     = region_actual,
                 shiny      = False,
             )
- 
+
             if not pokemon_creado_id:
                 self.bot.answer_callback_query(
-                    call.id, "❌ Error al crear Pokémon.", show_alert=True
+                    call.id, "❌ Error al crear el Pokémon.", show_alert=True
                 )
                 return
- 
-            # ── 3. Poner en el equipo (slot 0) ────────────────────────────
+
+            # ── 4. Agregar al equipo (slot 0) ─────────────────────────────────
             pokemon_service.mover_a_equipo(pokemon_creado_id, uid)
- 
-            # ── Items de bienvenida ───────────────────────────────────────
+
+            # ── 5. Items de bienvenida ─────────────────────────────────────────
             from pokemon.services import items_service
             try:
                 items_service.agregar_item(uid, 'pokeball', 10)
                 items_service.agregar_item(uid, 'pocion', 3)
-            except Exception:
-                pass
- 
-            # ── Nombre del Pokémon desde Pokédex ─────────────────────────
+            except Exception as item_err:
+                logger.warning(f"[STARTER] No se pudieron entregar items: {item_err}")
+
+            # ── 6. Nombre del Pokémon desde la Pokédex ────────────────────────
             pokemon_data = _pdex.obtener_pokemon(pokemon_id)
             nombre = (
                 pokemon_data.get('nombre', f'Pokémon #{pokemon_id}')
                 if pokemon_data else f'Pokémon #{pokemon_id}'
             )
- 
+
+            # ── 7. Editar el mensaje del grupo con el resultado ───────────────
+            region_display = region_actual.capitalize()
             texto = (
                 f"✅ <b>¡{nombre} elegido!</b>\n\n"
-                f"🗺️ Región: <b>{region_actual}</b>\n\n"
+                f"🗺️ Región: <b>{region_display}</b>\n\n"
                 f"🎁 <b>Items recibidos:</b>\n"
-                f"• 10× Pokéball\n"
+                f"• 10× Poké Ball\n"
                 f"• 3× Poción\n\n"
-                f"¡Tu aventura en {region_actual} comienza ahora!\n"
+                f"¡Tu aventura en {region_display} comienza ahora!\n"
                 f"Usa /pokemon para ver tu menú."
             )
             self.bot.edit_message_text(
                 texto, cid, call.message.message_id, parse_mode='HTML'
             )
             self.bot.answer_callback_query(call.id, f"✅ {nombre} elegido!")
-            logger.info(f"[STARTER] {uid} eligió {nombre} en {region_actual}")
- 
-            # ── Pedir mote ────────────────────────────────────────────────
+
+            logger.info(
+                f"[STARTER] {uid} eligió {nombre} (#{pokemon_id}) "
+                f"en región {region_actual}"
+            )
+
+            # ── 8. Pedir apodo ─────────────────────────────────────────────────
             nuevo_poke = pokemon_service.obtener_pokemon(pokemon_creado_id)
             if nuevo_poke:
                 from pokemon.pokemon_class import pedir_mote_pokemon
- 
-                def _guardar_mote(mote):
+
+                def _guardar_mote(mote: str | None) -> None:
                     if mote:
                         db_manager.execute_update(
                             "UPDATE POKEMON_USUARIO SET apodo = ? WHERE id_unico = ?",
                             (mote, pokemon_creado_id),
                         )
- 
+
                 pedir_mote_pokemon(
                     bot=self.bot,
                     user_id=uid,
@@ -485,10 +549,18 @@ class PokemonHandlers:
                     chat_id=cid,
                     message_thread_id=getattr(call.message, "message_thread_id", None),
                 )
- 
+
         except Exception as e:
-            logger.error(f"Error en callback_elegir_starter: {e}", exc_info=True)
-            self.bot.answer_callback_query(call.id, f"❌ Error: {str(e)}", show_alert=True)
+            logger.error(
+                f"[STARTER] Error en callback_elegir_starter: {e}", exc_info=True
+            )
+            self.bot.answer_callback_query(
+                call.id, f"❌ Error: {str(e)}", show_alert=True
+            )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # /pokedex
+    # ──────────────────────────────────────────────────────────────────────────
 
     def cmd_pokedex(self, message):
         """
@@ -520,9 +592,9 @@ class PokemonHandlers:
         pct_av   = round(av  / total * 100, 1) if total else 0
         pct_cap  = round(cap / total * 100, 1) if total else 0
 
-        barra = lambda n, t, largo=20: (
-            "█" * int(n / t * largo) + "░" * (largo - int(n / t * largo))
-        ) if t else "░" * largo
+        def barra(n, t, largo=20):
+            filled = int(n / t * largo) if t else 0
+            return "█" * filled + "░" * (largo - filled)
 
         amuleto_txt = (
             "\n\n🌈 <b>¡Tienes el Amuleto Iris!</b> ×3 Shiny"
@@ -546,18 +618,8 @@ class PokemonHandlers:
 
     def cmd_salvaje(self, message):
         """
-        /salvaje — El usuario paga COSTO_INVOCACION_SALVAJE cosmos para
-        invocar un Pokémon salvaje que SOLO él puede combatir.
-
-        Diseño:
-        - El anuncio se publica en el mismo hilo del grupo (igual que los
-          spawns automáticos), para que el usuario no necesite DM previo.
-        - El callback_data lleva el user_id del invocador, de modo que el
-          handler verifica que solo ese usuario pueda presionar "Combatir".
-        - El spawn se almacena con canal_id = user_id (clave privada que
-          nadie más puede reclamar en los spawns del canal).
-        - El mensaje del grupo se borra al iniciar el combate, igual que
-          en los spawns automáticos.
+        /salvaje — El usuario paga cosmos para invocar un Pokémon salvaje
+        que SOLO él puede combatir.
         """
         user_id = message.from_user.id
         chat_id = message.chat.id
@@ -570,21 +632,22 @@ class PokemonHandlers:
         if not es_privado and not es_pokeclub:
             try:
                 self.bot.delete_message(message.chat.id, message.message_id)
-                m = self.bot.send_message(chat_id, "❌ Solo puedes usar este comando en pokeclub!.",message_thread_id=tid,)
+                m = self.bot.send_message(
+                    chat_id, "❌ Solo puedes usar este comando en pokeclub!.",
+                    message_thread_id=tid,
+                )
                 time.sleep(5)
                 self.bot.delete_message(chat_id, m.message_id)
             except Exception:
                 pass
             return
 
-        # Intentar borrar el comando para mantener el hilo limpio
         try:
             self.bot.delete_message(chat_id, message.message_id)
         except Exception:
             pass
 
         def _responder_error(texto: str):
-            """Envía error en el hilo y lo borra tras 8 s."""
             try:
                 m = self.bot.send_message(
                     chat_id, texto,
@@ -599,7 +662,6 @@ class PokemonHandlers:
         try:
             from funciones import user_service, economy_service
 
-            # 1. Validar equipo
             equipo = pokemon_service.obtener_equipo(user_id)
             if not equipo:
                 _responder_error(
@@ -615,7 +677,6 @@ class PokemonHandlers:
                 )
                 return
 
-            # 2. Validar saldo
             costo_salvaje = calcular_costo_salvaje(user_id)
             saldo = economy_service.get_balance(user_id)
             if saldo is None or saldo < costo_salvaje:
@@ -626,10 +687,6 @@ class PokemonHandlers:
                 )
                 return
 
-            # 3. Verificar que el usuario no tenga ya una invocación pendiente.
-            #    Nota: se consulta el dict INTERNO del handler, completamente
-            #    independiente de spawn_service.  Los spawns automáticos del
-            #    canal NO interfieren con esta comprobación y viceversa.
             if user_id in self._invocaciones_privadas:
                 _responder_error(
                     "⚠️ Ya tienes un Pokémon salvaje esperándote.\n"
@@ -637,26 +694,19 @@ class PokemonHandlers:
                 )
                 return
 
-            # 4. Cobrar cosmos ANTES de generar (no reembolsable en caso de fallo).
             ok_pago = economy_service.subtract_credits(
-                user_id,
-                costo_salvaje,
+                user_id, costo_salvaje,
                 "Invocación Pokémon salvaje (/salvaje)",
             )
             if not ok_pago:
                 _responder_error("❌ Error al procesar el pago. Intenta de nuevo.")
                 return
 
-            # 5. Generar datos del Pokémon SIN escribir nada en spawn_service.
-            #    spawn_service.generar_datos_spawn solo calcula y devuelve
-            #    el objeto Spawn; no lo almacena en spawns_activos.
             spawn = spawn_service.generar_datos_spawn(user_id)
 
             if spawn is None:
-                # Reembolsar si la generación falla.
                 economy_service.add_credits(
-                    user_id,
-                    costo_salvaje,
+                    user_id, costo_salvaje,
                     "Reembolso /salvaje (spawn fallido)",
                 )
                 _responder_error(
@@ -665,9 +715,6 @@ class PokemonHandlers:
                 )
                 return
 
-            # Guardar en el dict interno del handler.  spawn_service no sabe
-            # nada de esta invocación; los spawns automáticos siguen su propio
-            # ciclo sin interferencia.
             self._invocaciones_privadas[user_id] = {
                 "pokemon_id": spawn.pokemon_id,
                 "nivel":      spawn.nivel,
@@ -675,7 +722,6 @@ class PokemonHandlers:
                 "nombre":     spawn.nombre,
             }
 
-            # 6. Publicar anuncio en el hilo del grupo con botón exclusivo
             shiny_text = " ✨ <b>¡¡¡SHINY!!!</b>" if spawn.shiny else ""
             nombre_usuario = (
                 f"@{message.from_user.username}"
@@ -689,7 +735,6 @@ class PokemonHandlers:
                 f"🔒 <i>Solo {nombre_usuario} puede combatirlo.</i>"
             )
 
-            # callback_data lleva user_id → el handler lo valida
             keyboard = types.InlineKeyboardMarkup()
             keyboard.add(
                 types.InlineKeyboardButton(
@@ -741,20 +786,13 @@ class PokemonHandlers:
             logger.error(f"[SALVAJE] Error en cmd_salvaje: {e}", exc_info=True)
             _responder_error("❌ Error inesperado. Intenta de nuevo.")
 
-
     def _callback_salvaje_combatir(self, call):
         """
         Callback del botón "⚔️ ¡Combatir!" del Pokémon salvaje privado.
-
-        Lee los datos de la invocación desde self._invocaciones_privadas,
-        completamente independiente de spawn_service.  Esto permite que un
-        spawn automático público y una invocación privada de /salvaje
-        coexistan simultáneamente sin interferencia.
         """
         user_id = call.from_user.id
 
         try:
-            # Extraer uid_dueño del callback: salvaje_combatir_{uid}
             partes = call.data.split("_")
             if len(partes) < 3:
                 self.bot.answer_callback_query(
@@ -764,7 +802,6 @@ class PokemonHandlers:
 
             uid_dueño = int(partes[2])
 
-            # Solo el dueño puede combatir este Pokémon.
             if user_id != uid_dueño:
                 self.bot.answer_callback_query(
                     call.id,
@@ -773,8 +810,6 @@ class PokemonHandlers:
                 )
                 return
 
-            # Recuperar datos del dict INTERNO del handler.
-            # spawn_service no tiene registro de esta invocación.
             spawn_data = self._invocaciones_privadas.get(user_id)
             if not spawn_data:
                 self.bot.answer_callback_query(
@@ -792,7 +827,6 @@ class PokemonHandlers:
                     pass
                 return
 
-            # Responder el callback DE INMEDIATO para no dejar expirar el query_id.
             try:
                 self.bot.answer_callback_query(
                     call.id, "⚔️ ¡Iniciando batalla!", show_alert=False
@@ -800,15 +834,13 @@ class PokemonHandlers:
             except Exception:
                 pass
 
-            # Consumir la invocación antes de iniciar la batalla.
-            # Si start_battle falla, el usuario tendrá que invocar de nuevo.
             self._invocaciones_privadas.pop(user_id, None)
 
             from pokemon.wild_battle_system import wild_battle_manager
 
             success, msg = wild_battle_manager.start_battle(
                 user_id=user_id,
-                thread_id=user_id,   # thread_id = user_id identifica batallas privadas
+                thread_id=user_id,
                 spawn_data=spawn_data,
                 bot=self.bot,
             )
