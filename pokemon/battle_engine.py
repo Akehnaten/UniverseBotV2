@@ -346,6 +346,8 @@ def resolve_damage_move(
         result.log.append("  🐉 ¡<b>Multiescamas</b> redujo el daño a la mitad!\n")
 
 
+    # El daño no puede superar el HP actual del defensor
+    damage = min(damage, max(0, defender_hp))
     result.damage = damage
 
     # ── Log de efectividad ────────────────────────────────────────────────────
@@ -1313,6 +1315,13 @@ RECOIL_MOVES: dict = {
 }
 RECOIL_MOVES = {k: v for k, v in RECOIL_MOVES.items() if v > 0}
 
+# Movimientos que debilitan al USUARIO después de ejecutarse
+SELF_KO_MOVES: frozenset[str] = frozenset({
+    "explosion",
+    "selfdestruct",
+    "mistyexplosion",
+})
+
 # Movimientos que bajan stat del ATACANTE tras hacer daño (solo si daño > 0).
 # Formato: move_key → [(stat, delta), ...]  — target siempre es "self".
 SECONDARY_SELF_STAT_DROPS: dict[str, list] = {
@@ -2244,6 +2253,7 @@ __all__ = [
     # ── HIGH_CRIT_MOVES ─────────────────────────────────────────────────
     "MOVE_EFFECTS",
     "_HIGH_CRIT_MOVES",
+    "SELF_KO_MOVES",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2658,6 +2668,11 @@ def apply_move(
     if fainted:
         log.append(f"  💀 ¡<b>{defender.name}</b> se debilitó!\n")
     
+    # ── Self-KO: el atacante se debilita tras usar el movimiento ─────────────
+    if mk in SELF_KO_MOVES and total_dmg > 0:
+        attacker.hp_actual = 0
+        log.append(f"  💥 ¡<b>{attacker.name}</b> se debilitó por el esfuerzo!\n")
+
     # Bajada de stats propia (ej: Sofoco)
     if total_dmg > 0 and mk in SECONDARY_SELF_STAT_DROPS:
         for _stat, _delta in SECONDARY_SELF_STAT_DROPS[mk]:

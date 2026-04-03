@@ -76,6 +76,7 @@ from pokemon.battle_engine import (
     RECOIL_MOVES,
     MOVE_NAMES_ES,
     _HIGH_CRIT_MOVES,
+    SELF_KO_MOVES,
 )
 from pokemon.services import pokemon_service, movimientos_service, pokedex_service
 from pokemon.battle_adapter import (side_from_pvp, sync_pvp_side)
@@ -256,6 +257,7 @@ class PvPBattle:
     group_msg_id:    Optional[int] = None
     # Historial de líneas para el broadcast
     broadcast_log:   List[str] = field(default_factory=list)
+    battle_log:      List[str] = field(default_factory=list)   # log mostrado en DM
     winner_id:       Optional[int] = None
     created_at:      float = field(default_factory=time.time)
     # ── Snapshot para restaurar HP/stats reales al finalizar ─────────────────
@@ -1002,7 +1004,8 @@ class PvPManager:
         atk_p = attacker_side.get_active_pokemon()
         def_p = defender_side.get_active_pokemon()
 
-        if not atk_p or not def_p:
+        # No actuar si el atacante ya está K.O. (ej: usó Explosión antes)
+        if not atk_p or not def_p or atk_p.hp_actual <= 0 or def_p.hp_actual <= 0:
             return False
 
         atk_name = atk_p.mote or atk_p.nombre
@@ -1155,6 +1158,11 @@ class PvPManager:
 
         if type_eff > 1.0:       turn_log.append("  💥 ¡Es muy eficaz!\n")
         elif 0 < type_eff < 1.0: turn_log.append("  😐 No es muy eficaz…\n")
+
+        # ── Self-KO: Explosión / Autodestrucción debilitan al atacante ──────────
+        if move_key in SELF_KO_MOVES and total_dmg > 0:
+            atk_p.hp_actual = 0
+            turn_log.append(f"  💥 ¡<b>{atk_name}</b> se debilitó por el esfuerzo!\n")
 
         # Persistir HPs al final del loop (una sola escritura cada uno)
         try:
@@ -1703,7 +1711,7 @@ class PvPManager:
         return mk
 
     def _build_battle_panel(self, battle: PvPBattle, viewer_side: PvPSide) -> str:
-        from pokemon.battle_ui import build_pokemon_line
+        from pokemon.battle_ui import build_pokemon_line, build_field_status_line
         from pokemon.services.pokedex_service import pokedex_service as _pdx_svc
 
         own   = viewer_side
@@ -1719,17 +1727,24 @@ class PvPManager:
         rival_max = rival_p.stats.get("hp", rival_p.hp_actual) if rival_p else 1
 
         rival_username = self._get_username(rival.user_id) if rival else "?"
-        own_username   = self._get_username(own.user_id)
 
-        from pokemon.battle_ui import build_field_status_line
-        _fl_txt     = build_field_status_line(battle)
-        weather_txt = ("\n" + _fl_txt) if _fl_txt else ""
-        terrain_txt = ""   # ya incluido en weather_txt via build_field_status_line
+        # ── Estado del campo (clima, terreno, salas, hazards) ──────────────────
+        _fl_txt    = build_field_status_line(battle)
+        field_line = (_fl_txt + "\n") if _fl_txt else ""
 
+        # ── Pokémon restantes del rival (sin contar el activo) ─────────────────
+        rival_restantes = 0
+        if rival:
+            for pid in rival.pokemon_ids:
+                p = pokemon_service.obtener_pokemon(pid)
+                if p and p.hp_actual > 0 and pid != (rival_p.id_unico if rival_p else -1):
+                    rival_restantes += 1
+
+        # ── Líneas de Pokémon (mismo formato que gym) ─────────────────────────
         rival_line = build_pokemon_line(
             lado      = "🔴",
-            nombre    = f"{rival_username} — {rival_p.mote or rival_p.nombre}" if rival_p else f"🔴 {rival_username}",
-            sexo      = getattr(rival_p, "sexo", None) if rival_p else None,
+            nombre    = (rival_p.mote or rival_p.nombre) if rival_p else "?",
+            sexo      = getattr(rival_p, "sexo", None)   if rival_p else None,
             tipos     = rival_tipos,
             nivel     = rival_p.nivel if rival_p else 0,
             hp_actual = rival_p.hp_actual if rival_p else 0,
@@ -1737,9 +1752,10 @@ class PvPManager:
             status    = rival.status if rival else None,
             stages    = rival.stat_stages if rival else {},
         )
+
         own_line = build_pokemon_line(
             lado      = "🔵",
-            nombre    = f"{own_username} — {own_p.mote or own_p.nombre}" if own_p else f"🔵 {own_username}",
+            nombre    = (own_p.mote or own_p.nombre) if own_p else "?",
             sexo      = getattr(own_p, "sexo", None) if own_p else None,
             tipos     = own_tipos,
             nivel     = own_p.nivel if own_p else 0,
@@ -1749,23 +1765,28 @@ class PvPManager:
             stages    = own.stat_stages,
         )
 
-        txt = (
-            f"⚔️ <b>PvP {battle.fmt.value}</b>  —  Turno {battle.turn_number}"
-            f"{weather_txt}\n\n"
-            f"{rival_line}\n\n"
-            f"{own_line}\n"
+        # ── Log de turnos recientes ────────────────────────────────────────────
+        log_txt = ""
+        if battle.battle_log:
+            entradas   = battle.battle_log[-3:]
+            encabezado = (
+                "📋 <b>Último turno:</b>" if len(entradas) == 1
+                else f"📋 <b>Últimos {len(entradas)} turnos:</b>"
+            )
+            log_texto = "\n─\n".join(entradas)
+            log_txt   = f"\n\n{encabezado}\n{log_texto}"
+
+        return (
+            f"⚔️ <b>BATALLA PvP {battle.fmt.value}</b>\n"
+            f"👤 Rival: <b>{rival_username}</b>\n"
+            f"{field_line}"
+            f"\n"
+            f"{rival_line}\n"
+            f"💊 Pokémon restantes rival: {rival_restantes}\n\n"
+            f"{own_line}"
+            f"{log_txt}\n\n"
+            f"💡 <b>Tu turno</b> — ¿Qué harás?"
         )
-
-        # Equipo propio (iconos)
-        if len(own.pokemon_ids) > 1:
-            txt += "\n  <i>Equipo:</i> "
-            for pid in own.pokemon_ids:
-                p    = pokemon_service.obtener_pokemon(pid)
-                icon = "🟢" if (p and p.hp_actual > 0) else "⬛"
-                txt += icon
-            txt += "\n"
-
-        return txt
 
     def _build_battle_markup(
         self, battle: "PvPBattle", viewer_side: "PvPSide"
@@ -1807,22 +1828,12 @@ class PvPManager:
                     ))
             return mk
 
-        # ── Menú principal (igual que wild/gym) ───────────────────────────────
         mk.add(
-            types.InlineKeyboardButton(
-                "⚔️ Atacar",
-                callback_data=f"pvp_fight_{uid}",
-            ),
-            types.InlineKeyboardButton(
-                "👥 Equipo",
-                callback_data=f"pvp_team_{uid}",
-            ),
+            types.InlineKeyboardButton("⚔️ Combate",  callback_data=f"pvp_fight_{uid}"),
+            types.InlineKeyboardButton("👥 Equipo",   callback_data=f"pvp_team_{uid}"),
         )
         mk.add(
-            types.InlineKeyboardButton(
-                "🏳️ Rendirse",
-                callback_data=f"pvp_forfeit_{uid}",
-            ),
+            types.InlineKeyboardButton("🏳️ Rendirse", callback_data=f"pvp_forfeit_{uid}"),
         )
         return mk
 
@@ -1948,27 +1959,32 @@ class PvPManager:
         return False
 
     def _update_panels(self, battle: PvPBattle, bot, extra_log: Optional[List[str]] = None):
-        """Edita los paneles de ambos jugadores."""
-        log_txt = "".join(extra_log) if extra_log else ""
+        """Edita los paneles de ambos jugadores. El extra_log se guarda en battle.battle_log."""
+        # Acumular el log del turno en el historial (lo muestra _build_battle_panel)
+        if extra_log:
+            combined = "".join(extra_log).strip()
+            if combined:
+                battle.battle_log.append(combined)
+                if len(battle.battle_log) > 5:
+                    battle.battle_log = battle.battle_log[-5:]
+
         for side in (battle.side1, battle.side2):
             try:
                 txt = self._build_battle_panel(battle, side)
-                if log_txt:
-                    txt += f"\n{log_txt}"
-                mk = self._build_battle_markup(battle, side)
+                mk  = self._build_battle_markup(battle, side)
                 if side.dm_message_id:
                     bot.edit_message_text(
                         txt,
-                        chat_id    = side.user_id,
-                        message_id = side.dm_message_id,
-                        parse_mode = "HTML",
+                        chat_id      = side.user_id,
+                        message_id   = side.dm_message_id,
+                        parse_mode   = "HTML",
                         reply_markup = mk,
                     )
                 else:
                     msg = bot.send_message(
                         side.user_id, txt,
-                        parse_mode="HTML",
-                        reply_markup=mk,
+                        parse_mode   = "HTML",
+                        reply_markup = mk,
                     )
                     side.dm_message_id = msg.message_id
             except Exception as e:

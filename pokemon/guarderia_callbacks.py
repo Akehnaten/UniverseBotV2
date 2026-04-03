@@ -46,21 +46,18 @@ class GuarderiaCallbacks:
     def _handle_daycare(self, call: types.CallbackQuery):
         """
         Procesa todos los callbacks daycare_<accion>_<uid>[_<extra>].
-
-        Prefijos usados:
-            daycare_menu_<uid>              → mostrar menú principal
-            daycare_depositar_<uid>         → elegir Pokémon a depositar
-            daycare_retirar_<uid>           → elegir Pokémon a retirar
-            daycare_rethuevo_<uid>          → elegir huevo a retirar
-            daycare_dep_<uid>_<poke_id>     → confirmar depósito
-            daycare_ret_<uid>_<poke_id>     → confirmar retiro de Pokémon
-            daycare_delhuevo_<uid>_<huevo_id> → confirmar eliminación de huevo
         """
         from pokemon.menu_pokemon import MenuPokemon
         from pokemon.services.crianza_service import crianza_service
         from database import db_manager
 
+        # --- CORRECCIÓN AQUÍ ---
+        # Validar que call.data no sea None antes de usar split
         data = call.data
+        if not data:
+            return
+        # -----------------------
+
         parts = data.split('_')
         # partes mínimas: daycare / accion / uid
         if len(parts) < 3:
@@ -72,7 +69,7 @@ class GuarderiaCallbacks:
         # Validar que el uid del callback coincide con quien pulsa
         try:
             uid_callback = int(parts[2])
-        except ValueError:
+        except (ValueError, IndexError): # Añadido IndexError por seguridad
             self.bot.answer_callback_query(call.id, "❌ UID inválido")
             return
 
@@ -82,6 +79,11 @@ class GuarderiaCallbacks:
 
         user_id = uid_callback
 
+        # Es recomendable validar también call.message si los métodos de MenuPokemon lo usan
+        if not call.message:
+            self.bot.answer_callback_query(call.id, "❌ Error: Mensaje no encontrado")
+            return
+
         if accion == 'menu':
             MenuPokemon._mostrar_guarderia(user_id, call.message, self.bot)
             self.bot.answer_callback_query(call.id)
@@ -89,7 +91,6 @@ class GuarderiaCallbacks:
         elif accion == 'depositar':
             MenuPokemon._guarderia_depositar(user_id, call.message, self.bot)
             self.bot.answer_callback_query(call.id)
-
         elif accion == 'retirar':
             MenuPokemon._guarderia_retirar(user_id, call.message, self.bot)
             self.bot.answer_callback_query(call.id)
@@ -164,6 +165,10 @@ class GuarderiaCallbacks:
         from pokemon.services.crianza_service import crianza_service
         from pokemon.guarderia_steps import _esperando_mote
 
+        # 1. Validar que call.data no sea None
+        if not call.data:
+            return
+
         parts = call.data.split('_')
         if len(parts) < 4:
             self.bot.answer_callback_query(call.id, "❌ Datos inválidos")
@@ -172,7 +177,7 @@ class GuarderiaCallbacks:
         try:
             uid_callback = int(parts[2])
             pokemon_id   = int(parts[3])
-        except ValueError:
+        except (ValueError, IndexError):
             self.bot.answer_callback_query(call.id, "❌ IDs inválidos")
             return
 
@@ -186,27 +191,36 @@ class GuarderiaCallbacks:
         ok, msg = crianza_service.finalizar_eclosion(uid_callback, pokemon_id, None)
         self.bot.answer_callback_query(call.id)
 
+        # 2. Validar que call.message exista antes de intentar editarlo
+        if not call.message:
+            # Si no hay mensaje (ej. mensaje borrado), enviamos uno nuevo
+            self.bot.send_message(uid_callback, msg, parse_mode="HTML")
+            return
+
         # Editar el mensaje original quitando los botones
         try:
+            chat_id = call.message.chat.id
+            message_id = call.message.message_id
+
             if call.message.content_type in ("photo", "animation", "document", "video"):
                 self.bot.edit_message_caption(
                     caption=msg,
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
+                    chat_id=chat_id,
+                    message_id=message_id,
                     parse_mode="HTML",
                     reply_markup=None,
                 )
             else:
                 self.bot.edit_message_text(
                     text=msg,
-                    chat_id=call.message.chat.id,
-                    message_id=call.message.message_id,
+                    chat_id=chat_id,
+                    message_id=message_id,
                     parse_mode="HTML",
                     reply_markup=None,
                 )
         except Exception as e:
             logger.warning(f"[GUARDERIA] No se pudo editar mensaje mote_no: {e}")
-            self.bot.send_message(uid_callback, msg)
+            self.bot.send_message(uid_callback, msg, parse_mode="HTML")
 
 
 def setup_guarderia_callbacks(bot):

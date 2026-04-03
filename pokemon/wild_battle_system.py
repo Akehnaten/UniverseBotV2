@@ -2459,7 +2459,9 @@ class WildBattleManager:
                 return True
 
             # ── Verificar precisión ───────────────────────────────────────────
-            precision = movimientos_service.obtener_precision(move_name)
+            # Tratar True/None/0 como "nunca falla" (igual que en battle_engine.apply_move)
+            _prec_raw = movimientos_service.obtener_precision(move_name)
+            precision = 999 if (_prec_raw is True or not _prec_raw) else int(_prec_raw)
             if precision < 999 and random.randint(1, 100) > precision:
                 log.append(f"⚡ <b>{p_name}</b> usó <b>{nombre_es}</b>... ¡pero falló!\n")
                 # El jugador gastó su turno → el salvaje puede responder

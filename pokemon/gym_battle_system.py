@@ -828,6 +828,16 @@ class GymBattleManager:
                     (_p.hp_actual, battle.player_pokemon_id)
                 )
 
+            # ── Self-KO: Explosión / Autodestrucción debilitan al atacante ──────
+            from pokemon.battle_engine import SELF_KO_MOVES
+            if mk_clean in SELF_KO_MOVES and total_dmg_to_npc > 0:
+                _p.hp_actual = 0
+                db_manager.execute_update(
+                    "UPDATE POKEMON_USUARIO SET hp_actual = 0 WHERE id_unico = ?",
+                    (battle.player_pokemon_id,)
+                )
+                log.append(f"  💥 ¡<b>{p_name}</b> se debilitó por el esfuerzo!\n")
+                
             # 7. EFECTOS SECUNDARIOS Y ESTADOS FINALES
             if last_result:
                 _apply_secondary_effect(
