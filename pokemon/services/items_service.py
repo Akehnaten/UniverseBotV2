@@ -131,7 +131,7 @@ class ItemsService:
             "piedra eterna": {"precio": 50, "tipo": "crianza", "efecto": "everstone", "herencia_naturaleza": True, "desc": "Hereda naturaleza en cría"},
             "amuleto oval": {"precio": 80, "tipo": "combate_utilidad", "efecto": "lucky_egg", "exp_boost": 1.5, "desc": "+50% EXP"},
             "moneda amuleto": {"precio": 90, "tipo": "combate_utilidad", "efecto": "amulet_coin", "dinero_boost": 2.0, "desc": "x2 dinero en batalla"},
-            "repartidor_exp": {"precio": 150,"tipo": "utilidad","equipable": True,"desc": "Reparte la EXP ganada en batalla entre todo el equipo por igual.",},
+            "repartidor_exp": {"precio": 150,"tipo": "utilidad","equipable": True,"desc": "Reparte la EXP ganada en batalla entre todo el equipo por igual."},
             
             # ========== CHOICE ITEMS ==========
             "banda elección": {"precio": 80, "tipo": "combate_choice", "efecto": "choice_band", "boost": 1.5, "stat": "atq", "bloquea": True, "desc": "x1.5 Ataque, bloquea movimiento"},
@@ -161,7 +161,6 @@ class ItemsService:
             "baya anjiro": {"precio": 8, "tipo": "baya_mitigacion", "efecto": "passho_berry", "reduce_tipo": "Agua", "reduce": 0.5, "consumible": True, "desc": "Reduce Agua x0.5"},
 
             # ========== BAYAS REDUCTORAS DE EVs ==========
-            # Reducen 10 EVs del stat correspondiente (mínimo 0)
             "baya drenar": {"precio": 5, "reduce_ev": "hp",     "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs PS"},
             "baya keler":  {"precio": 5, "reduce_ev": "atq",    "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs Ataque"},
             "baya qualot": {"precio": 5, "reduce_ev": "def",    "cantidad": 10, "tipo": "baya_ev", "desc": "-10 EVs Defensa"},
@@ -258,9 +257,6 @@ class ItemsService:
                 "items": ["baya drenar", "baya keler", "baya qualot", "baya tomato", "baya adroc", "baya tamato"],
                 "orden": 17
             },
-
-
-
         }
     
     def obtener_item(self, nombre: str) -> Optional[Dict]:
@@ -276,6 +272,24 @@ class ItemsService:
         from pokemon.items_database_complete import ITEMS_COMPLETOS_DB
         return ITEMS_COMPLETOS_DB.get(nombre_lower)
     
+    def _item_existe(self, nombre: str) -> bool:
+        """
+        Verifica si un ítem existe en cualquiera de las dos bases de datos
+        (items_db propio O items_database_complete).
+
+        Esta verificación reemplaza el chequeo antiguo `nombre not in self.items_db`
+        que rechazaba silenciosamente ítems válidos como leftovers, choiceband,
+        lifeorb, etc., definidos únicamente en items_database_complete.
+        """
+        nombre_lower = nombre.lower()
+        if nombre_lower in self.items_db:
+            return True
+        try:
+            from pokemon.items_database_complete import ITEMS_COMPLETOS_DB
+            return nombre_lower in ITEMS_COMPLETOS_DB
+        except Exception:
+            return False
+
     def obtener_precio(self, nombre: str) -> int:
         """Obtiene precio de un item"""
         item = self.obtener_item(nombre)
@@ -308,7 +322,6 @@ class ItemsService:
                 WHERE userID = ? AND cantidad > 0
             """
             results = self.db.execute_query(query, (user_id,))
-            
             return {row['item_nombre']: row['cantidad'] for row in results}
             
         except Exception as e:
@@ -316,8 +329,22 @@ class ItemsService:
             return {}
     
     def agregar_item(self, user_id: int, item_nombre: str, cantidad: int = 1) -> Tuple[bool, str]:
-        """Agrega item al inventario"""
-        if item_nombre not in self.items_db:
+        """
+        Agrega item al inventario del usuario.
+
+        Acepta ítems de items_db (base propia) y de items_database_complete
+        (ítems competitivos, MTs, mentas, etc.).  Si el ítem no existe en
+        ninguna de las dos fuentes devuelve error.
+        """
+        # ── CORRECCIÓN: usar _item_existe en lugar de `not in self.items_db` ──
+        # El chequeo antiguo rechazaba silenciosamente ítems como leftovers,
+        # choiceband, lifeorb, etc., que solo existen en items_database_complete,
+        # causando que desaparecieran al desequiparlos o al ganarlos en batalla.
+        if not self._item_existe(item_nombre):
+            logger.warning(
+                f"[ITEMS] agregar_item: ítem '{item_nombre}' no encontrado "
+                f"en ninguna base de datos — no se agrega."
+            )
             return False, f"❌ Item '{item_nombre}' no existe"
         
         try:
@@ -460,7 +487,6 @@ class ItemsService:
                 return {'exito': False, 'mensaje': f'{pokemon.nombre} ya tiene HP completo.'}
 
             cura = item_data['cura_hp']
-            # Si es fracción (bayas como 0.25) calculamos sobre hp_max
             if isinstance(cura, float) and cura <= 1.0:
                 cura = int(hp_max * cura)
 
@@ -500,7 +526,6 @@ class ItemsService:
             resultado['efectos'].append("Restauró PP a todos los movimientos")
 
         # ── Vitamina: AUMENTAR EVs (+10) ──────────────────────────────────
-        # Lee siempre de BD para no depender del objeto en memoria
         if 'ev' in item_data and 'cantidad' in item_data:
             stat_key    = item_data['ev']
             cantidad_ev = int(item_data['cantidad'])
@@ -510,7 +535,6 @@ class ItemsService:
             if not col:
                 return {'exito': False, 'mensaje': f'Stat desconocido: {stat_key}'}
 
-            # Leer EV actual DIRECTO de BD (no del objeto — evita bug de redondeo)
             rows = db_manager.execute_query(
                 f"SELECT {col}, "
                 f"ev_hp+ev_atq+ev_def+ev_atq_sp+ev_def_sp+ev_vel AS total_evs "
@@ -523,13 +547,11 @@ class ItemsService:
             ev_actual  = int(rows[0].get(col) or 0)
             total_evs  = int(rows[0].get('total_evs') or 0)
 
-            # Límite: 252 por stat, 510 en total
             if ev_actual >= 252:
                 return {'exito': False, 'mensaje': f'<b>{nombre_stat}</b> ya tiene el máximo de EVs (252).'}
             if total_evs >= 510:
                 return {'exito': False, 'mensaje': 'Este Pokémon ya tiene el máximo total de EVs (510).'}
 
-            # Calcular cuánto se puede realmente agregar
             puede_stat  = min(cantidad_ev, 252 - ev_actual)
             puede_total = min(puede_stat, 510 - total_evs)
             nuevo_ev    = ev_actual + puede_total
@@ -538,8 +560,6 @@ class ItemsService:
                 f"UPDATE POKEMON_USUARIO SET {col} = ? WHERE id_unico = ?",
                 (nuevo_ev, pokemon_id),
             )
-
-            # Recalcular stats con los EVs nuevos
             self._recalcular_stats(pokemon_id)
 
             resultado['efectos'].append(
@@ -547,7 +567,6 @@ class ItemsService:
             )
 
         # ── Baya reductora: REDUCIR EVs (-10) ────────────────────────────
-        # FIX PRINCIPAL: lee de BD directamente, jamás del stat calculado
         if 'reduce_ev' in item_data:
             stat_key    = item_data['reduce_ev']
             cantidad_ev = int(item_data.get('cantidad', 10))
@@ -557,10 +576,6 @@ class ItemsService:
             if not col:
                 return {'exito': False, 'mensaje': f'Stat desconocido: {stat_key}'}
 
-            # ── Leer EV real directamente de la columna BD ────────────────
-            # NUNCA usar pokemon.stats ni pokemon.evs — ambos pueden mostrar
-            # 0 cuando el EV real es 1-9 (el stat calculado no cambia con
-            # pocos EVs por el redondeo de la fórmula Gen 3+)
             rows = db_manager.execute_query(
                 f"SELECT {col} FROM POKEMON_USUARIO WHERE id_unico = ?",
                 (pokemon_id,),
@@ -577,14 +592,12 @@ class ItemsService:
                 }
 
             nuevo_ev   = max(0, ev_actual - cantidad_ev)
-            reduccion  = ev_actual - nuevo_ev   # cuánto bajó realmente (1-10)
+            reduccion  = ev_actual - nuevo_ev
 
             db_manager.execute_update(
                 f"UPDATE POKEMON_USUARIO SET {col} = ? WHERE id_unico = ?",
                 (nuevo_ev, pokemon_id),
             )
-
-            # Recalcular stats con los EVs nuevos
             self._recalcular_stats(pokemon_id)
 
             resultado['efectos'].append(
@@ -631,7 +644,6 @@ class ItemsService:
                 r["pokemonID"], r["nivel"], ivs, evs, r["naturaleza"] or "Hardy"
             )
 
-            # hp_actual no puede superar el nuevo hp_max
             nuevo_hp_max = stats["hp"]
             hp_actual    = min(int(r["hp_actual"] or 0), nuevo_hp_max)
 

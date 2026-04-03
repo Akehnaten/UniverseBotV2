@@ -610,6 +610,61 @@ class PokemonService:
             logger.error(f"❌ Error liberando Pokémon: {e}")
             return False, f"Error: {str(e)}"
     
+    def desequipar_objeto(self, pokemon_id: int, user_id: int) -> tuple[bool, str]:
+        """
+        Desequipa el objeto que lleva un Pokémon y lo devuelve al inventario
+        del usuario.
+
+        Flujo:
+          1. Lee el campo `objeto` actual del Pokémon.
+          2. Si existe, lo agrega (+1) al inventario del usuario.
+          3. Pone `objeto = NULL` en POKEMON_USUARIO.
+
+        Args:
+            pokemon_id: id_unico del Pokémon.
+            user_id:    ID del usuario (para verificar pertenencia y para el
+                        inventario destino).
+
+        Returns:
+            (True, nombre_objeto) si se desequipó correctamente.
+            (False, mensaje_error) si no había objeto o el Pokémon no pertenece
+            al usuario.
+        """
+        try:
+            poke = self.obtener_pokemon(pokemon_id)
+            if not poke:
+                return False, "Pokémon no encontrado."
+            if poke.usuario_id != user_id:
+                return False, "Este Pokémon no te pertenece."
+            if not poke.objeto:
+                return False, "Este Pokémon no lleva ningún objeto."
+
+            nombre_objeto = poke.objeto
+
+            # Devolver al inventario ANTES de limpiar la BD para que ante
+            # cualquier error de escritura el ítem no desaparezca.
+            from pokemon.services.items_service import items_service
+            items_service.agregar_item(user_id, nombre_objeto, 1)
+
+            # Limpiar objeto en BD
+            self.db.execute_update(
+                "UPDATE POKEMON_USUARIO SET objeto = NULL WHERE id_unico = ?",
+                (pokemon_id,),
+            )
+
+            logger.info(
+                f"[DESEQUIPAR] {nombre_objeto!r} desequipado de Pokémon "
+                f"{pokemon_id} y devuelto al inventario de {user_id}."
+            )
+            return True, nombre_objeto
+
+        except Exception as e:
+            logger.error(
+                f"[DESEQUIPAR] Error desequipando objeto de Pokémon "
+                f"{pokemon_id}: {e}"
+            )
+            return False, f"Error inesperado: {e}"
+
     def _row_a_pokemon(self, row: dict) -> "Pokemon":
         """
         Convierte una fila de POKEMON_USUARIO al dataclass Pokemon.

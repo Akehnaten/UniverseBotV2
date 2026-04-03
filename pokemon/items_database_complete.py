@@ -448,8 +448,9 @@ MT_ITEMS_DB = {
     "mt198": {"precio": 6000,  "tipo": "mt", "mt_move": "icespinner",     "desc": "📀 MT198 — Giro Helado · Físico Hielo · Poder 80"},
     "mt200": {"precio": 12000, "tipo": "mt", "mt_move": "terablast",      "desc": "📀 MT200 — Tera Estallido · Especial/Físico según Tera · Poder 80"},
     "mt205": {"precio": 7000,  "tipo": "mt", "mt_move": "iciclecrash",    "desc": "📀 MT205 — Carámbano · Físico Hielo · Poder 85"},
-    "mt206": {"precio": 8000,  "tipo": "mt", "mt_move": "aurasphere",     "desc": "📀 MT206 — Esfera Aural · Especial Lucha · Poder 80"},
+    "mt206": {"precio": 7000,  "tipo": "mt", "mt_move": "dragonclaw",     "desc": "📀 MT206 — Garra Dragón · Físico Dragón · Poder 80"},
     "mt207": {"precio": 7000,  "tipo": "mt", "mt_move": "psychicfangs",   "desc": "📀 MT207 — Colmillos Psíquicos · Físico Psíquico · Poder 85"},
+    "mt208": {"precio": 6000,  "tipo": "mt", "mt_move": "sludgebomb",     "desc": "📀 MT208 — Bomba Lodo · Especial Veneno · Poder 90"},
     "mt210": {"precio": 4000,  "tipo": "mt", "mt_move": "mistyterrain",   "desc": "📀 MT210 — Terreno de Niebla · Estado Hada"},
     "mt211": {"precio": 4000,  "tipo": "mt", "mt_move": "electricterrain","desc": "📀 MT211 — Terreno Eléctrico · Estado Eléctrico"},
     "mt212": {"precio": 4000,  "tipo": "mt", "mt_move": "psychicterrain", "desc": "📀 MT212 — Terreno Psíquico · Estado Psíquico"},
@@ -459,8 +460,8 @@ MT_ITEMS_DB = {
     "mt227": {"precio": 6000,  "tipo": "mt", "mt_move": "saltcure",       "desc": "📀 MT227 — Cura Sal · Estado Roca"},
     "mt231": {"precio": 12000, "tipo": "mt", "mt_move": "collisioncourse","desc": "📀 MT231 — Calambreado · Físico Lucha · Poder 100"},
     "mt233": {"precio": 9000,  "tipo": "mt", "mt_move": "direclaws",      "desc": "📀 MT233 — Garras Duras · Físico Normal · Poder 80"},
-    "mt236": {"precio": 12000,  "tipo": "mt", "mt_move": "aerialace",     "desc": "📀 MT236 — Acróbata · Físico Volador · Poder 110"},
-    "mt237": {"precio": 12000,  "tipo": "mt", "mt_move": "dualwingbeat",  "desc": "📀 MT237 — Ala Bis · Físico Volador · Poder 40"},
+    "mt236": {"precio": 12000, "tipo": "mt", "mt_move": "aerialace",      "desc": "📀 MT236 — Acróbata · Físico Volador · Poder 110"},
+    "mt237": {"precio": 12000, "tipo": "mt", "mt_move": "dualwingbeat",   "desc": "📀 MT237 — Ala Bis · Físico Volador · Poder 40"},
 }
 
 # ========== MENTAS (100 cosmos) ==========
@@ -591,9 +592,9 @@ CATEGORIAS_TIENDA = {
         "orden": 15
     },
     "mentas": {
-    "nombre": "🌿 Mentas (Naturaleza)",
-    "items": list(MENTA_ITEMS_DB.keys()),
-    "orden": 4,   # entre vitaminas(3) y piedras(4) — ajustar el orden del resto +1
+        "nombre": "🌿 Mentas (Naturaleza)",
+        "items": list(MENTA_ITEMS_DB.keys()),
+        "orden": 16,
     },
 }
 

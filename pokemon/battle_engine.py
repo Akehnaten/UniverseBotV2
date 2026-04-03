@@ -2864,7 +2864,39 @@ def apply_end_of_turn(
                 f"  🍓 ¡La {obj.title()} de <b>{side.name}</b>"
                 f" subió su {stat.upper()}!\n"
             )
-   
+
+    # 0b. Objetos de curación pasiva por turno: Restos y Lodo Negro
+    # Orden canónico: antes de drenadoras (Showdown server order).
+    for side in (side_a, side_b):
+        if side.hp_actual <= 0 or side.hp_actual >= side.hp_max:
+            continue
+        obj = (side.objeto or "").lower().replace(" ", "").replace("_", "")
+        if obj == "leftovers" or obj == "restos":
+            # Leftovers: cura 1/16 HP máximo siempre, sin condición de tipo
+            healed = max(1, side.hp_max // 16)
+            side.hp_actual = min(side.hp_max, side.hp_actual + healed)
+            log.append(
+                f"  🍃 Los <b>Restos</b> de <b>{side.name}</b>"
+                f" restauraron {healed} HP.\n"
+            )
+        elif obj == "blacksludge" or obj == "lodo negro" or obj == "lodonegro":
+            # Lodo Negro: cura 1/16 si es tipo Veneno; daña 1/8 si no lo es
+            es_veneno = any(t in ("Veneno", "Poison") for t in side.types)
+            if es_veneno:
+                healed = max(1, side.hp_max // 16)
+                side.hp_actual = min(side.hp_max, side.hp_actual + healed)
+                log.append(
+                    f"  🟣 El <b>Lodo Negro</b> de <b>{side.name}</b>"
+                    f" restauró {healed} HP.\n"
+                )
+            else:
+                dmg = max(1, side.hp_max // 8)
+                side.hp_actual = max(0, side.hp_actual - dmg)
+                log.append(
+                    f"  🟣 ¡El <b>Lodo Negro</b> dañó a <b>{side.name}</b>"
+                    f" en {dmg} HP!\n"
+                )
+
    # 1. Drenadoras (Leech Seed)
     for seeded, other in ((side_a, side_b), (side_b, side_a)):
         if seeded.leechseeded and seeded.hp_actual > 0:
