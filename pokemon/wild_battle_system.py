@@ -1233,6 +1233,10 @@ class WildBattleManager:
             if not battle:
                 return False
 
+            # Durante faint-switch el jugador debe elegir reemplazo primero
+            if getattr(battle, "awaiting_faint_switch", False):
+                return False
+
             player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if not player_pokemon:
                 return False
@@ -1994,6 +1998,26 @@ class WildBattleManager:
             _wild_ground    = is_grounded(getattr(wild, "tipos", ["Normal"]), battle)
             _w_terrain_mult = apply_terrain_boost(battle.terrain, move_tipo, _wild_ground)
 
+            # Multiplicador de habilidad del salvaje (obtenido de Pokédex si existe)
+            from pokemon.battle_engine import calcular_mult_habilidad as _cmh
+            _wild_hab = getattr(wild, "habilidad", "") or ""
+            _w_hab_mult, _ = _cmh(
+                _wild_hab, move_key_wild, move_tipo, categoria,
+                poder, hp_ratio=wild.hp_actual / max(wild.hp_max, 1),
+            )
+            # Objeto del wild (normalmente no tienen, pero soporte por consistencia)
+            from pokemon.battle_engine import calcular_mult_objeto as _cmo
+            _wild_obj     = getattr(wild, "objeto", "") or ""
+            _type_eff_pre = movimientos_service._calcular_efectividad(move_tipo, player_tipos)
+            _w_obj_mult, _w_obj_recoil = _cmo(_wild_obj, move_tipo, categoria, _type_eff_pre)
+            poder_efectivo_wild = max(1, int(poder * _w_hab_mult * _w_obj_mult))
+
+            # Life Orb del wild (rarísimo pero posible en diseño custom)
+            if _w_obj_recoil > 0 and daño > 0:
+                _lo_dmg = max(1, int(wild.hp_max * _w_obj_recoil))
+                wild.hp_actual = max(0, wild.hp_actual - _lo_dmg)
+                log.append(f"  🔴 ¡{wild.nombre} perdió {_lo_dmg} HP por la Vida Esfera!\n")
+
             _w_crit_stg = battle.wild_crit_stage
             if move_key_wild in _HIGH_CRIT_MOVES:
                 _w_crit_stg = min(3, _w_crit_stg + 1)
@@ -2026,7 +2050,7 @@ class WildBattleManager:
             stab     = 1.5 if move_tipo in wild_tipos else 1.0
             daño     = BattleUtils.calculate_damage(
                 wild.nivel, atk, def_eff,
-                max(1, int(poder * _w_weather_mult * _w_terrain_mult)),
+                max(1, int(poder_efectivo_wild * _w_weather_mult * _w_terrain_mult)),
                 stab * type_eff,
                 is_wild_crit,
             )
@@ -2855,6 +2879,9 @@ class WildBattleManager:
             battle = self.get_battle(user_id)
             if not battle or battle.state != BattleState.ACTIVE:
                 return False
+
+            if getattr(battle, "awaiting_faint_switch", False):
+                return False   # No se puede huir mientras se elige reemplazo
             
             player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if not player_pokemon:
@@ -3042,25 +3069,24 @@ class WildBattleManager:
             )
 
             if has_more:
+                # Cancelar el timer activo: el jugador no puede ser penalizado
+                # mientras elige su Pokémon de reemplazo.
+                self._cancel_turn_timer(battle)
+
                 text = (
                     f"💀 <b>{player_pokemon.mote or player_pokemon.nombre} fue derrotado!</b>\n\n"
                     "¿Enviás otro Pokémon?"
                 )
                 keyboard = types.InlineKeyboardMarkup()
                 keyboard.add(
-                    types.InlineKeyboardButton("👥 Elegir Pokémon",
-                                               callback_data=f"battle_team_{user_id}")
+                types.InlineKeyboardButton("👥 Elegir Pokémon",
+                callback_data=f"battle_team_{user_id}")
                 )
                 keyboard.add(
-                    types.InlineKeyboardButton("🏳️ Rendirse",
-                                               callback_data=f"battle_forfeit_{user_id}")
+                types.InlineKeyboardButton("🏳️ Rendirse",
+                callback_data=f"battle_forfeit_{user_id}")
                 )
-                battle.state = BattleState.ACTIVE
-                # Marcar que el jugador está en selección de reemplazo.
-                # Durante este momento el wild NO puede atacar: es un faint
-                # switch limpio, no un turno de combate.
-                # El timer se arranca en switch_pokemon() cuando el nuevo
-                # Pokémon ya está en campo.
+                battle.state               = BattleState.ACTIVE
                 battle.awaiting_faint_switch = True
                 self._edit_battle_message(bot, user_id, battle.message_id, text, keyboard)
                 return
@@ -3339,6 +3365,9 @@ class WildBattleManager:
         try:
             battle = self.get_battle(user_id)
             if not battle or battle.state != BattleState.ACTIVE:
+                return
+            # El jugador está eligiendo reemplazo → no penalizar
+            if getattr(battle, "awaiting_faint_switch", False):
                 return
             # Si el turn_number ya avanzó, el jugador actuó → no hacer nada
             if battle.turn_number != turn_number_expected:

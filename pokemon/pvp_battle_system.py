@@ -1108,6 +1108,20 @@ class PvPManager:
         recoil = RECOIL_MOVES.get(move_key, 0.0)
         _crit  = attacker_side.crit_stage + (1 if move_key in _HIGH_CRIT_MOVES else 0)
 
+        # Multiplicador de habilidad del atacante
+        from pokemon.battle_engine import calcular_mult_habilidad as _cmh
+        _atk_hab = getattr(atk_p, "habilidad", "") or ""
+        _atk_hab_mult, _ = _cmh(
+            _atk_hab, move_key, tipo_mv, cat,
+            poder, hp_ratio=atk_p.hp_actual / max(atk_p.stats.get("hp", 1), 1),
+        )
+        from pokemon.battle_engine import calcular_mult_objeto as _cmo
+        _atk_obj = getattr(atk_p, "objeto", "") or ""
+        _atk_type_eff_pre = movimientos_service._calcular_efectividad(tipo_mv, def_tipos)
+        _atk_obj_mult, _atk_obj_recoil = _cmo(_atk_obj, tipo_mv, cat, _atk_type_eff_pre)
+        poder = max(1, int(poder * _atk_hab_mult * _atk_obj_mult)) if poder > 0 else poder
+        _atk_lo_recoil = _atk_obj_recoil
+
         # Loop multi-hit (para movimientos normales num_hits == 1)
         from pokemon.battle_engine import _roll_num_hits
         num_hits  = _roll_num_hits(move_key, getattr(atk_p, "habilidad", "") or "")
@@ -1155,6 +1169,20 @@ class PvPManager:
 
         if num_hits > 1 and total_dmg > 0:
             turn_log.append(f"  🔢 ¡{num_hits} golpes! Daño total: <b>{total_dmg}</b>\n")
+
+        # Life Orb / objeto recoil (se aplica una sola vez, no por golpe)
+        if _atk_lo_recoil > 0 and total_dmg > 0:
+            _lo_pvp = max(1, int(atk_p.stats.get("hp", atk_p.hp_actual) * _atk_lo_recoil))
+            atk_p.hp_actual = max(0, atk_p.hp_actual - _lo_pvp)
+            turn_log.append(f"  🔴 ¡<b>{atk_name}</b> perdió {_lo_pvp} HP por la Vida Esfera!\n")
+            # Persistir HP del atacante (el defensor se persiste más abajo)
+            try:
+                db_manager.execute_update(
+                    "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                    (atk_p.hp_actual, atk_p.id_unico),
+                )
+            except Exception:
+                pass
 
         if type_eff > 1.0:       turn_log.append("  💥 ¡Es muy eficaz!\n")
         elif 0 < type_eff < 1.0: turn_log.append("  😐 No es muy eficaz…\n")

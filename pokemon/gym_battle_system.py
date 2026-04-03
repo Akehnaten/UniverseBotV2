@@ -739,6 +739,23 @@ class GymBattleManager:
             total_drain_to_player = 0
             last_result = None
 
+            # Multiplicador de habilidad del jugador
+            from pokemon.battle_engine import calcular_mult_habilidad as _cmh
+            _p_hab = getattr(_p, "habilidad", "") or ""
+            _p_hab_mult, _p_quitar_sec = _cmh(
+                _p_hab, mk_clean, tipo_mv, cat,
+                poder, hp_ratio=_p.hp_actual / max(_p.stats.get("hp", 1), 1),
+            )
+            from pokemon.battle_engine import calcular_mult_objeto as _cmo
+            _p_obj = getattr(_p, "objeto", "") or ""
+            # Efectividad anticipada para Expert Belt
+            _p_type_eff_pre = movimientos_service._calcular_efectividad(tipo_mv, npc_tipos)
+            _p_obj_mult, _p_obj_recoil = _cmo(_p_obj, tipo_mv, cat, _p_type_eff_pre)
+            poder = max(1, int(poder * _p_hab_mult * _p_obj_mult)) if poder > 0 else poder
+
+            # Life Orb: rastrear para aplicar recoil DESPUÉS de los golpes
+            _p_lo_recoil_ratio = _p_obj_recoil
+
             # 5. RESOLUCIÓN DE DAÑO SEGÚN TIPO DE MOVIMIENTO
             
             # --- CASO A: DAÑO FIJO ---
@@ -837,7 +854,18 @@ class GymBattleManager:
                     (battle.player_pokemon_id,)
                 )
                 log.append(f"  💥 ¡<b>{p_name}</b> se debilitó por el esfuerzo!\n")
-                
+
+            # Life Orb del jugador
+            if _p_lo_recoil_ratio > 0 and total_dmg_to_npc > 0:
+                _lo_p = max(1, int(_p.stats.get("hp", 1) * _p_lo_recoil_ratio))
+                nuevo_hp_p_lo = max(0, _p.hp_actual - _lo_p)
+                _p.hp_actual  = nuevo_hp_p_lo
+                db_manager.execute_update(
+                    "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                    (nuevo_hp_p_lo, battle.player_pokemon_id)
+                )
+                log.append(f"  🔴 ¡<b>{p_name}</b> perdió {_lo_p} HP por la Vida Esfera!\n")
+     
             # 7. EFECTOS SECUNDARIOS Y ESTADOS FINALES
             if last_result:
                 _apply_secondary_effect(
@@ -1026,6 +1054,21 @@ class GymBattleManager:
         npc_poder     = int(npc_move_data.get("poder", 0) or 0)
         tipo_mv       = npc_move_data.get("tipo", "Normal")
 
+        # Multiplicador de habilidad del NPC
+        from pokemon.battle_engine import calcular_mult_habilidad as _cmh
+        _npc_hab = getattr(_npc, "habilidad", "") or ""
+        _npc_hab_mult, _ = _cmh(
+                _npc_hab, npc_mk_clean, tipo_mv, npc_cat,
+                npc_poder, hp_ratio=_npc.hp_actual / max(_npc.stats.get("hp", 1), 1),
+            )
+        from pokemon.battle_engine import calcular_mult_objeto as _cmo
+        _npc_obj = getattr(_npc, "objeto", "") or ""
+        _npc_p_tipos = pokedex_service.obtener_tipos(_p.pokemonID)
+        _npc_type_eff_pre = movimientos_service._calcular_efectividad(tipo_mv, _npc_p_tipos)
+        _npc_obj_mult, _npc_obj_recoil = _cmo(_npc_obj, tipo_mv, npc_cat, _npc_type_eff_pre)
+        npc_poder = max(1, int(npc_poder * _npc_hab_mult * _npc_obj_mult)) if npc_poder > 0 else npc_poder
+        _npc_lo_recoil_ratio = _npc_obj_recoil
+
         # 6. RESOLUCIÓN DE DAÑO
         from pokemon.battle_engine import FIXED_DAMAGE_MOVES
         damage_dealt = 0
@@ -1084,6 +1127,16 @@ class GymBattleManager:
         # 7. Interrupción de Focus Punch del Jugador y Retorno
         if damage_dealt > 0 and getattr(battle, "player_charging_move", None) == "focuspunch":
             battle.player_focus_interrupted = True
+
+        # Life Orb del NPC
+        if _npc_lo_recoil_ratio > 0 and damage_dealt > 0:
+            _lo_npc = max(1, int(_npc.stats.get("hp", 1) * _npc_lo_recoil_ratio))
+            _npc.hp_actual = max(0, _npc.hp_actual - _lo_npc)
+            db_manager.execute_update(
+                "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                (_npc.hp_actual, npc_pid)
+            )
+            # No añadimos al log para mantenerlo conciso
 
         return _p.hp_actual <= 0
     
@@ -1655,6 +1708,9 @@ class GymCommandHandler:
     # ── Comandos ──────────────────────────────────────────────────────────
 
     def _cmd_gimnasio(self, message: types.Message, bot) -> None:
+        # Validación de seguridad para el linter y para evitar crashes
+        if not message.from_user:
+            return
         user_id = message.from_user.id
         chat_id = message.chat.id
         tid     = get_thread_id(message)   # FIX: usa fallback via is_topic_message
@@ -1733,6 +1789,9 @@ class GymCommandHandler:
         )
 
     def _cmd_altomando(self, message: types.Message, bot) -> None:
+        # Validación de seguridad para el linter y para evitar crashes
+        if not message.from_user:
+            return
         user_id = message.from_user.id
 
         if not gimnasio_service.todas_las_medallas(user_id):
@@ -1750,6 +1809,15 @@ class GymCommandHandler:
     # ── Callbacks ─────────────────────────────────────────────────────────
 
     def _handle_callback(self, call: types.CallbackQuery, bot) -> None:
+
+        # 1. Validación inicial: Si no hay mensaje, no podemos obtener el chat_id
+        if not call.message:
+            try:
+                bot.answer_callback_query(call.id, "❌ El mensaje original ya no existe.")
+            except Exception:
+                pass
+            return
+        
         try:
             bot.answer_callback_query(call.id)
         except Exception:

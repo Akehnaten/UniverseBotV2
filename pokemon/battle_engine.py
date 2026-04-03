@@ -255,6 +255,7 @@ def resolve_damage_move(
     crit_stage:  int   = 0,
     defender_ability: str   = "",   # habilidad del defensor (e.g. "Multiescamas")
     defender_hp_max:  int   = 0,    # HP máximo del defensor para Multiescamas
+    attacker_ability: str   = "",
 ) -> DamageResult:
     """
     Resuelve un movimiento de daño entre dos bandos.
@@ -287,7 +288,12 @@ def resolve_damage_move(
         return result
 
     # ── STAB ─────────────────────────────────────────────────────────────────
-    stab: float = 1.5 if move_type in attacker_types else 1.0
+    _tiene_stab = move_type in attacker_types
+    _hab_norm   = attacker_ability.lower().replace(" ", "").replace("-", "")
+    if _tiene_stab:
+        stab = 2.0 if _hab_norm in ("adaptabilidad", "adaptability") else 1.5
+    else:
+        stab = 1.0
     result.stab = stab
 
     # ── Efectividad de tipo ───────────────────────────────────────────────────
@@ -1315,6 +1321,208 @@ RECOIL_MOVES: dict = {
 }
 RECOIL_MOVES = {k: v for k, v in RECOIL_MOVES.items() if v > 0}
 
+# Movimientos de puño (para Puño de Hierro / Iron Fist)
+_PUNCH_MOVES: frozenset[str] = frozenset({
+    "icepunch", "firepunch", "thunderpunch", "focuspunch", "drainpunch",
+    "bulletpunch", "shadowpunch", "hammerarm", "megapunch", "corebuster",
+    "meteormash", "poweruppunch", "plasmafists", "surgingstrikes",
+    "doubleironbash", "wickedblow", "cometpunch",
+})
+
+# Movimientos de contacto (para Garras Duras / Tough Claws)
+# Lista de los más comunes; los ranged/indirect NO están aquí.
+_CONTACT_MOVES: frozenset[str] = frozenset({
+    "tackle", "scratch", "slash", "bite", "crunch", "bodyslam", "doubleedge",
+    "takedown", "headbutt", "return", "frustration", "aquatail", "waterfall",
+    "leafblade", "woodhammer", "swordsdance",  # no, swords dance no hace daño
+    "outrage", "dracometeor", "dragonclaw", "dragontail", "extremespeed",
+    "quickattack", "shadowsneak", "shadowclaw", "nightslash", "bravebird",
+    "flareblitz", "volttackle", "wildcharge", "closecombat", "highjumpkick",
+    "jumpkick", "karatechop", "lowkick", "superpower", "armthrust",
+    "bulletpunch", "icepunch", "firepunch", "thunderpunch", "focuspunch",
+    "drainpunch", "hammerarm", "vcreate", "xscissor", "bugbite", "uturn",
+    "poisonjab", "gunkshot", "crosspoison", "aquajet", "icebeam",  # no, ranged
+    "poisonfang", "suckerpunch", "payback", "pursuit", "knockoff",
+    "stoneedge",  # no, ranged; quitar si se necesita precisión
+    "ironhead", "meteormash", "gyroball", "heavyslam", "heatcrash",
+    "bodypress", "playrough", "dazzlinggleam",  # no, ranged
+    "flipturn", "liquidation", "wavecrash", "aquastep",
+    "acrobatics", "aerialace", "bravebird", "wingattack",
+    "crunch", "bite", "hyperspace",
+    # Movimientos de contacto para Garras Duras (Gen 9)
+    "ragefist", "wringout", "stompingtantrum", "bulldoze",
+    "doublekick", "triplekick", "tripleaxel",
+})
+
+def calcular_mult_habilidad(
+    hab_raw:    str,
+    mk:         str,       # move key normalizado (minúsculas, sin espacios)
+    tipo_mv:    str,       # tipo del movimiento en español
+    categoria:  str,       # "Físico" | "Especial" | "Estado"
+    poder:      int,
+    hp_ratio:   float = 1.0,   # hp_actual / hp_max del atacante
+) -> tuple[float, bool]:
+    """
+    Retorna (multiplicador_poder, quitar_efecto_secundario).
+
+    El multiplicador se aplica sobre `move_power` ANTES de llamar a
+    resolve_damage_move.  quitar_efecto_secundario=True indica Fuerza Bruta.
+    """
+    if not hab_raw or poder <= 0:
+        return 1.0, False
+
+    hab = hab_raw.lower().replace(" ", "").replace("-", "")
+
+    # ── Técnico / Technician: 1.5× si poder base ≤ 60 ──────────────────────
+    if hab in ("tecnico", "technician") and 0 < poder <= 60:
+        return 1.5, False
+
+    # ── Puño de Hierro / Iron Fist: 1.2× en movimientos de puño ────────────
+    if hab in ("punodehierro", "ironfist") and mk in _PUNCH_MOVES:
+        return 1.2, False
+
+    # ── Fuerza Bruta / Sheer Force: 1.3× si el move tiene efecto secundario ─
+    # Quita el efecto secundario para compensar el boost.
+    if hab in ("fuerzabruta", "sheerforce"):
+        tiene_secundario = (
+            mk in SECONDARY_AILMENTS
+            or mk in SECONDARY_SELF_STAT_DROPS
+            or bool(MOVE_EFFECTS.get(mk, {}).get("ailment"))
+            or bool(MOVE_EFFECTS.get(mk, {}).get("stages"))
+        )
+        if tiene_secundario:
+            return 1.3, True
+
+    # ── Garras Duras / Tough Claws: 1.3× en movimientos de contacto ─────────
+    if hab in ("garrasduras", "toughclaws") and mk in _CONTACT_MOVES:
+        return 1.3, False
+
+    # ── Metalúrgico / Steelworker: 1.5× en movimientos de tipo Acero ────────
+    if hab in ("metalurgico", "steelworker") and tipo_mv == "Acero":
+        return 1.5, False
+
+    # ── Transistor: 1.5× en movimientos de tipo Eléctrico ───────────────────
+    if hab == "transistor" and tipo_mv == "Eléctrico":
+        return 1.5, False
+
+    # ── Mandíbula Dragón / Dragon's Maw: 1.5× en tipo Dragón ────────────────
+    if hab in ("mandibuladedragon", "mandíbuladedragon", "dragonsmaw") and tipo_mv == "Dragón":
+        return 1.5, False
+
+    # ── Llamarada / Blaze (≤1/3 HP): 1.5× Fuego ────────────────────────────
+    if hp_ratio <= 1 / 3:
+        _HP_ABI: dict[str, str] = {
+            "llamarada": "Fuego",  "blaze": "Fuego",
+            "torrente":  "Agua",   "torrent": "Agua",
+            "espesura":  "Planta", "overgrow": "Planta",
+            "enjambre":  "Bicho",  "swarm": "Bicho",
+        }
+        if hab in _HP_ABI and tipo_mv == _HP_ABI[hab]:
+            return 1.5, False
+
+    # ── Temerario / Reckless: 1.2× en movimientos con retroceso ─────────────
+    if hab in ("temerario", "reckless") and mk in RECOIL_MOVES:
+        return 1.2, False
+
+    # ── Flecha de Lava / Liquid Ooze y Pureza Suprema: no afectan daño ──────
+
+    return 1.0, False
+
+# Potenciadores de tipo: {item_key_normalizado: tipo_en_español}
+_TIPO_BOOST_ITEMS: dict[str, str] = {
+    "silkscarf":       "Normal",
+    "charcoal":        "Fuego",
+    "carbon":          "Fuego",
+    "mysticwater":     "Agua",
+    "aguamistetica":   "Agua",   # nombre alternativo español
+    "magnet":          "Eléctrico",
+    "iman":            "Eléctrico",
+    "miracleseed":     "Planta",
+    "semillamilagro":  "Planta",
+    "nevermeltice":    "Hielo",
+    "antiderretir":    "Hielo",
+    "blackbelt":       "Lucha",
+    "cinturnegro":     "Lucha",
+    "poisonbarb":      "Veneno",
+    "flechavenenosa":  "Veneno",
+    "softsand":        "Tierra",
+    "arenafina":       "Tierra",
+    "sharpbeak":       "Volador",
+    "picoafilado":     "Volador",
+    "twistedspoon":    "Psíquico",
+    "cucharatorcida":  "Psíquico",
+    "silverpowder":    "Bicho",
+    "polvoplata":      "Bicho",
+    "hardstone":       "Roca",
+    "pEDRAdura":       "Roca",
+    "piedradura":      "Roca",
+    "spelltag":        "Fantasma",
+    "hechizo":         "Fantasma",
+    "dragonfang":      "Dragón",
+    "colmillodragon":  "Dragón",
+    "blackglasses":    "Siniestro",
+    "gafasdesol":      "Siniestro",
+    "metalcoat":       "Acero",
+    "revestimientometalico": "Acero",
+    "fairyfeather":    "Hada",
+    "plumahada":       "Hada",
+    # Inciensos que también potencian tipo
+    "oddincense":      "Psíquico",
+    "inciensoRaro":    "Psíquico",
+    "inciensoRaro":    "Psíquico",
+    "rockincense":     "Roca",
+    "inciensoRoca":    "Roca",
+    "roseincense":     "Planta",
+    "inciensoFlor":    "Planta",
+    "seaincense":      "Agua",
+    "inciensoMarino":  "Agua",
+    "waveincense":     "Agua",
+}
+
+def calcular_mult_objeto(
+    obj_raw:   str,
+    tipo_mv:   str,
+    categoria: str,
+    type_eff:  float = 1.0,   # efectividad de tipo, para Cinto Experto
+) -> tuple[float, float]:
+    """
+    Retorna (multiplicador_poder, recoil_ratio_hp_max).
+
+    multiplicador_poder   → se aplica sobre move_power antes de calcular daño.
+    recoil_ratio_hp_max   → fracción del HP MÁXIMO del portador que pierde
+                            después del ataque (solo Life Orb: 0.1).
+    """
+    if not obj_raw:
+        return 1.0, 0.0
+
+    obj = obj_raw.lower().replace(" ", "").replace("-", "").replace("_", "")
+
+    # ── Vida Esfera / Life Orb: 1.3×, recoil 10% HP max ────────────────────
+    if obj in ("vidasfera", "lifeorb"):
+        return 1.3, 0.1
+
+    # ── Elección ─────────────────────────────────────────────────────────────
+    # Choice Band → solo Físico
+    if obj in ("cintaeleccion", "cintatornado", "choiceband"):
+        if categoria == "Físico":
+            return 1.5, 0.0
+
+    # Choice Specs → solo Especial
+    if obj in ("gafaseleccion", "choicespecs"):
+        if categoria == "Especial":
+            return 1.5, 0.0
+
+    # ── Cinto Experto / Expert Belt: 1.2× solo si es muy efectivo ───────────
+    if obj in ("cintoexperto", "expertbelt") and type_eff > 1.0:
+        return 1.2, 0.0
+
+    # ── Potenciadores de tipo: 1.2× ──────────────────────────────────────────
+    _boost_tipo = _TIPO_BOOST_ITEMS.get(obj)
+    if _boost_tipo and _boost_tipo == tipo_mv:
+        return 1.2, 0.0
+
+    return 1.0, 0.0
+
 # Movimientos que debilitan al USUARIO después de ejecutarse
 SELF_KO_MOVES: frozenset[str] = frozenset({
     "explosion",
@@ -2254,6 +2462,11 @@ __all__ = [
     "MOVE_EFFECTS",
     "_HIGH_CRIT_MOVES",
     "SELF_KO_MOVES",
+    "calcular_mult_habilidad",
+    "calcular_mult_objeto",
+    "_PUNCH_MOVES",
+    "_CONTACT_MOVES",
+    "_TIPO_BOOST_ITEMS",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2587,10 +2800,36 @@ def apply_move(
     num_hits = _roll_num_hits(mk, attacker.ability)
     total_dmg = 0
     
+    # Calcular multiplicador de habilidad UNA SOLA VEZ
+    _hab_mult, _quitar_secundario = calcular_mult_habilidad(
+        attacker.ability, mk, tipo_mov, categoria, poder,
+        hp_ratio=(attacker.hp_actual / max(attacker.hp_max, 1)),
+    )
+    # Calcular efectividad de tipo anticipada (para Expert Belt)
+    _type_eff_pre = type_effectiveness_fn(tipo_mov, defender.types)
+    # Calcular multiplicador de objeto UNA SOLA VEZ
+    _obj_mult, _obj_recoil = calcular_mult_objeto(
+        attacker.objeto or "", tipo_mov, categoria, _type_eff_pre
+    )
+    _poder_base_con_hab = max(1, int(poder * _hab_mult * _obj_mult))
+
+    if _hab_mult > 1.0 and attacker.ability:
+        log.append(f"  ✨ ¡<b>{attacker.ability}</b> potenció el ataque!\n")
+    if _obj_mult > 1.0 and attacker.objeto:
+        log.append(f"  🎒 ¡<b>{attacker.objeto.title()}</b> potenció el ataque!\n")
+
+    # Life Orb recoil — aplicar DESPUÉS del loop de golpes
+    _obj_recoil_ratio = _obj_recoil   # guardamos para usarlo después del loop
+
+
+    if _hab_mult > 1.0 and attacker.ability:
+        log.append(
+            f"  ✨ ¡La habilidad <b>{attacker.ability}</b> potenció el ataque!\n"
+        )
     for hit_idx in range(num_hits):
         if defender.hp_actual <= 0: break
-        
-        hit_power = poder * (hit_idx + 1) if mk in {"triplekick", "tripleaxel"} else poder
+
+        hit_power = _poder_base_con_hab * (hit_idx + 1) if mk in {"triplekick", "tripleaxel"} else _poder_base_con_hab
         
         res: DamageResult = resolve_damage_move(
             attacker_name = attacker.name, 
@@ -2610,7 +2849,8 @@ def apply_move(
             drain_ratio = DRAIN_MOVES.get(mk, 0.0),
             crit_stage = attacker.crit_stage + (1 if mk in _HIGH_CRIT_MOVES else 0),
             defender_ability = defender.ability,
-            defender_hp_max  = defender.hp_max
+            defender_hp_max  = defender.hp_max,
+            attacker_ability  = attacker.ability,
         )
         
         log.extend(res.log)
@@ -2628,6 +2868,12 @@ def apply_move(
 
     if num_hits > 1 and total_dmg > 0:
         log.append(f"  🔢 ¡{num_hits} golpes! Daño total: <b>{total_dmg}</b>\n")
+
+    # Life Orb recoil (10% HP max del portador, solo si causó daño)
+    if _obj_recoil_ratio > 0 and total_dmg > 0:
+        _lo_recoil = max(1, int(attacker.hp_max * _obj_recoil_ratio))
+        attacker.hp_actual = max(0, attacker.hp_actual - _lo_recoil)
+        log.append(f"  🔴 ¡<b>{attacker.name}</b> perdió {_lo_recoil} HP por la Vida Esfera!\n")
 
     if type_eff > 1.0: log.append("  💥 ¡Es muy eficaz!\n")
     elif 0 < type_eff < 1.0: log.append("  😐 No es muy eficaz…\n")

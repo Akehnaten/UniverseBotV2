@@ -35,368 +35,213 @@ logger = logging.getLogger(__name__)
 # item_id → move_key (normalizado: lowercase sin espacios)
 # ══════════════════════════════════════════════════════════
 MT_MAP: dict[str, str] = {
-    "mt001": "megapunch",
-    "mt002": "payback",
-    "mt003": "thunderpunch",
-    "mt004": "icepunch",
-    "mt005": "firepunch",
-    "mt006": "bulletpunch",
-    "mt007": "lowkick",
-    "mt008": "lowsweep",
-    "mt009": "thunder",
-    "mt010": "hiddenpower",
-    "mt011": "watergun",
-    "mt012": "lowsweep",       # alias
-    "mt013": "snore",
-    "mt014": "acrobatics",
-    "mt015": "struggle",       # placeholder
-    "mt016": "psybeam",
-    "mt017": "scaryface",
-    "mt018": "thief",
-    "mt019": "telekinesis",
-    "mt020": "trailblaze",
-    "mt021": "pounce",
-    "mt022": "chillwater",
-    "mt023": "charge",
-    "mt024": "snatch",
-    "mt025": "protect",
-    "mt026": "poisontail",
-    "mt027": "hex",
-    "mt028": "bulldoze",
-    "mt029": "charm",
-    "mt030": "snarl",
-    "mt031": "metal",           # metalclaw
-    "mt032": "swift",
-    "mt033": "magicalleaf",
-    "mt034": "icy",             # icywind
-    "mt035": "mudshot",
-    "mt036": "whirlpool",
-    "mt037": "dragonbreath",
-    "mt038": "flame",           # flamecharge
-    "mt039": "venomdrench",
-    "mt040": "acids",           # acidspray
-    "mt041": "foulplay",
-    "mt042": "nightshade",
-    "mt043": "revenge",
-    "mt044": "electroball",
-    "mt045": "dig",
-    "mt046": "avalanche",
-    "mt047": "endure",
-    "mt048": "play",            # playrough
-    "mt049": "syrupbomb",
-    "mt050": "raindance",
-    "mt051": "sandstorm",
-    "mt052": "snowscape",
-    "mt053": "sunnyday",
-    "mt054": "psych",           # psychup
-    "mt055": "brine",
-    "mt056": "u-turn",
-    "mt057": "retaliate",
-    "mt058": "brick",           # brickbreak
-    "mt059": "zenheadbutt",
-    "mt060": "expimp",          # expandingforce
-    "mt061": "shadow",          # shadowclaw
-    "mt062": "fling",
-    "mt063": "psychic",
-    "mt064": "bulkup",
-    "mt065": "drainpunch",
-    "mt066": "thunderwave",
-    "mt067": "icebeam",
-    "mt068": "firespin",
-    "mt069": "rest",
-    "mt070": "sleeptalk",
-    "mt071": "snowball",        # placeholder
-    "mt072": "magnet",          # magnetrise
-    "mt073": "thunder",         # thunderbolt (alias, ver mt085)
-    "mt074": "reflect",
-    "mt075": "lightscreen",
-    "mt076": "round",
-    "mt077": "heatwave",
-    "mt078": "darkpulse",
-    "mt079": "outrage",
-    "mt080": "rockslide",
-    "mt081": "bulletseed",
-    "mt082": "frostbreath",
-    "mt083": "chargbeam",       # chargebeam
-    "mt084": "weatherball",
-    "mt085": "thunderbolt",
-    "mt086": "energyball",
-    "mt087": "dragonpulse",
-    "mt088": "scald",
-    "mt089": "bodyslam",
-    "mt090": "surf",
-    "mt091": "liquidation",
-    "mt092": "shadowball",
-    "mt093": "flash",           # flashcannon
-    "mt094": "fly",
-    "mt095": "ic",              # icespinner
-    "mt096": "earthquake",
-    "mt097": "auroraveil",
-    "mt098": "flashcannon",
-    "mt099": "mysticalfire",
-    "mt100": "nastyplot",
-    "mt101": "nightdaze",
-    "mt102": "hydrpump",        # hydropump
-    "mt103": "solarbeam",
-    "mt104": "crunch",
-    "mt105": "dig",             # alias mt045
-    "mt106": "waterfall",
-    "mt107": "poisonpowder",    # placeholder
-    "mt108": "trickroom",
-    "mt109": "flamethrower",
-    "mt110": "grassknot",
-    "mt111": "gunkshot",
-    "mt112": "aurasp",          # aurasphere
-    "mt113": "dracometeor",
-    "mt114": "storedpower",
-    "mt115": "mystical",        # mysticalpowerflame
-    "mt116": "steelbeam",
-    "mt117": "hyper",           # hyperbeam
-    "mt118": "giga",            # gigaimpact
-    "mt119": "icywind",
-    "mt120": "psychic",         # alias
-    "mt121": "icicle",          # iciclespear
-    "mt122": "swordsdance",
-    "mt123": "petalblizzard",
-    "mt124": "stompingtantrum",
-    "mt125": "earthquake",      # alias
-    "mt126": "gigadrain",
-    "mt127": "play",            # alias playrough
-    "mt128": "airslash",
-    "mt129": "calmmind",
-    "mt130": "moonblast",
-    "mt131": "poltergeist",
-    "mt132": "poisonpowder",    # placeholder
-    "mt133": "aquatail",
-    "mt134": "fireblast",
-    "mt135": "thunderpunch",    # alias
-    "mt136": "closecombat",
-    "mt137": "rockpolicer",     # placeholder
-    "mt138": "focusblast",
-    "mt139": "earth",           # earthpower
-    "mt140": "megahorn",
-    "mt141": "blizzard",
-    "mt142": "draco",           # dracometeor alias
-    "mt143": "lastresort",
-    "mt144": "infernooverdrive", # placeholder
-    "mt145": "rockblast",       # placeholder
-    "mt146": "highhorsepower",
-    "mt147": "crosspoison",
-    "mt148": "surf",            # alias
-    "mt149": "hypervoice",
-    "mt150": "shadowforce",
-    "mt151": "hardpress",
-    "mt152": "poisonjab",
-    "mt153": "rockpolish",
-    "mt154": "scaryface",       # alias
-    "mt155": "furycutter",
-    "mt156": "outrage",         # alias
-    "mt157": "overheat",
-    "mt158": "hurricane",
-    "mt159": "thunder",         # alias
-    "mt160": "flareblitz",
-    "mt161": "focuspunch",
-    "mt162": "vacuumwave",
-    "mt163": "wavecrash",
-    "mt164": "aquajet",
-    "mt165": "smackdown",
-    "mt166": "storedpower",     # alias
-    "mt167": "tidy",            # placeholder
-    "mt168": "bravebird",
-    "mt169": "blazekick",       # blaze kick placeholder
-    "mt170": "leafstorm",       # leafstorm placeholder
-    "mt171": "ironhead",
-    "mt172": "rockwrecker",     # placeholder
-    "mt173": "payback",         # alias
-    "mt174": "bodypress",
-    "mt175": "struggle",        # placeholder
-    "mt176": "gunkshot",        # alias
-    "mt177": "liquidation",     # alias
-    "mt178": "shadowstrike",    # placeholder
-    "mt179": "drainingkiss",
-    "mt180": "ruination",
-    "mt181": "makeitrain",
-    "mt182": "axekick",
-    "mt183": "kowtowcleave",
-    "mt184": "chillyreception",
-    "mt185": "populationbomb",
-    "mt186": "lashout",
-    "mt187": "ragingfury",
-    "mt188": "bittermalice",
-    "mt189": "headlongrush",
-    "mt190": "springtidestorm",
-    "mt191": "wildboltstorm",
-    "mt192": "sandsearstorm",
-    "mt193": "bleakwindstorm",
-    "mt194": "mountaingale",
-    "mt195": "victorydance",
-    "mt196": "lastrespects",
-    "mt197": "gigatonhammer",
-    "mt198": "icespinner",
-    "mt199": "snowscape",       # alias
-    "mt200": "terablast",
-    "mt201": "hydropump",
-    "mt202": "pounce",          # alias
-    "mt203": "trailblaze",      # alias
-    "mt204": "chillyreception", # alias
-    "mt205": "iciclecrash",
-    "mt206": "aurasphere",
-    "mt207": "psychicfangs",
-    "mt208": "fleurcannon",
-    "mt209": "pollenuf",        # placeholder
-    "mt210": "mistyterrain",
-    "mt211": "electricterrain",
-    "mt212": "psychicterrain",
-    "mt213": "grassyterrain",
-    "mt214": "searing",         # searingshot placeholder
-    "mt215": "expandingforce",
-    "mt216": "risingvoltage",
-    "mt217": "steeroller",
-    "mt218": "terrainpulse",
-    "mt219": "mistyexplosion",
-    "mt220": "gravapple",
-    "mt221": "courtchange",
-    "mt222": "eternabeam",
-    "mt223": "fierywrath",
-    "mt224": "chilling",        # chillingwater
-    "mt225": "psyshieldbash",
-    "mt226": "revivalblessing",
-    "mt227": "saltcure",
-    "mt228": "chloroblast",
-    "mt229": "mountaingale",    # alias
-    "mt230": "magicpowder",
-    "mt231": "collisioncourse",
-    "mt232": "electrorift",     # placeholder
-    "mt233": "direclaws",
-    "mt234": "hardpress",       # alias
-    "mt235": "powergemalt",     # placeholder
-    "mt236": "aerialace",
-    "mt237": "dualwingbeat",
+    # ── Gen 9 (Escarlata/Púrpura) — lista oficial completa, 201 MTs ────────
+    "mt001": "takedown",            # Derribo
+    "mt002": "charm",               # Encanto
+    "mt003": "faketears",           # Llanto Falso
+    "mt004": "agility",             # Agilidad
+    "mt005": "mudslap",             # Bofetón Lodo
+    "mt006": "scaryface",           # Cara Susto
+    "mt007": "protect",             # Protección
+    "mt008": "firefang",            # Colmillo Ígneo
+    "mt009": "thunderfang",         # Colmillo Rayo
+    "mt010": "icefang",             # Colmillo Hielo
+    "mt011": "waterpulse",          # Hidropulso
+    "mt012": "lowkick",             # Patada Baja
+    "mt013": "acidspray",           # Bomba Ácida
+    "mt014": "acrobatics",          # Acróbata
+    "mt015": "strugglebug",         # Estoicismo
+    "mt016": "psybeam",             # Psicorrayo
+    "mt017": "confuseray",          # Rayo Confuso
+    "mt018": "thief",               # Ladrón
+    "mt019": "disarmingvoice",      # Voz Cautivadora
+    "mt020": "trailblaze",          # Abrecaminos
+    "mt021": "pounce",              # Brinco
+    "mt022": "chillingwater",       # Agua Fría
+    "mt023": "chargebeam",          # Rayo Carga
+    "mt024": "firespin",            # Giro Fuego
+    "mt025": "facade",              # Imagen
+    "mt026": "poisontail",          # Cola Veneno
+    "mt027": "aerialace",           # Golpe Aéreo
+    "mt028": "bulldoze",            # Terratemblor
+    "mt029": "hex",                 # Infortunio
+    "mt030": "snarl",               # Alarido
+    "mt031": "metalclaw",           # Garra Metal
+    "mt032": "swift",               # Rapidez
+    "mt033": "magicalleaf",         # Hoja Mágica
+    "mt034": "icywind",             # Viento Hielo
+    "mt035": "mudshot",             # Disparo Lodo
+    "mt036": "rocktomb",            # Tumba Rocas
+    "mt037": "drainingkiss",        # Beso Drenaje
+    "mt038": "flamecharge",         # Nitrocarga
+    "mt039": "lowsweep",            # Puntapié
+    "mt040": "aircutter",           # Aire Afilado
+    "mt041": "storedpower",         # Poder Reserva
+    "mt042": "nightshade",          # Tinieblas
+    "mt043": "fling",               # Lanzamiento
+    "mt044": "dragontail",          # Cola Dragón
+    "mt045": "venoshock",           # Carga Tóxica
+    "mt046": "avalanche",           # Alud
+    "mt047": "endure",              # Aguante
+    "mt048": "voltswitch",          # Voltiocambio
+    "mt049": "sunnyday",            # Día Soleado
+    "mt050": "raindance",           # Danza Lluvia
+    "mt051": "sandstorm",           # Tormenta Arena
+    "mt052": "snowscape",           # Paisaje Nevado
+    "mt053": "smartstrike",         # Cuerno Certero
+    "mt054": "psyshock",            # Psicocarga
+    "mt055": "dig",                 # Excavación
+    "mt056": "bulletseed",          # Recurrente
+    "mt057": "falseswipe",          # Falsotortazo
+    "mt058": "slash",               # Cuchillada
+    "mt059": "zenheadbutt",         # Cabezazo Zen
+    "mt060": "uturn",               # Ida y Vuelta
+    "mt061": "shadowclaw",          # Garra Sombría
+    "mt062": "foulplay",            # Juego Sucio
+    "mt063": "psychicfangs",        # Psicocolmillo
+    "mt064": "bulkup",              # Corpulencia
+    "mt065": "airslash",            # Tajo Aéreo
+    "mt066": "bodypress",           # Plancha Corporal
+    "mt067": "firepunch",           # Puño Fuego
+    "mt068": "thunderpunch",        # Puño Trueno
+    "mt069": "icepunch",            # Puño Hielo
+    "mt070": "sleeptalk",           # Sonámbulo
+    "mt071": "seedbomb",            # Bomba Germen
+    "mt072": "electroball",         # Electrobola
+    "mt073": "drainpunch",          # Puño Drenaje
+    "mt074": "reflect",             # Reflejo
+    "mt075": "lightscreen",         # Pantalla de Luz
+    "mt076": "rockblast",           # Pedrada
+    "mt077": "waterfall",           # Cascada
+    "mt078": "dragonclaw",          # Garra Dragón
+    "mt079": "dazzlinggleam",       # Brillo Mágico
+    "mt080": "metronome",           # Metrónomo
+    "mt081": "grassknot",           # Hierba Lazo
+    "mt082": "thunderwave",         # Onda Trueno
+    "mt083": "poisonjab",           # Puya Nociva
+    "mt084": "stompingtantrum",     # Pataleta
+    "mt085": "rest",                # Descanso
+    "mt086": "rockslide",           # Avalancha
+    "mt087": "taunt",               # Mofa
+    "mt088": "swordsdance",         # Danza Espada
+    "mt089": "bodyslam",            # Golpe Cuerpo
+    "mt090": "spikes",              # Púas
+    "mt091": "toxicspikes",         # Púas Tóxicas
+    "mt092": "imprison",            # Sellado
+    "mt093": "flashcannon",         # Foco Resplandor
+    "mt094": "darkpulse",           # Pulso Umbrío
+    "mt095": "leechlife",           # Chupavidas
+    "mt096": "eerieimpulse",        # Onda Anómala
+    "mt097": "fly",                 # Vuelo
+    "mt098": "skillswap",           # Intercambio
+    "mt099": "ironhead",            # Cabeza de Hierro
+    "mt100": "dragondance",         # Danza Dragón
+    "mt101": "powergem",            # Joya de Luz
+    "mt102": "gunkshot",            # Lanzamugre
+    "mt103": "substitute",          # Sustituto
+    "mt104": "irondefense",         # Defensa Férrea
+    "mt105": "xscissor",            # Tijera X
+    "mt106": "drillrun",            # Taladradora
+    "mt107": "willowisp",           # Fuego Fatuo
+    "mt108": "crunch",              # Triturar
+    "mt109": "trick",               # Truco
+    "mt110": "liquidation",         # Hidroariete
+    "mt111": "gigadrain",           # Gigadrenado
+    "mt112": "aurasphere",          # Esfera Aural
+    "mt113": "tailwind",            # Viento Afín
+    "mt114": "shadowball",          # Bola Sombra
+    "mt115": "dragonpulse",         # Pulso Dragón
+    "mt116": "stealthrock",         # Trampa Rocas
+    "mt117": "hypervoice",          # Vozarrón
+    "mt118": "heatwave",            # Onda Ígnea
+    "mt119": "energyball",          # Energibola
+    "mt120": "psychic",             # Psíquico
+    "mt121": "heavyslam",           # Cuerpo Pesado
+    "mt122": "encore",              # Otra Vez
+    "mt123": "surf",                # Surf
+    "mt124": "icespinner",          # Pirueta Helada
+    "mt125": "flamethrower",        # Lanzallamas
+    "mt126": "thunderbolt",         # Rayo
+    "mt127": "playrough",           # Carantoña
+    "mt128": "amnesia",             # Amnesia
+    "mt129": "calmmind",            # Paz Mental
+    "mt130": "helpinghand",         # Refuerzo
+    "mt131": "pollenpuff",          # Bola Polen
+    "mt132": "batonpass",           # Relevo
+    "mt133": "earthquake",          # Terremoto
+    "mt134": "reversal",            # Inversión
+    "mt135": "icebeam",             # Rayo Hielo
+    "mt136": "electricterrain",     # Campo Eléctrico
+    "mt137": "grassyterrain",       # Campo de Hierba
+    "mt138": "mistyterrain",        # Campo de Niebla
+    "mt139": "psychicterrain",      # Campo Psíquico
+    "mt140": "nastyplot",           # Maquinación
+    "mt141": "fireblast",           # Llamarada
+    "mt142": "hydropump",           # Hidrobomba
+    "mt143": "blizzard",            # Ventisca
+    "mt144": "firepledge",          # Voto Fuego
+    "mt145": "waterpledge",         # Voto Agua
+    "mt146": "grasspledge",         # Voto Planta
+    "mt147": "wildcharge",          # Voltio Cruel
+    "mt148": "sludgebomb",          # Bomba Lodo
+    "mt149": "earthpower",          # Tierra Viva
+    "mt150": "leafstorm",           # Llave de Hojas
+    "mt151": "phantomforce",        # Golpe Fantasma
+    "mt152": "gigaimpact",          # Gigaimpacto
+    "mt153": "energyball",          # Energibola (Dup)
+    "mt154": "hydropump",           # Hidrobomba (Dup)
+    "mt155": "outrage",             # Enfado
+    "mt156": "hurricane",           # Vendaval
+    "mt157": "overheat",            # Sofoco
+    "mt158": "focusblast",          # Onda Certera
+    "mt159": "leafstorm",           # Llave de Hojas (Dup)
+    "mt160": "hurricane",           # Vendaval (Dup)
+    "mt161": "trickroom",           # Espacio Raro
+    "mt162": "bugbuzz",             # Zumbido
+    "mt163": "hyperbeam",           # Hiperrayo
+    "mt164": "bravebird",           # Envite Ígneo (Volador)
+    "mt165": "flareblitz",          # Envite Ígneo (Fuego)
+    "mt166": "thunder",             # Trueno
+    "mt167": "closecombat",         # A Bocajarro
+    "mt168": "solarbeam",           # Rayo Solar
+    "mt169": "dracometeor",         # Cometa Draco
+    "mt170": "steelbeam",           # Metaláser
+    "mt171": "terablast",           # Teraexplosión
+    "mt172": "roar",                # Rugido
+    "mt173": "charge",              # Carga
+    "mt174": "haze",                # Niebla
+    "mt175": "toxic",               # Tóxico
+    "mt176": "sandtomb",            # Bucle Arena
+    "mt177": "spite",               # Rencor
+    "mt178": "gravity",             # Gravedad
+    "mt179": "smackdown",           # Antiaéreo
+    "mt180": "gyroball",            # Giro Bola
+    "mt181": "knockoff",            # Desarme
+    "mt182": "bugbite",             # Picadura
+    "mt183": "superfang",           # Superdiente
+    "mt184": "vacuumwave",          # Onda Vacío
+    "mt185": "lunge",               # Plancha
+    "mt186": "highhorsepower",      # Fuerza Equina
+    "mt187": "iciclespear",         # Carámbano
+    "mt188": "scald",               # Escaldar
+    "mt189": "heatcrash",           # Cuerpo Pesado (Fuego)
+    "mt190": "solarblade",          # Cuchilla Solar
+    "mt191": "uproar",              # Alboroto
+    "mt192": "focuspunch",          # Puño Certero
+    "mt193": "weatherball",         # Meteorobola
+    "mt194": "grassyglide",         # Fitoimpulso
+    "mt195": "burningjealousy",     # Envidia Ardiente
+    "mt196": "flipturn",            # Viraje
+    "mt197": "dualwingbeat",        # Ala de Acero
+    "mt198": "poltergeist",         # Poltergeist
+    "mt199": "lashout",             # Desahogo
+    "mt200": "scaleshot",           # Ráfaga Escamas
+    "mt201": "mistyexplosion",      # Explosión Bruma
 }
 
 # Versión limpia: solo los más importantes con nombres correctos Gen9
-MT_MAP_LIMPIO: dict[str, str] = {
-    "mt001": "megapunch",
-    "mt002": "payback",
-    "mt003": "thunderpunch",
-    "mt004": "icepunch",
-    "mt005": "firepunch",
-    "mt006": "bulletpunch",
-    "mt007": "lowkick",
-    "mt008": "lowsweep",
-    "mt014": "acrobatics",
-    "mt017": "scaryface",
-    "mt018": "thief",
-    "mt025": "protect",
-    "mt028": "bulldoze",
-    "mt029": "charm",
-    "mt030": "snarl",
-    "mt032": "swift",
-    "mt033": "magicalleaf",
-    "mt034": "icywind",
-    "mt035": "mudshot",
-    "mt036": "whirlpool",
-    "mt037": "dragonbreath",
-    "mt041": "foulplay",
-    "mt042": "nightshade",
-    "mt043": "revenge",
-    "mt044": "electroball",
-    "mt045": "dig",
-    "mt046": "avalanche",
-    "mt047": "endure",
-    "mt050": "raindance",
-    "mt051": "sandstorm",
-    "mt052": "snowscape",
-    "mt053": "sunnyday",
-    "mt055": "brine",
-    "mt056": "uturn",
-    "mt057": "retaliate",
-    "mt058": "brickbreak",
-    "mt059": "zenheadbutt",
-    "mt061": "shadowclaw",
-    "mt062": "fling",
-    "mt063": "psychic",
-    "mt064": "bulkup",
-    "mt065": "drainpunch",
-    "mt066": "thunderwave",
-    "mt067": "icebeam",
-    "mt068": "firespin",
-    "mt069": "rest",
-    "mt070": "sleeptalk",
-    "mt074": "reflect",
-    "mt075": "lightscreen",
-    "mt077": "heatwave",
-    "mt078": "darkpulse",
-    "mt079": "outrage",
-    "mt080": "rockslide",
-    "mt081": "bulletseed",
-    "mt085": "thunderbolt",
-    "mt086": "energyball",
-    "mt087": "dragonpulse",
-    "mt089": "bodyslam",
-    "mt090": "surf",
-    "mt091": "liquidation",
-    "mt092": "shadowball",
-    "mt094": "fly",
-    "mt096": "earthquake",
-    "mt097": "auroraveil",
-    "mt098": "flashcannon",
-    "mt100": "nastyplot",
-    "mt102": "hydropump",
-    "mt103": "solarbeam",
-    "mt104": "crunch",
-    "mt106": "waterfall",
-    "mt108": "trickroom",
-    "mt109": "flamethrower",
-    "mt110": "grassknot",
-    "mt111": "gunkshot",
-    "mt112": "aurasphere",
-    "mt113": "dracometeor",
-    "mt117": "hyperbeam",
-    "mt118": "gigaimpact",
-    "mt119": "icywind",
-    "mt122": "swordsdance",
-    "mt126": "gigadrain",
-    "mt128": "airslash",
-    "mt129": "calmmind",
-    "mt130": "moonblast",
-    "mt134": "fireblast",
-    "mt136": "closecombat",
-    "mt138": "focusblast",
-    "mt140": "megahorn",
-    "mt141": "blizzard",
-    "mt146": "highhorsepower",
-    "mt147": "crosspoison",
-    "mt149": "hypervoice",
-    "mt151": "hardpress",
-    "mt152": "poisonjab",
-    "mt157": "overheat",
-    "mt158": "hurricane",
-    "mt160": "flareblitz",
-    "mt161": "focuspunch",
-    "mt163": "wavecrash",
-    "mt164": "aquajet",
-    "mt168": "bravebird",
-    "mt171": "ironhead",
-    "mt174": "bodypress",
-    "mt179": "drainingkiss",
-    "mt180": "ruination",
-    "mt182": "axekick",
-    "mt198": "icespinner",
-    "mt200": "terablast",
-    "mt205": "iciclecrash",
-    "mt206": "aurasphere",
-    "mt207": "psychicfangs",
-    "mt210": "mistyterrain",
-    "mt211": "electricterrain",
-    "mt212": "psychicterrain",
-    "mt213": "grassyterrain",
-    "mt215": "expandingforce",
-    "mt220": "gravapple",
-    "mt227": "saltcure",
-    "mt231": "collisioncourse",
-    "mt233": "direclaws",
-}
+# MT_MAP_LIMPIO: alias de compatibilidad — usar MT_MAP directamente
+MT_MAP_LIMPIO: dict[str, str] = MT_MAP
 
 
 def _move_key_de_mt(item_nombre: str) -> Optional[str]:

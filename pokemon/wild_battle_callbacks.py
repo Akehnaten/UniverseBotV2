@@ -100,12 +100,19 @@ class WildBattleCallbacks:
             
             if not wild_battle_manager.has_active_battle(user_id):
                 self.bot.answer_callback_query(
-                    call.id,
-                    "❌ No tienes una batalla activa",
-                    show_alert=True
+                call.id, "❌ No tienes una batalla activa", show_alert=True
                 )
                 return
-            
+
+            battle = wild_battle_manager.get_battle(user_id)
+            if battle and getattr(battle, "awaiting_faint_switch", False):
+                self.bot.answer_callback_query(
+                call.id,
+                "⚠️ ¡Tu Pokémon fue derrotado! Elige un reemplazo primero.",
+                show_alert=True
+                )
+                return
+
             success = wild_battle_manager.handle_fight_action(user_id, self.bot)
             
             if success:
@@ -191,17 +198,29 @@ class WildBattleCallbacks:
     
     def handle_run_button(self, call: types.CallbackQuery):
         """Maneja el botón 'Huir'"""
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             user_id = call.from_user.id
             
             if not wild_battle_manager.has_active_battle(user_id):
                 self.bot.answer_callback_query(
-                    call.id,
-                    "❌ No tienes una batalla activa",
-                    show_alert=True
+                call.id, "❌ No tienes una batalla activa", show_alert=True
                 )
                 return
-            
+
+            battle = wild_battle_manager.get_battle(user_id)
+            if battle and getattr(battle, "awaiting_faint_switch", False):
+                self.bot.answer_callback_query(
+                call.id,
+                "⚠️ ¡Tu Pokémon fue derrotado! Elige un reemplazo primero.",
+                show_alert=True
+                )
+                return
+
             success = wild_battle_manager.attempt_flee(user_id, self.bot)
             
             if success:
@@ -223,6 +242,11 @@ class WildBattleCallbacks:
     
     def handle_move_button(self, call: types.CallbackQuery):
         """Maneja la selección de un movimiento"""
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             # Parsear: battle_move_{user_id}_{move_name}
             parts = call.data.split('_', 3)
@@ -262,6 +286,11 @@ class WildBattleCallbacks:
     
     def handle_switch_button(self, call: types.CallbackQuery):
         """Maneja el cambio de Pokémon"""
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             # Parsear: battle_switch_{user_id}_{pokemon_id}
             parts = call.data.split('_')
@@ -305,6 +334,11 @@ class WildBattleCallbacks:
         (U-turn, Volt Switch, Parting Shot).
         El wild NO contraataca — es un switch gratuito.
         """
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             parts = call.data.split('_')
             # battle_pivotswitch_{user_id}_{pokemon_id}
@@ -509,6 +543,11 @@ class WildBattleCallbacks:
         Callback: battle_bag_cat_<categoria>_<user_id>
         Ejemplo:  battle_bag_cat_medicine_123456
         """
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             user_id = call.from_user.id
 
@@ -544,6 +583,11 @@ class WildBattleCallbacks:
         Ejemplo:  battle_item_123456_pocion
         Ejemplo:  battle_item_123456_pocion~maxima  (~ reemplaza espacios)
         """
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             user_id = call.from_user.id
 
@@ -580,6 +624,11 @@ class WildBattleCallbacks:
         Ejemplo:  battle_use_item_123456_pocion_789
         Ejemplo:  battle_use_item_123456_pocion~maxima_789
         """
+
+         # --- VALIDACIÓN ROBUSTA ---
+        if not call.data or not call.message:
+            return
+        
         try:
             user_id = call.from_user.id
 
