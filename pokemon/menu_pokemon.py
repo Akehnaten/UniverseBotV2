@@ -4,13 +4,20 @@ Menú Principal Pokémon
 ======================
 Todas las secciones del sistema Pokémon accesibles desde /pokemon.
 
-CORRECCIONES (v2):
+CORRECCIONES (v3):
 - _mostrar_categoria_mochila: html.escape() en descripción para evitar
   error 400 de Telegram cuando desc contiene < > (ej: "cura 25% HP < 50%")
 - _mostrar_detalle_item: ídem, html.escape() en descripción
 - _mostrar_categoria_mts: filtro cambiado de startswith("mt"|"mo") a
   `item_id in MT_MAP`, evitando que moonstone, modestmint y otros ítems
   cuya clave empieza por "mo" aparezcan en la vista de MTs/MOs.
+- _ejecutar_compra: ya NO envía un mensaje separado ni recarga la página;
+  muestra feedback inline mediante answer_callback_query y luego refresca
+  la categoría actual en el mismo mensaje (sin parpadeo).
+- _procesar_venta_item: permite vender por precio 0 (eliminar item del
+  inventario sin recibir cosmos).
+- Bloqueo de mochila y centro Pokémon si el usuario tiene batalla activa
+  (salvaje, PvP o gimnasio).
 """
 
 import html as _html
@@ -92,6 +99,29 @@ def _nombre_item(item_id: str, item_data: dict) -> str:
             if val:
                 return str(val)
     return item_id.replace("_", " ").title()
+
+
+def _tiene_batalla_activa(user_id: int) -> bool:
+    """Devuelve True si el usuario tiene cualquier tipo de batalla en curso."""
+    try:
+        from pokemon.wild_battle_system import wild_battle_manager
+        if wild_battle_manager.has_active_battle(user_id):
+            return True
+    except Exception:
+        pass
+    try:
+        from pokemon.gym_battle_system import gym_manager
+        if gym_manager.has_active_battle(user_id):
+            return True
+    except Exception:
+        pass
+    try:
+        from pokemon.pvp_battle_system import pvp_manager
+        if pvp_manager.has_active_battle(user_id):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 class MenuPokemon:
@@ -325,6 +355,17 @@ class MenuPokemon:
                 MenuPokemon._mostrar_pokedex(user_id, call.message, bot)
 
             elif opcion == "bag":
+                # ── Bloquear mochila en combate ───────────────────────────────
+                if _tiene_batalla_activa(user_id):
+                    try:
+                        bot.answer_callback_query(
+                            call.id,
+                            "⚔️ No puedes abrir la mochila durante un combate.",
+                            show_alert=True,
+                        )
+                    except Exception:
+                        pass
+                    return
                 MenuPokemon._mostrar_mochila(user_id, call.message, bot)
 
             elif opcion == "pc":
@@ -348,6 +389,17 @@ class MenuPokemon:
                 MenuPokemon._mostrar_guarderia(user_id, call.message, bot)
 
             elif opcion == "center":
+                # ── Bloquear centro en combate ────────────────────────────────
+                if _tiene_batalla_activa(user_id):
+                    try:
+                        bot.answer_callback_query(
+                            call.id,
+                            "⚔️ No puedes usar el Centro Pokémon durante un combate.",
+                            show_alert=True,
+                        )
+                    except Exception:
+                        pass
+                    return
                 MenuPokemon._mostrar_centro(user_id, call.message, bot)
 
             elif opcion == "unequip":
@@ -565,6 +617,14 @@ class MenuPokemon:
         from pokemon.services import items_service
         from pokemon.items_database_complete import CATEGORIAS_TIENDA
 
+        # Bloqueo extra por si se llega directamente
+        if _tiene_batalla_activa(user_id):
+            texto  = "⚔️ <b>No puedes abrir la mochila durante un combate.</b>"
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+            MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
+            return
+
         try:
             inventario = items_service.obtener_inventario(user_id)
         except Exception:
@@ -678,8 +738,6 @@ class MenuPokemon:
                 or item_data.get("descripcion")
                 or "Sin descripción."
             )
-            # FIX: escapar la descripción para evitar error 400 de Telegram
-            # cuando contiene < > (ej: "cura 25% HP < 50%")
             descripcion = _html.escape(str(_desc_raw))
             texto += f"• <b>{nombre_display}</b> — ×{cantidad}\n  {descripcion}\n\n"
 
@@ -728,9 +786,6 @@ class MenuPokemon:
         except Exception:
             inventario = {}
 
-        # FIX: filtrar usando MT_MAP en lugar de startswith("mt") | startswith("mo").
-        # El filtro anterior incluía moonstone, modestmint y cualquier ítem cuya
-        # clave empiece por esas letras. Ahora solo se muestran ítems reales de MT.
         mt_items = [
             (item_id, qty)
             for item_id, qty in inventario.items()
@@ -789,7 +844,6 @@ class MenuPokemon:
         nombre_display = _nombre_item(item_nombre, item_data)
 
         _desc_raw   = item_data.get("desc") or item_data.get("descripcion") or "Sin descripción."
-        # FIX: escapar la descripción para evitar error 400 con chars < > en Telegram
         descripcion = _html.escape(str(_desc_raw))
 
         precio_compra  = item_data.get("precio", 0) or 0
@@ -801,16 +855,24 @@ class MenuPokemon:
             f"🎒 <b>{nombre_display}</b>\n\n"
             f"📋 {descripcion}\n\n"
             f"📦 Cantidad: <b>{cantidad}</b>\n"
-            f"💰 Precio de venta: <b>{precio_venta} Cosmos</b> c/u\n"
         )
+        if precio_venta > 0:
+            texto += f"💰 Precio de venta: <b>{precio_venta} Cosmos</b> c/u\n"
+        else:
+            texto += "💰 Precio de venta: <i>Sin valor (eliminar)</i>\n"
 
         markup = types.InlineKeyboardMarkup(row_width=1)
 
-        if precio_venta > 0:
-            markup.add(types.InlineKeyboardButton(
-                f"💰 Vender ×1  (+{precio_venta} Cosmos)",
-                callback_data=f"pokebag_sell_{user_id}_{item_nombre}",
-            ))
+        # Mostrar botón vender siempre (incluso a 0 para eliminar)
+        venta_label = (
+            f"💰 Vender ×1  (+{precio_venta} Cosmos)"
+            if precio_venta > 0
+            else "🗑️ Eliminar ×1"
+        )
+        markup.add(types.InlineKeyboardButton(
+            venta_label,
+            callback_data=f"pokebag_sell_{user_id}_{item_nombre}",
+        ))
 
         if es_consumible:
             markup.add(types.InlineKeyboardButton(
@@ -832,6 +894,10 @@ class MenuPokemon:
 
     @staticmethod
     def _procesar_venta_item(user_id: int, message, bot, item_nombre: str):
+        """
+        Vende (o elimina si precio=0) 1 unidad de un item del inventario.
+        Precio 0 → elimina del inventario sin dar cosmos.
+        """
         from pokemon.services import items_service
         from funciones import economy_service
 
@@ -848,25 +914,25 @@ class MenuPokemon:
             precio_compra = item_data.get("precio", 0) or 0
             precio_venta  = math.ceil(precio_compra * 0.5)
 
-            if precio_venta <= 0:
-                MenuPokemon._edit_or_send(
-                    message, bot, user_id,
-                    "❌ Este item no se puede vender.", types.InlineKeyboardMarkup()
-                )
-                return
-
+            # Consumir del inventario
             ok, msg = items_service.usar_item(user_id, item_nombre, 1)
             if not ok:
                 MenuPokemon._edit_or_send(message, bot, user_id, f"❌ {msg}", types.InlineKeyboardMarkup())
                 return
 
-            economy_service.add_credits(user_id, precio_venta, f"Venta item: {item_nombre}")
+            # Dar cosmos solo si el precio de venta es mayor que 0
+            if precio_venta > 0:
+                economy_service.add_credits(user_id, precio_venta, f"Venta item: {item_nombre}")
 
             nombre_display = _nombre_item(item_nombre, item_data)
-            texto = (
-                f"✅ <b>Vendiste 1× {nombre_display}</b>\n\n"
-                f"💰 Recibiste <b>{precio_venta} Cosmos</b>."
-            )
+            if precio_venta > 0:
+                texto = (
+                    f"✅ <b>Vendiste 1× {nombre_display}</b>\n\n"
+                    f"💰 Recibiste <b>{precio_venta} Cosmos</b>."
+                )
+            else:
+                texto = f"🗑️ <b>Eliminaste 1× {nombre_display}</b>"
+
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton(
                 "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
@@ -939,8 +1005,6 @@ class MenuPokemon:
             objeto_previo = poke.objeto
 
             if objeto_previo:
-                # Devolver objeto previo al inventario directamente en BD
-                # para no perder objetos que solo existen en ITEMS_COMPLETOS_DB
                 existing = db_manager.execute_query(
                     "SELECT cantidad FROM INVENTARIO_USUARIO WHERE userID = ? AND item_nombre = ?",
                     (user_id, objeto_previo),
@@ -1053,12 +1117,10 @@ class MenuPokemon:
             elif accion == "use":
                 if payload.startswith("mt") or payload.startswith("mo"):
                     from pokemon.mt_system import MT_MAP
-                    # Solo abrir selector de MT si es realmente una MT
                     if payload in MT_MAP:
                         from pokemon.mt_system import iniciar_uso_mt
                         iniciar_uso_mt(user_id, payload, call.message, bot)
                         return
-                # ── Ítems que requieren seleccionar un Pokémon ──────────────
                 from pokemon.item_use_system import (
                     necesita_selector_pokemon,
                     mostrar_selector_pokemon,
@@ -1066,7 +1128,6 @@ class MenuPokemon:
                 if necesita_selector_pokemon(payload):
                     mostrar_selector_pokemon(user_id, payload, call.message, bot)
                     return
-                # ── Ítems de consumo directo (medicinas, vitaminas…) ────────
                 from pokemon.services import items_service
                 ok, msg = items_service.usar_item(user_id, payload, 1)
                 texto   = f"✅ {msg}" if ok else f"❌ {msg}"
@@ -1081,7 +1142,6 @@ class MenuPokemon:
                 if payload in MT_MAP:
                     iniciar_uso_mt(user_id, payload, call.message, bot)
                 else:
-                    # No es una MT real, ignorar silenciosamente
                     logger.warning(f"[MOCHILA] usemt recibido para item no-MT: {payload}")
 
             elif accion == "give":
@@ -1507,7 +1567,6 @@ class MenuPokemon:
                 "UPDATE POKEMON_USUARIO SET objeto = NULL WHERE id_unico = ?",
                 (pokemon_id,),
             )
-            # Devolver al inventario de forma robusta (mismo fix que _procesar_dar_item)
             existing = db_manager.execute_query(
                 "SELECT cantidad FROM INVENTARIO_USUARIO WHERE userID = ? AND item_nombre = ?",
                 (user_id, objeto),
@@ -1679,10 +1738,8 @@ class MenuPokemon:
                 MenuPokemon._mostrar_tienda_categoria(user_id, call.message, bot, cat_id, pagina)
 
             elif accion == "buy":
-                try:
-                    bot.answer_callback_query(call.id)
-                except Exception:
-                    pass
+                # ── COMPRA SIN RECARGAR PÁGINA ────────────────────────────────
+                # No cerramos el answer_callback_query hasta saber el resultado.
                 ultimo_sep = resto.rfind("_")
                 if ultimo_sep == -1:
                     bot.answer_callback_query(call.id, "❌ Datos de compra inválidos.", show_alert=True)
@@ -1708,76 +1765,63 @@ class MenuPokemon:
 
     @staticmethod
     def _ejecutar_compra(user_id: int, call, bot, cat_id: str, item_id: str, qty: int):
+        """
+        Ejecuta la compra y actualiza la vista en el mismo mensaje sin recargar
+        la página. El resultado (éxito o error) se muestra como popup del
+        callback_query (toast/alerta breve en Telegram) y el panel de la
+        categoría se refresca con el saldo actualizado.
+        """
         from pokemon.shop_system import ShopSystem
         import re
-        import threading
 
         exito, mensaje = ShopSystem.comprar_item(user_id, item_id, qty)
 
-        try:
-            bot.answer_callback_query(call.id)
-        except Exception:
-            pass
-
+        # Texto limpio para el popup (sin tags HTML)
         texto_limpio = re.sub(r"<[^>]+>", "", mensaje)
 
         if exito:
-            item_info = __import__(
-                "pokemon.items_database_complete", fromlist=["obtener_item_info"]
-            ).obtener_item_info(item_id)
-            precio_u = item_info.get("precio", 0) if item_info else 0
-            texto_feedback = (
-                f"✅ <b>Compra exitosa</b>\n"
-                f"🛒 {qty}× <b>{item_id}</b>\n"
-                f"💸 Se te cobraron <b>{precio_u * qty} cosmos</b>"
-            )
+            from pokemon.items_database_complete import obtener_item_info
+            item_info = obtener_item_info(item_id)
+            precio_u  = item_info.get("precio", 0) if item_info else 0
+            popup_txt = f"✅ {qty}× {item_id} comprado (−{precio_u * qty} cosmos)"
         else:
-            texto_feedback = f"❌ <b>No se pudo completar la compra</b>\n{texto_limpio}"
+            popup_txt = f"❌ {texto_limpio}"
 
+        # Responder con popup breve (toast) — NO show_alert para no interrumpir
         try:
-            msg = bot.send_message(user_id, texto_feedback, parse_mode="HTML")
-
-            def _borrar():
-                try:
-                    bot.delete_message(user_id, msg.message_id)
-                except Exception:
-                    pass
-            threading.Timer(6.0, _borrar).start()
+            bot.answer_callback_query(
+                call.id,
+                popup_txt[:200],   # Telegram limita a ~200 chars en toasts
+                show_alert=not exito,   # mostrar alerta modal solo si falló
+            )
         except Exception:
             pass
 
+        # Refrescar el panel de la categoría en el mismo mensaje (sin parpadeo)
         try:
             MenuPokemon._mostrar_tienda_categoria(user_id, call.message, bot, cat_id, 0)
         except Exception:
-            MenuPokemon._mostrar_tienda(user_id, call.message, bot)
+            # Si falla el refresco, al menos el popup ya informó al usuario
+            pass
 
     # ── CENTRO POKÉMON ────────────────────────────────────────────────────────
 
     @staticmethod
     def _mostrar_centro(user_id: int, message, bot):
-        try:
-            from pokemon.wild_battle_system import wild_battle_manager
-            from pokemon.gym_battle_system import gym_manager
-            from pokemon.pvp_battle_system import pvp_manager
-            if (
-                wild_battle_manager.has_active_battle(user_id)
-                or gym_manager.has_active_battle(user_id)
-                or pvp_manager.has_active_battle(user_id)
-            ):
-                markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton(
-                    "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
-                ))
-                MenuPokemon._edit_or_send(
-                    message, bot, user_id,
-                    "⚔️ <b>¡Estás en combate!</b>\n\n"
-                    "No puedes usar el Centro Pokémon durante una batalla.\n"
-                    "Termina o huye del combate primero.",
-                    markup,
-                )
-                return
-        except Exception:
-            pass
+        # Bloqueo extra (debería haber sido filtrado antes, pero por seguridad)
+        if _tiene_batalla_activa(user_id):
+            markup = types.InlineKeyboardMarkup()
+            markup.add(types.InlineKeyboardButton(
+                "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+            ))
+            MenuPokemon._edit_or_send(
+                message, bot, user_id,
+                "⚔️ <b>¡Estás en combate!</b>\n\n"
+                "No puedes usar el Centro Pokémon durante una batalla.\n"
+                "Termina o huye del combate primero.",
+                markup,
+            )
+            return
 
         estado = centro_pokemon.verificar_estado_equipo(user_id)
 
@@ -1809,23 +1853,17 @@ class MenuPokemon:
 
     @staticmethod
     def _procesar_curacion(user_id: int, call, bot):
-        try:
-            from pokemon.wild_battle_system import wild_battle_manager
-            from pokemon.gym_battle_system import gym_manager
-            from pokemon.pvp_battle_system import pvp_manager
-            if (
-                wild_battle_manager.has_active_battle(user_id)
-                or gym_manager.has_active_battle(user_id)
-                or pvp_manager.has_active_battle(user_id)
-            ):
+        # Bloqueo en combate
+        if _tiene_batalla_activa(user_id):
+            try:
                 bot.answer_callback_query(
                     call.id,
                     "⚔️ No puedes curar durante un combate.",
                     show_alert=True,
                 )
-                return
-        except Exception:
-            pass
+            except Exception:
+                pass
+            return
 
         ok, msg = centro_pokemon.curar_equipo(user_id)
         try:

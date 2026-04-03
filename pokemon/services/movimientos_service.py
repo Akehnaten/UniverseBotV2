@@ -4,7 +4,7 @@ Servicio de Movimientos Pokémon - Sistema Completo
 Carga TODOS los movimientos desde moves.json (800+)
 Sistema de learnsets en cascada: Gen9 → Región específica
 """
-
+from __future__ import annotations
 import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
@@ -362,33 +362,133 @@ class MovimientosService:
             logger.debug(f"[LEARNSET] Error regional para {pokemon_id}: {e}")
             return None
 
-    def obtener_learnset(self, pokemon_id: int) -> Dict[int, List[str]]:
-        """
-        Obtiene el learnset de un Pokémon con cascada: Gen9 → Regional → Fallback.
-        Retorna siempre un dict {nivel: [moves]} nunca None.
-        """
-        if pokemon_id in self.learnsets_cache:
-            return self.learnsets_cache[pokemon_id]
-
-        nombre_norm = self._nombre_normalizado(pokemon_id)
-
-        # 1. Intentar Gen9 total
-        learnset = self._cargar_learnset_gen9(pokemon_id, nombre_norm)
-
-        # 2. Intentar archivo regional
-        if not learnset:
-            learnset = self._cargar_learnset_region(pokemon_id, nombre_norm)
-
-        # 3. Fallback mínimo — siempre devuelve algo útil
-        if not learnset:
-            logger.warning(
-                f"[LEARNSET] No encontrado para Pokémon #{pokemon_id} "
-                f"(nombre_norm='{nombre_norm}'), usando fallback"
-            )
-            learnset = {1: ["tackle"]}
-
-        self.learnsets_cache[pokemon_id] = learnset
-        return learnset
+    # ── Rangos aproximados de pokemonID por generación (inclusivos) ──────────────
+_GEN_RANGES = [
+    (1,   151),   # Gen 1
+    (152, 251),   # Gen 2
+    (252, 386),   # Gen 3
+    (387, 493),   # Gen 4
+    (494, 649),   # Gen 5
+    (650, 721),   # Gen 6
+    (722, 809),   # Gen 7
+    (810, 905),   # Gen 8
+    (906, 10000), # Gen 9+
+]
+ 
+ 
+def _gen_de_pokemon(pokemon_id: int) -> int:
+    """Retorna el número de generación (1-9) al que pertenece pokemon_id."""
+    for gen, (lo, hi) in enumerate(_GEN_RANGES, start=1):
+        if lo <= pokemon_id <= hi:
+            return gen
+    return 9
+ 
+ 
+def _obtener_base_evolutiva(pokemon_id: int) -> List[int]:
+    """
+    Retorna una lista con los IDs de la cadena evolutiva previa (hacia atrás).
+    Ejemplo: Charizard(6) → [5, 4]
+    Retorna [] si no se puede determinar.
+    """
+    candidatos: List[int] = []
+    try:
+        from pokemon.services.evolucion_service import evolucion_service
+        # Recorrer todas las entradas buscando quién evoluciona a este ID
+        visited: set = set()
+        current = pokemon_id
+        for _ in range(5):  # máximo 5 pasos hacia atrás
+            if current in visited:
+                break
+            visited.add(current)
+            encontrado = False
+            for pre_id_str, evos in evolucion_service.evoluciones.items():
+                for evo in evos:
+                    if int(evo.get("evoluciona_a", -1)) == current:
+                        pre_id = int(pre_id_str)
+                        candidatos.append(pre_id)
+                        current = pre_id
+                        encontrado = True
+                        break
+                if encontrado:
+                    break
+            if not encontrado:
+                break
+    except Exception as e:
+        logger.debug(f"[LEARNSET_FALLBACK] No se pudo obtener cadena evolutiva: {e}")
+    return candidatos
+ 
+ 
+def obtener_learnset_con_fallback(
+    self_or_module,
+    pokemon_id: int,
+    *,
+    _learnsets_attr: str = "learnsets",
+) -> Dict[int, List[str]]:
+    """
+    Versión mejorada de obtener_learnset con fallback generacional.
+ 
+    Estrategia:
+    1. Intentar con pokemon_id directo.
+    2. Si vacío, intentar con cada forma previa de la cadena evolutiva.
+    3. Si aún vacío, intentar con IDs de generaciones anteriores cercanas
+       (útil para Pokémon con formas regionales o IDs altos).
+ 
+    Retorna el primer learnset no vacío encontrado, o {} si ninguno tiene datos.
+    """
+    # ── Helper: acceder al dict de learnsets ──────────────────────────────────
+    def _raw_learnset(pid: int) -> Dict[int, List[str]]:
+        """Obtiene el learnset crudo del servicio, sin fallback."""
+        try:
+            # Si es una clase con atributo learnsets
+            learnsets = getattr(self_or_module, _learnsets_attr, None)
+            if learnsets is not None:
+                return learnsets.get(str(pid), learnsets.get(pid, {}))
+        except Exception:
+            pass
+        try:
+            # Si el módulo expone una función _obtener_learnset_raw
+            fn = getattr(self_or_module, "_obtener_learnset_raw", None)
+            if fn:
+                return fn(pid) or {}
+        except Exception:
+            pass
+        return {}
+ 
+    # ── 1. Intento directo ────────────────────────────────────────────────────
+    resultado = _raw_learnset(pokemon_id)
+    if resultado:
+        return resultado
+ 
+    logger.debug(f"[LEARNSET_FALLBACK] {pokemon_id}: sin datos directos, buscando en cadena previa.")
+ 
+    # ── 2. Cadena evolutiva previa ────────────────────────────────────────────
+    for pre_id in _obtener_base_evolutiva(pokemon_id):
+        resultado = _raw_learnset(pre_id)
+        if resultado:
+            logger.debug(f"[LEARNSET_FALLBACK] {pokemon_id}: datos encontrados en pre-evo {pre_id}.")
+            return resultado
+ 
+    logger.debug(f"[LEARNSET_FALLBACK] {pokemon_id}: sin datos en cadena previa, intentando gen anterior.")
+ 
+    # ── 3. Fallback por generación (busca la especie base de cada gen anterior) ─
+    # Útil para formas regionales de Gen 8/9 con IDs > 900 que comparten learnset
+    # con su contraparte original.
+    gen_actual = _gen_de_pokemon(pokemon_id)
+    for gen_fallback in range(gen_actual - 1, 0, -1):
+        lo, hi = _GEN_RANGES[gen_fallback - 1]
+        # Intentar el mismo pokemon_id reducido al rango de esa gen (heurístico)
+        candidate_id = max(lo, min(hi, pokemon_id - ((_GEN_RANGES[gen_actual - 1][0]) - lo)))
+        if candidate_id != pokemon_id:
+            resultado = _raw_learnset(candidate_id)
+            if resultado:
+                logger.debug(
+                    f"[LEARNSET_FALLBACK] {pokemon_id}: datos encontrados "
+                    f"en fallback gen {gen_fallback} id {candidate_id}."
+                )
+                return resultado
+ 
+    logger.warning(f"[LEARNSET_FALLBACK] {pokemon_id}: no se encontró learnset en ninguna generación.")
+    return {}
 
     def obtener_movimientos_nivel(self, pokemon_id: int, nivel: int) -> List[str]:
         """

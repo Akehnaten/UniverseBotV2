@@ -21,7 +21,72 @@ DITTO_ID = 132
 # Pasos (palabras escritas en el grupo) necesarios para que la guardería
 # produzca un huevo con los dos Pokémon depositados.
 # Amuleto Iris duplica los pasos que cuentan hacia este umbral.
-PASOS_PARA_PRODUCIR_HUEVO: int = 1000
+PASOS_PARA_PRODUCIR_HUEVO: int = 250
+PASOS_BASE_ECLOSION:       int = 1280   # 25 % de 5120
+# Factor reductor a aplicar si usas cálculos dinámicos de pasos:
+FACTOR_REDUCCION_PASOS: float = 0.25
+
+def aplicar_reduccion_pasos_guarderia() -> None:
+    """
+    Aplica la reducción de pasos al módulo crianza_service en tiempo de
+    ejecución, sin modificar el archivo fuente.
+ 
+    Llamar una sola vez al arrancar el bot (ej. en UniverseBot.py después
+    de importar todos los módulos):
+ 
+        from pokemon.services.crianza_service_steps_patch import aplicar_reduccion_pasos_guarderia
+        aplicar_reduccion_pasos_guarderia()
+    """
+    try:
+        from pokemon.services import crianza_service as _cs
+ 
+        # ── Constantes de producción ──────────────────────────────────────────
+        for attr in (
+            "PASOS_PARA_PRODUCIR_HUEVO",
+            "PASOS_PRODUCCION",
+            "PASOS_GUARDERIA",
+            "PASOS_HUEVO",
+        ):
+            val = getattr(_cs, attr, None)
+            if val is not None and isinstance(val, (int, float)):
+                nuevo = max(50, int(val * FACTOR_REDUCCION_PASOS))
+                setattr(_cs, attr, nuevo)
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    f"[CRIANZA_PATCH] {attr}: {val} → {nuevo}"
+                )
+ 
+        # ── Constantes de eclosión ────────────────────────────────────────────
+        for attr in (
+            "PASOS_BASE_ECLOSION",
+            "PASOS_ECLOSION",
+            "CICLOS_ECLOSION",
+            "PASOS_CICLO",
+        ):
+            val = getattr(_cs, attr, None)
+            if val is not None and isinstance(val, (int, float)):
+                nuevo = max(50, int(val * FACTOR_REDUCCION_PASOS))
+                setattr(_cs, attr, nuevo)
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    f"[CRIANZA_PATCH] {attr}: {val} → {nuevo}"
+                )
+ 
+        # ── Si usa un dict de pasos por especie / grupo ───────────────────────
+        for attr in ("PASOS_POR_GRUPO", "PASOS_POR_ESPECIE", "EGG_STEPS"):
+            d = getattr(_cs, attr, None)
+            if d is not None and isinstance(d, dict):
+                for k in d:
+                    if isinstance(d[k], (int, float)):
+                        d[k] = max(50, int(d[k] * FACTOR_REDUCCION_PASOS))
+                import logging as _log
+                _log.getLogger(__name__).info(
+                    f"[CRIANZA_PATCH] {attr}: reducido al 25 %"
+                )
+ 
+    except Exception as e:
+        import logging as _log
+        _log.getLogger(__name__).error(f"[CRIANZA_PATCH] Error aplicando reducción: {e}")
 
 # Pokémon que no pueden criar (legendarios y asexuados especiales)
 POKEMON_UNDISCOVERED: set = {
