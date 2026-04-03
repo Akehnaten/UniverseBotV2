@@ -32,19 +32,26 @@ def _delete_after(bot, chat_id: int, message_id: int, delay: float = 10.0) -> No
 
 def calcular_costo_salvaje(user_id: int) -> int:
     """
-    Calcula el costo de /salvaje según las medallas del usuario.
+    Calcula el costo de /salvaje como la mitad de la recompensa esperada.
 
-    Criterio: 50% del reward promedio esperado a ese rango de niveles.
-    Fórmula reward: randint(1,10) * nivel → promedio = 5.5 * nivel_promedio
-    Costo = round(5.5 * nivel_promedio * 0.50)
+    La recompensa real se calcula en _handle_victory / _handle_capture_success
+    con la fórmula:  max(10, min(50, 10 + nivel * 40 // 100))
+    Aquí usamos el nivel promedio del rango de spawn para estimarla y la
+    dividimos entre 2, de modo que el costo sea siempre la mitad del premio.
+
+    Ejemplos:
+      Nivel promedio  5  → recompensa ≈ 12 → costo 6
+      Nivel promedio 30  → recompensa ≈ 22 → costo 11
+      Nivel promedio 55  → recompensa ≈ 32 → costo 16
     """
     try:
         nivel_min, nivel_max = spawn_service.obtener_nivel_spawn_por_medallas(user_id)
         nivel_promedio = (nivel_min + nivel_max) / 2
-        costo = round(5.5 * nivel_promedio * 0.50)
-        return max(5, costo)   # mínimo 5 cosmos
+        # Misma fórmula que _handle_victory / _handle_capture_success
+        reward_estimado = max(10, min(50, int(10 + nivel_promedio * 40 / 100)))
+        return max(5, round(reward_estimado / 2))
     except Exception:
-        return 10              # fallback seguro
+        return 10   # fallback seguro
 
 
 class PokemonHandlers:

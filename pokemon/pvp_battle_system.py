@@ -2427,46 +2427,175 @@ class PvPCommandHandler:
     """
     Handler del comando /retar.
     Registrar en UniverseBot.py:
-
+ 
         from pokemon.pvp_battle_system import pvp_cmd, pvp_manager
         pvp_cmd.register(bot)
     """
-
-    # Estado intermedio mientras el usuario elige a quién retar
-    _pending_format: Dict[int, PvPFormat] = {}
-
+ 
     def register(self, bot):
         """Registra los handlers del comando /retar y los callbacks."""
-
+ 
         @bot.message_handler(commands=["retar"])
         def cmd_retar(message):
             self.handle_retar(message, bot)
-
+ 
+        # ── Selección de formato ──────────────────────────────────────────────
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_fmt_"))
         def cb_pvp_fmt(call):
             self.handle_format_selection(call, bot)
-
+ 
+        # ── Aceptar / Rechazar desafío ────────────────────────────────────────
         @bot.callback_query_handler(func=lambda c: c.data in ("pvp_accept", "pvp_reject"))
         def cb_pvp_accept(call):
             pvp_manager.handle_callback(call, bot)
-
-        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_move_") or c.data.startswith("pvp_switch_"))
+ 
+        # ── Acciones de batalla: movimiento y switch ──────────────────────────
+        @bot.callback_query_handler(
+            func=lambda c: (
+                c.data.startswith("pvp_move_")
+                or c.data.startswith("pvp_switch_")
+            )
+        )
         def cb_pvp_action(call):
             pvp_manager.handle_callback(call, bot)
-
-        # Captura el @ o nombre del jugador retado
-        @bot.message_handler(
-            func=lambda m: m.from_user.id in PvPCommandHandler._pending_format
+ 
+        # ── Panel principal: Atacar ───────────────────────────────────────────
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_fight_"))
+        def cb_pvp_fight(call):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            uid = call.from_user.id
+            pvp_manager.handle_fight_action(uid, bot)
+ 
+        # ── Panel principal: Volver ───────────────────────────────────────────
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_back_"))
+        def cb_pvp_back(call):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            uid = call.from_user.id
+            pvp_manager.handle_back_action(uid, bot)
+ 
+        # ── Panel principal: Equipo ───────────────────────────────────────────
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_team_"))
+        def cb_pvp_team(call):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            uid = call.from_user.id
+            pvp_manager.handle_team_pvp(uid, bot)
+ 
+        # ── Panel principal: Rendirse ─────────────────────────────────────────
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_forfeit_"))
+        def cb_pvp_forfeit(call):
+            uid = call.from_user.id
+            # Pedir confirmación si aún no se confirmó
+            parts = call.data.split("_")   # pvp_forfeit_{uid}  o  pvp_forfeit_confirm_{uid}
+            if len(parts) == 3:
+                # Primera pulsación: mostrar confirmación
+                try:
+                    bot.answer_callback_query(call.id)
+                except Exception:
+                    pass
+                kb = types.InlineKeyboardMarkup(row_width=2)
+                kb.add(
+                    types.InlineKeyboardButton(
+                        "✅ Confirmar rendición",
+                        callback_data=f"pvp_forfeit_confirm_{uid}",
+                    ),
+                    types.InlineKeyboardButton(
+                        "◀️ Volver",
+                        callback_data=f"pvp_back_{uid}",
+                    ),
+                )
+                battle = pvp_manager.get_battle_for(uid)
+                if battle:
+                    side = battle.get_side(uid)
+                    if side and side.dm_message_id:
+                        try:
+                            bot.edit_message_text(
+                                "¿Seguro que quieres rendirte?",
+                                chat_id      = uid,
+                                message_id   = side.dm_message_id,
+                                reply_markup = kb,
+                            )
+                        except Exception:
+                            pass
+            elif len(parts) == 4 and parts[2] == "confirm":
+                # Segunda pulsación: ejecutar rendición
+                try:
+                    bot.answer_callback_query(call.id, "🏳️ Te rendiste.")
+                except Exception:
+                    pass
+                pvp_manager.handle_forfeit_pvp(uid, bot)
+ 
+        # ── Botones deshabilitados (noop) ─────────────────────────────────────
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_noop_"))
+        def cb_pvp_noop(call):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+ 
+        # ── Selección VGC ─────────────────────────────────────────────────────
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_vgcsel_"))
+        def cb_pvp_vgcsel(call):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            # pvp_vgcsel_{battle_id}_{user_id}_{pokemon_id}
+            parts = call.data.split("_", 4)
+            if len(parts) < 5:
+                return
+            battle_id  = parts[2]
+            user_id    = int(parts[3])
+            pokemon_id = int(parts[4])
+            if call.from_user.id != user_id:
+                return
+            pvp_manager.handle_vgc_selection_toggle(
+                battle_id, user_id, pokemon_id, bot, call.message
+            )
+ 
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_vgcconfirm_"))
+        def cb_pvp_vgcconfirm(call):
+            try:
+                bot.answer_callback_query(call.id)
+            except Exception:
+                pass
+            # pvp_vgcconfirm_{battle_id}_{user_id}
+            parts = call.data.split("_", 3)
+            if len(parts) < 4:
+                return
+            battle_id = parts[2]
+            user_id   = int(parts[3])
+            if call.from_user.id != user_id:
+                return
+            pvp_manager.handle_vgc_confirm_selection(battle_id, user_id, bot, call.message)
+ 
+        @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_vgcnoop_"))
+        def cb_pvp_vgcnoop(call):
+            try:
+                bot.answer_callback_query(call.id, "Selecciona exactamente 4 Pokémon.")
+            except Exception:
+                pass
+ 
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "[PVP] Registrado: /retar + todos los callbacks pvp_*"
         )
-        def handle_target_input(message):
-            self.handle_target_message(message, bot)
-
+ 
+    # ── Comandos ──────────────────────────────────────────────────────────────
+ 
     def handle_retar(self, message, bot):
         uid = message.from_user.id
         cid = message.chat.id
         tid = getattr(message, "message_thread_id", None)
-
-        # Verificar que tiene Pokémon
+ 
         eq = pokemon_service.obtener_equipo(uid)
         if not eq:
             bot.send_message(
@@ -2476,7 +2605,7 @@ class PvPCommandHandler:
                 message_thread_id=tid,
             )
             return
-
+ 
         if pvp_manager.has_active_battle(uid):
             bot.send_message(
                 cid,
@@ -2485,42 +2614,51 @@ class PvPCommandHandler:
                 message_thread_id=tid,
             )
             return
-
+ 
         mk = types.InlineKeyboardMarkup(row_width=2)
         mk.add(
             types.InlineKeyboardButton("⚔️ 1v1", callback_data="pvp_fmt_1v1"),
             types.InlineKeyboardButton("🌀 2v2 (VGC)", callback_data="pvp_fmt_2v2"),
         )
-
+ 
         bot.send_message(
             cid,
             "🏟️ <b>¡Modo Desafío!</b>\n\n¿Qué formato quieres jugar?",
-            parse_mode       = "HTML",
-            reply_markup     = mk,
+            parse_mode        = "HTML",
+            reply_markup      = mk,
             message_thread_id = tid,
         )
-
+ 
     def handle_format_selection(self, call, bot):
-        uid = call.from_user.id
+        """
+        Callback para elegir el formato. Tras elegir, usa
+        register_next_step_handler para capturar el mensaje con el rival
+        con máxima prioridad (no compite con otros handlers).
+        """
+        uid     = call.from_user.id
         fmt_str = call.data.replace("pvp_fmt_", "")
-
+ 
         try:
             fmt = PvPFormat(fmt_str)
         except ValueError:
             bot.answer_callback_query(call.id, "❌ Formato inválido.")
             return
-
-        PvPCommandHandler._pending_format[uid] = fmt
+ 
         bot.answer_callback_query(call.id, f"Formato {fmt.value} seleccionado ✅")
-
+ 
+        # Editar el mensaje para pedir el rival
+        instrucciones = (
+            f"🏟️ <b>Formato elegido: {fmt.value}</b>\n\n"
+            f"Ahora dime quién es tu rival.\n"
+            f"Podés:\n"
+            f"• Escribir su <b>@username</b> (con la @)\n"
+            f"• <b>Mencionar</b> su nombre tocando el @\n"
+            f"• <b>Reenviar</b> un mensaje suyo\n\n"
+            f"<i>(Tienes 60 segundos para responder)</i>"
+        )
         try:
             bot.edit_message_text(
-                f"🏟️ <b>Formato elegido: {fmt.value}</b>\n\n"
-                f"Indica a tu rival de alguna de estas formas:\n"
-                f"• Escribe su <b>@username</b>\n"
-                f"• <b>Menciona</b> su nombre (si no tiene @)\n"
-                f"• <b>Reenvía</b> un mensaje suyo\n\n"
-                f"<i>(Tienes 60 segundos)</i>",
+                instrucciones,
                 chat_id      = call.message.chat.id,
                 message_id   = call.message.message_id,
                 parse_mode   = "HTML",
@@ -2528,100 +2666,96 @@ class PvPCommandHandler:
             )
         except Exception:
             pass
-
-        # Auto-expirar selección en 60 s
-        def _expire():
-            if uid in PvPCommandHandler._pending_format:
-                PvPCommandHandler._pending_format.pop(uid, None)
-        threading.Timer(60, _expire).start()
-
-    def handle_target_message(self, message, bot):
+ 
+        # ── FIX Bug 1: usar next_step_handler en lugar de message_handler ──────
+        # register_next_step_handler tiene MAYOR prioridad que los handlers
+        # normales y sólo se dispara UNA vez para el chat_id correcto.
+        # Esto garantiza que el mensaje de respuesta llegue aquí y no sea
+        # interceptado por _handle_texto_grupo u otros handlers registrados
+        # anteriormente.
+        def _esperar_objetivo(response_message):
+            # Auto-expirar: si tardó demasiado el next_step ya no está activo
+            self._procesar_objetivo(response_message, fmt, bot)
+ 
+        bot.register_next_step_handler(call.message, _esperar_objetivo)
+ 
+    def _procesar_objetivo(self, message, fmt: "PvPFormat", bot):
+        """
+        Resuelve el usuario objetivo desde el mensaje de respuesta y crea
+        el desafío. Llamado por register_next_step_handler — prioridad máxima.
+        """
         uid = message.from_user.id
-        fmt = PvPCommandHandler._pending_format.pop(uid, None)
-
-        if fmt is None:
-            return  # ya expiró
-
         cid = message.chat.id
         tid = getattr(message, "message_thread_id", None)
-
-        # Resolver rival: por @username o por forward
-        # Resolver rival — prioridad:
-        # 1. Mensaje reenviado (forward_from)
-        # 2. text_mention entity (usuarios SIN @username)
-        # 3. @username en texto → buscar en BD
-        target_id:   Optional[int] = None
-        target_debug: str          = ""
-
+ 
+        target_id:    int | None = None
+        target_debug: str        = ""
+ 
         # ── 1. Forward ────────────────────────────────────────────────────────
         if message.forward_from:
             target_id    = message.forward_from.id
             target_debug = f"forward:{target_id}"
-
-        # ── 2. text_mention (usuario sin @username) ───────────────────────────
+ 
+        # ── 2. text_mention (usuario sin @username — entidad Telegram) ────────
         if target_id is None and message.entities:
             for entity in message.entities:
                 if entity.type == "text_mention" and entity.user:
                     target_id    = entity.user.id
                     target_debug = f"text_mention:{target_id}"
                     break
-
-        # ── 3. @username o texto libre → API de Telegram primero, luego BD ───
-        if target_id is None:
-            from funciones.user_utils import _obtener_id_desde_username
-
-            text = (message.text or "").strip()
-
-            # Extraer el primer @username del texto si existe (via entity)
-            username_raw: Optional[str] = None
-            if message.entities:
-                for entity in message.entities:
-                    if entity.type == "mention":
-                        username_raw = message.text[
-                            entity.offset + 1 : entity.offset + entity.length
-                        ]  # sin el '@'
+ 
+        # ── 3. @mention clásico → resolver por BD ─────────────────────────────
+        if target_id is None and message.entities:
+            for entity in message.entities:
+                if entity.type == "mention":
+                    # Extraer username SIN la '@'
+                    username_raw = message.text[
+                        entity.offset + 1: entity.offset + entity.length
+                    ]
+                    if username_raw:
+                        from funciones.user_utils import _obtener_id_desde_username
+                        resolved = _obtener_id_desde_username(username_raw, cid, bot)
+                        if resolved:
+                            target_id    = resolved
+                            target_debug = f"mention_entity:{username_raw}"
                         break
-
-            # Fallback: texto completo sin '@' (ej: el usuario escribió el nombre)
-            if not username_raw:
-                username_raw = text.lstrip("@") if text else None
-
-            if username_raw:
-                # Prioridad: API de Telegram → fallback BD por nombre_usuario
-                resolved = _obtener_id_desde_username(username_raw, cid, bot)
+ 
+        # ── 4. Texto libre con @ al inicio (fallback) ─────────────────────────
+        if target_id is None:
+            text = (message.text or "").strip().lstrip("@")
+            if text:
+                from funciones.user_utils import _obtener_id_desde_username
+                resolved = _obtener_id_desde_username(text, cid, bot)
                 if resolved:
                     target_id    = resolved
-                    target_debug = f"username_api_or_db:{username_raw}"
-                else:
-                    logger.debug(
-                        f"[PVP] No se pudo resolver '{username_raw}' "
-                        "ni por API ni por BD"
-                    )
-
+                    target_debug = f"text_fallback:{text}"
+ 
         if not target_id:
             bot.send_message(
                 cid,
-                "❌ No encontré a ese jugador.\n\n"
-                "Podés:\n"
-                "• Escribir su <b>@username</b>\n"
-                "• Mencionar su nombre (si no tiene @username)\n"
-                "• <b>Reenviar</b> un mensaje suyo",
-                parse_mode="HTML",
-                message_thread_id=tid,
+                "❌ No pude identificar al jugador.\n\n"
+                "Intentá de nuevo con <b>/retar</b> usando una de estas formas:\n"
+                "• Escribí su <b>@username</b> (con el símbolo @)\n"
+                "• Tocá su nombre para que aparezca la mención azul\n"
+                "• Reenviá un mensaje suyo",
+                parse_mode        = "HTML",
+                message_thread_id = tid,
             )
             return
-
-        logger.debug(f"[PVP] Rival resuelto por {target_debug}")
-
+ 
+        import logging as _log
+        _log.getLogger(__name__).debug(f"[PVP] Rival resuelto: {target_debug}")
+ 
         if target_id == uid:
-            bot.send_message(cid, "❌ No puedes retarte a ti mismo.", message_thread_id=tid)
+            bot.send_message(cid, "❌ No puedes retarte a ti mismo.",
+                             message_thread_id=tid)
             return
-
+ 
         ok, msg = pvp_manager.create_challenge(uid, target_id, fmt)
         if not ok:
             bot.send_message(cid, msg, parse_mode="HTML", message_thread_id=tid)
             return
-
+ 
         # Notificar al retado
         challenger_name = self._get_username(uid)
         mk = types.InlineKeyboardMarkup(row_width=2)
@@ -2629,38 +2763,41 @@ class PvPCommandHandler:
             types.InlineKeyboardButton("✅ Aceptar", callback_data="pvp_accept"),
             types.InlineKeyboardButton("❌ Rechazar", callback_data="pvp_reject"),
         )
-
+ 
         try:
             sent = bot.send_message(
                 target_id,
                 f"⚔️ <b>¡Desafío recibido!</b>\n\n"
                 f"<b>{challenger_name}</b> te reta a una batalla <b>{fmt.value}</b>.\n\n"
-                f"Tienes 120 segundos para responder.",
+                f"⏰ Tienes 120 segundos para responder.",
                 parse_mode   = "HTML",
                 reply_markup = mk,
             )
-            # Guardar msg_id en el challenge por si queremos editarlo después
             ch = pvp_manager._challenges.get(target_id)
             if ch:
                 ch.msg_challenged = sent.message_id
         except Exception as e:
-            logger.error(f"[PVP] No se pudo notificar al retado {target_id}: {e}")
+            import logging as _log
+            _log.getLogger(__name__).error(
+                f"[PVP] No se pudo notificar al retado {target_id}: {e}"
+            )
             bot.send_message(
                 cid,
-                "⚠️ Desafío creado pero no pude enviar DM al rival. "
-                "Asegúrate de que haya iniciado chat con el bot.",
+                "⚠️ Desafío creado pero no pude enviar DM al rival.\n"
+                "Asegurate de que haya iniciado chat con el bot.",
                 message_thread_id=tid,
             )
             return
-
+ 
+        target_name = self._get_username(target_id)
         bot.send_message(
             cid,
-            f"✅ ¡Desafío enviado a <b>{self._get_username(target_id)}</b>!\n"
+            f"✅ ¡Desafío enviado a <b>{target_name}</b>!\n"
             f"Esperando respuesta…",
-            parse_mode       = "HTML",
+            parse_mode        = "HTML",
             message_thread_id = tid,
         )
-
+ 
     def _get_username(self, user_id: int) -> str:
         try:
             from funciones import user_service
@@ -2668,6 +2805,7 @@ class PvPCommandHandler:
             return info["nombre"] if info else f"User {user_id}"
         except Exception:
             return f"User {user_id}"
+ 
 
 
 # ══════════════════════════════════════════════════════════════════════════════

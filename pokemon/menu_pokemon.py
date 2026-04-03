@@ -4,19 +4,16 @@ Menú Principal Pokémon
 ======================
 Todas las secciones del sistema Pokémon accesibles desde /pokemon.
 
-CORRECCIONES:
-- Botón "Volver" EDITA el mensaje en lugar de crear uno nuevo.
-- Tienda implementada:
-    · Listado por categorías.
-    · Paginación de 10 items por página.
-    · Botones: [NombreItem ×1] [×5] [×10] por item.
-- Mochila reimplementada:
-    · Pantalla de categorías con conteo.
-    · Detalle por item con Vender / Usar / Dar.
-    · Dar equipa el item al Pokémon; si ya tenía uno lo devuelve al inventario.
-    · Vender devuelve ceil(precio_compra * 0.5) cosmos.
+CORRECCIONES (v2):
+- _mostrar_categoria_mochila: html.escape() en descripción para evitar
+  error 400 de Telegram cuando desc contiene < > (ej: "cura 25% HP < 50%")
+- _mostrar_detalle_item: ídem, html.escape() en descripción
+- _mostrar_categoria_mts: filtro cambiado de startswith("mt"|"mo") a
+  `item_id in MT_MAP`, evitando que moonstone, modestmint y otros ítems
+  cuya clave empieza por "mo" aparezcan en la vista de MTs/MOs.
 """
 
+import html as _html
 import math
 import logging
 from telebot import types
@@ -42,10 +39,8 @@ _TIPOS_CONSUMIBLES = {
 }
 
 # ── Índice inverso: item_id → cat_id ─────────────────────────────────────────
-# Cubre nombres en inglés (items_database_complete) Y español (items_service).
 from pokemon.items_database_complete import CATEGORIAS_TIENDA as _CATS_TIENDA
 
-# IDs de categoría legacy → ID canónico de CATEGORIAS_TIENDA
 _LEGACY_CAT_MAP: dict[str, str] = {
     "pokeballs":        "pokeballs",
     "medicinas":        "medicinas",
@@ -69,36 +64,28 @@ _LEGACY_CAT_MAP: dict[str, str] = {
 
 _ITEM_A_CAT: dict[str, str] = {}
 
-# 1. Nombres en inglés desde CATEGORIAS_TIENDA
 for _cat_id, _cat_data in _CATS_TIENDA.items():
     for _item_id in _cat_data.get("items", []):
         _ITEM_A_CAT[_item_id.lower()] = _cat_id
 
-# 2. Nombres en español desde items_service (legacy)
 try:
     from pokemon.services.items_service import items_service as _its_tmp
-    # Aseguramos que iteramos sobre un diccionario válido
     items_cats = _its_tmp.categorias or {}
-    
     for _leg_cat, _leg_data in items_cats.items():
-        # Forzamos que _leg_cat sea str para que _canon no sea None
         _canon = _LEGACY_CAT_MAP.get(_leg_cat or "", _leg_cat or "")
-        
         items_list = _leg_data.get("items", []) or []
         for _item_id in items_list:
-            if _item_id: # Evita procesar IDs nulos
-                # Usamos asignación directa; setdefault es innecesario si 
-                # solo quieres mapear el ID al canon.
+            if _item_id:
                 _ITEM_A_CAT[_item_id.lower()] = _canon
 except Exception:
     pass
 
+
 def _cat_de_item(item_id: str, item_data: dict | None = None) -> str:
-    """Devuelve la categoría canónica del item. Cubre inglés y español."""
     return _ITEM_A_CAT.get(item_id.lower(), "otros")
 
+
 def _nombre_item(item_id: str, item_data: dict) -> str:
-    """Retorna el nombre legible del item, prefiriendo el campo 'nombre' de la BD."""
     if item_data:
         for key in ("nombre", "name", "nombre_es"):
             val = item_data.get(key)
@@ -116,11 +103,6 @@ class MenuPokemon:
 
     @staticmethod
     def mostrar_menu_principal(user_id: int, bot, message):
-        """
-        Abre el menú Pokémon.
-        - Desde grupo: envía al DM y avisa en el grupo sin responder al mensaje.
-        - Desde privado: envía mensaje nuevo.
-        """
         try:
             if message.chat.type in ("group", "supergroup"):
                 tid = getattr(message, "message_thread_id", None)
@@ -143,7 +125,6 @@ class MenuPokemon:
                     )
             else:
                 MenuPokemon._enviar_menu_privado(user_id, bot)
-
         except Exception as e:
             logger.error(f"[MENU] Error en mostrar_menu_principal: {e}", exc_info=True)
 
@@ -153,10 +134,6 @@ class MenuPokemon:
 
     @staticmethod
     def _construir_menu(user_id: int):
-        """
-        Retorna (texto, markup) del menú principal.
-        Reutilizado tanto por _enviar_menu_privado como por _editar_menu_en_mensaje.
-        """
         equipo = pokemon_service.obtener_equipo(user_id)
         estado = centro_pokemon.verificar_estado_equipo(user_id)
 
@@ -197,8 +174,10 @@ class MenuPokemon:
         markup.add(
             types.InlineKeyboardButton("🥚 Guardería", callback_data=f"pokemenu_daycare_{user_id}"),
         )
-        markup.add(types.InlineKeyboardButton("📚 Recordador de Movimientos",callback_data=f"pokemenu_reminder_{user_id}",)
-        )
+        markup.add(types.InlineKeyboardButton(
+            "📚 Recordador de Movimientos",
+            callback_data=f"pokemenu_reminder_{user_id}",
+        ))
         markup.add(
             types.InlineKeyboardButton("❌ Cerrar",    callback_data=f"pokemenu_close_{user_id}"),
         )
@@ -211,16 +190,11 @@ class MenuPokemon:
 
     @staticmethod
     def _enviar_menu_privado(user_id: int, bot):
-        """Envía el menú como mensaje NUEVO al privado del usuario."""
         texto, markup = MenuPokemon._construir_menu(user_id)
         bot.send_message(user_id, texto, reply_markup=markup, parse_mode="HTML")
 
     @staticmethod
     def _editar_menu_en_mensaje(user_id: int, message, bot):
-        """
-        Edita el mensaje existente con el menú principal.
-        Botón "Volver" usa esto para NO crear mensajes nuevos.
-        """
         texto, markup = MenuPokemon._construir_menu(user_id)
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
@@ -230,28 +204,21 @@ class MenuPokemon:
 
     @staticmethod
     def procesar_callback(call, bot):
-        """
-        Dispatcher central para callbacks pokemenu_*, pokeshop_* y pokebag_*.
-        """
         try:
             data = call.data
 
-            # ── Mochila (pokebag_*) ───────────────────────────────────────────
             if data.startswith("pokebag_"):
                 MenuPokemon._procesar_callback_mochila(call, bot)
                 return
 
-            # ── Tienda (pokeshop_*) ───────────────────────────────────────────
             if data.startswith("pokeshop_"):
                 MenuPokemon._procesar_callback_tienda(call, bot)
                 return
 
-            # ── Menú principal (pokemenu_*) ───────────────────────────────────
             parts = data.split("_")
             if len(parts) < 3:
                 return
 
-            # pokemenu_poke_<uid>_<pid>  tiene 4 segmentos
             if len(parts) == 4 and parts[1] == "poke":
                 user_id = int(parts[2])
                 pid     = int(parts[3])
@@ -265,7 +232,6 @@ class MenuPokemon:
                 MenuPokemon._mostrar_detalle_pokemon(user_id, pid, call.message, bot)
                 return
 
-            # pokemenu_reminder_pk_<uid>_<pid>
             if len(parts) >= 5 and parts[1] == "reminder" and parts[2] == "pk":
                 user_id   = int(parts[3])
                 poke_id_r = int(parts[4])
@@ -280,7 +246,6 @@ class MenuPokemon:
                 _mr_movs(user_id, poke_id_r, call.message, bot)
                 return
 
-            # pokemenu_reminder_mv_<uid>_<pid>_<move_key>
             if len(parts) >= 6 and parts[1] == "reminder" and parts[2] == "mv":
                 user_id    = int(parts[3])
                 poke_id_r  = int(parts[4])
@@ -296,7 +261,6 @@ class MenuPokemon:
                 _mr_slot(user_id, poke_id_r, move_key_r, call.message, bot)
                 return
 
-            # pokemenu_reminder_sl_<uid>_<pid>_<move_key>_<slot>
             if len(parts) >= 7 and parts[1] == "reminder" and parts[2] == "sl":
                 user_id    = int(parts[3])
                 poke_id_r  = int(parts[4])
@@ -324,13 +288,8 @@ class MenuPokemon:
 
             if call.data.startswith(f"pokemenu_reminder_"):
                 parts_r = call.data.split("_")
-                # pokemenu_reminder_{uid}
-                # pokemenu_reminder_pk_{uid}_{pid}
-                # pokemenu_reminder_mv_{uid}_{pid}_{mk}
-                # pokemenu_reminder_sl_{uid}_{pid}_{mk}_{slot}
                 sub = parts_r[2] if len(parts_r) > 2 else ""
                 if sub == str(user_id):
-                    # Selector de Pokémon
                     from pokemon.move_reminder import mostrar_selector_pokemon as _mr
                     _mr(user_id, call.message, bot)
                 elif sub == "pk":
@@ -349,7 +308,7 @@ class MenuPokemon:
                     from pokemon.move_reminder import aplicar_desde_callback as _mr
                     _mr(user_id, pid_r, mk_r, slot_r, call.message, bot)
                 return
-            
+
             if opcion == "back":
                 MenuPokemon._editar_menu_en_mensaje(user_id, call.message, bot)
 
@@ -375,8 +334,6 @@ class MenuPokemon:
                 MenuPokemon._mostrar_equipo(user_id, call.message, bot)
 
             elif opcion == "teamfresh":
-                # Viene de la ficha del Pokémon (mensaje de animación).
-                # Telegram no permite editar animaciones como texto → borrar y enviar nuevo.
                 try:
                     bot.delete_message(call.message.chat.id, call.message.message_id)
                 except Exception:
@@ -394,16 +351,13 @@ class MenuPokemon:
                 MenuPokemon._mostrar_centro(user_id, call.message, bot)
 
             elif opcion == "unequip":
-                # callback_data = "pokemenu_unequip_{user_id}_{pokemon_id}"
-                # parts[0]="pokemenu"  parts[1]="unequip"  parts[2]=user_id  parts[3]=pokemon_id
                 if len(parts) < 4:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
                 pid_unequip = int(parts[3])
                 MenuPokemon._procesar_desequipar_item(user_id, pid_unequip, call, bot)
-            
+
             elif opcion == "moveup":
-                # callback_data = "pokemenu_moveup_{user_id}_{pokemon_id}"
                 if len(parts) < 4:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -422,16 +376,11 @@ class MenuPokemon:
             elif opcion == "ordenar":
                 MenuPokemon._mostrar_modo_ordenar(user_id, call.message, bot)
 
-            elif opcion == "pc":
-                MenuPokemon._mostrar_pc(user_id, call.message, bot, pagina=0)
-
             elif opcion == "pcpage":
-                # pokemenu_pcpage_{uid}_{pagina}
                 pag = int(parts[3]) if len(parts) > 3 else 0
                 MenuPokemon._mostrar_pc(user_id, call.message, bot, pagina=pag)
 
             elif opcion == "pcpoke":
-                # pokemenu_pcpoke_{uid}_{pokemon_id}_{pagina}
                 if len(parts) < 5:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -440,9 +389,6 @@ class MenuPokemon:
                 MenuPokemon._mostrar_pc_pokemon(user_id, pid_pc, pag_pc, call.message, bot)
 
             elif opcion == "pcmoveq":
-                # pokemenu_pcmoveq_{uid}_{pokemon_id}_{pagina}
-                # Si el equipo tiene espacio → mover directo.
-                # Si está lleno → mostrar selector de intercambio.
                 if len(parts) < 5:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -459,15 +405,12 @@ class MenuPokemon:
                             user_id, pid_mv, pag_mv, call.message, bot
                         )
                 else:
-                    # Equipo lleno: pedir al usuario que elija con quién intercambiar
                     bot.answer_callback_query(call.id)
                     MenuPokemon._mostrar_pc_swap_equipo(
                         user_id, pid_mv, pag_mv, call.message, bot
                     )
 
             elif opcion == "pcdep":
-                # pokemenu_pcdep_{uid}_{pid_pc_seleccionado}_{pagina}
-                # Muestra el equipo para que el usuario elija qué Pokémon depositar en el PC
                 if len(parts) < 5:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -477,8 +420,6 @@ class MenuPokemon:
                 MenuPokemon._mostrar_selector_depositar(user_id, pid_ref, pag_dep, call.message, bot)
 
             elif opcion == "pcdepok":
-                # pokemenu_pcdepok_{uid}_{pid_equipo}_{pagina}
-                # Ejecuta el depósito: mueve pid_equipo del equipo al PC
                 if len(parts) < 5:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -487,7 +428,6 @@ class MenuPokemon:
                 MenuPokemon._procesar_depositar(user_id, pid_dep, pag_dep, call, bot)
 
             elif opcion == "pclib":
-                # pokemenu_pclib_{uid}_{pokemon_id}_{pagina}  → confirmación
                 if len(parts) < 5:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -499,7 +439,6 @@ class MenuPokemon:
                 )
 
             elif opcion == "pclibera":
-                # pokemenu_pclibera_{uid}_{pokemon_id}_{pagina}  → ejecutar liberar
                 if len(parts) < 5:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -510,8 +449,6 @@ class MenuPokemon:
                 )
 
             elif opcion == "pcswap":
-                # pokemenu_pcswap_{uid}_{pid_pc}_{pid_equipo}_{pagina}
-                # Envía pid_pc al PC y trae pid_equipo al equipo.
                 if len(parts) < 6:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -523,7 +460,6 @@ class MenuPokemon:
                 )
 
             elif opcion == "liberarconfirm":
-                # pokemenu_liberarconfirm_{uid}_{pokemon_id}
                 if len(parts) < 4:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -549,7 +485,6 @@ class MenuPokemon:
                 MenuPokemon._edit_or_send(call.message, bot, user_id, texto_conf, markup_conf)
 
             elif opcion == "liberar":
-                # pokemenu_liberar_{uid}_{pokemon_id}
                 if len(parts) < 4:
                     bot.answer_callback_query(call.id, "❌ Datos incorrectos.", show_alert=True)
                     return
@@ -558,10 +493,11 @@ class MenuPokemon:
 
             elif opcion == "noop":
                 pass
+
             elif opcion == "reminder":
-                # pokemenu_reminder_{uid} — selector inicial
                 from pokemon.move_reminder import mostrar_selector_pokemon as _mr_poke
                 _mr_poke(user_id, call.message, bot)
+
             else:
                 bot.answer_callback_query(call.id, "⚙️ Función no implementada aún.")
 
@@ -626,12 +562,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_mochila(user_id: int, message, bot):
-        """
-        Pantalla principal de la mochila: mismas categorías que la tienda.
-
-        Usa CATEGORIAS_TIENDA como fuente de verdad para las categorías,
-        garantizando que mochila y tienda sean siempre idénticas.
-        """
         from pokemon.services import items_service
         from pokemon.items_database_complete import CATEGORIAS_TIENDA
 
@@ -649,7 +579,6 @@ class MenuPokemon:
             MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
             return
 
-        # Contar items por categoría usando el mismo índice que la tienda
         conteo: dict[str, int] = {}
         for item_id, qty in inventario.items():
             if not qty or qty <= 0:
@@ -664,7 +593,6 @@ class MenuPokemon:
             f"Elige una categoría:"
         )
 
-        # Mostrar categorías en el MISMO ORDEN que la tienda (campo "orden")
         cats_ordenadas = sorted(
             CATEGORIAS_TIENDA.items(), key=lambda x: x[1].get("orden", 99)
         )
@@ -678,7 +606,6 @@ class MenuPokemon:
                     callback_data=f"pokebag_cat_{user_id}_{cat_id}_0",
                 ))
 
-        # Categoría "otros" al final si hay items sin categoría de tienda
         if "otros" in conteo:
             botones.append(types.InlineKeyboardButton(
                 f"📦 Otros ({conteo['otros']})",
@@ -697,14 +624,6 @@ class MenuPokemon:
     def _mostrar_categoria_mochila(
         user_id: int, message, bot, categoria: str, pagina: int = 0
     ):
-        """
-        Lista paginada de items de una categoría.
-        Misma estructura visual que _mostrar_tienda_categoria:
-          · Texto descriptivo por item (nombre, cantidad, descripción).
-          · Un botón por item → detalle.
-          · Paginación ⬅ / ➡.
-          · Botones inferiores [🎒 Categorías] [🏠 Menú].
-        """
         from pokemon.services import items_service
         from pokemon.items_database_complete import CATEGORIAS_TIENDA
 
@@ -713,11 +632,9 @@ class MenuPokemon:
         except Exception:
             inventario = {}
 
-        # Nombre de la categoría: igual que la tienda
         cat_data   = CATEGORIAS_TIENDA.get(categoria, {})
         cat_nombre = cat_data.get("nombre", "📦 Otros")
 
-        # Filtrar items del inventario que pertenecen a esta categoría
         items_user: list = []
         for item_id, qty in inventario.items():
             if not qty or qty <= 0:
@@ -745,27 +662,27 @@ class MenuPokemon:
             MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
             return
 
-        # Paginación idéntica a la tienda
         total_pags = max(1, math.ceil(len(items_user) / _SHOP_PAGE_SIZE))
         pagina     = max(0, min(pagina, total_pags - 1))
         inicio     = pagina * _SHOP_PAGE_SIZE
         items_pag  = items_user[inicio: inicio + _SHOP_PAGE_SIZE]
 
-        # Texto descriptivo (espejo exacto de la tienda)
         texto = (
             f"🎒 <b>{cat_nombre}</b>\n"
             f"Página {pagina + 1}/{total_pags}\n\n"
         )
         for item_id, cantidad, item_data in items_pag:
             nombre_display = _nombre_item(item_id, item_data)
-            descripcion    = (
+            _desc_raw = (
                 item_data.get("desc")
                 or item_data.get("descripcion")
                 or "Sin descripción."
             )
+            # FIX: escapar la descripción para evitar error 400 de Telegram
+            # cuando contiene < > (ej: "cura 25% HP < 50%")
+            descripcion = _html.escape(str(_desc_raw))
             texto += f"• <b>{nombre_display}</b> — ×{cantidad}\n  {descripcion}\n\n"
 
-        # Botones de items
         markup = types.InlineKeyboardMarkup(row_width=1)
         for item_id, cantidad, item_data in items_pag:
             nombre_display = _nombre_item(item_id, item_data)
@@ -774,7 +691,6 @@ class MenuPokemon:
                 callback_data=f"pokebag_item_{user_id}_{item_id}",
             ))
 
-        # Navegación de páginas
         nav_row: list = []
         if pagina > 0:
             nav_row.append(types.InlineKeyboardButton(
@@ -789,7 +705,6 @@ class MenuPokemon:
         if nav_row:
             markup.row(*nav_row)
 
-        # Botones inferiores idénticos a la tienda
         markup.row(
             types.InlineKeyboardButton(
                 "🎒 Categorías", callback_data=f"pokemenu_bag_{user_id}"
@@ -806,27 +721,29 @@ class MenuPokemon:
         """Lista las MTs del inventario del usuario con su movimiento."""
         from pokemon.services import items_service
         from pokemon.mt_system import MT_MAP
+        from pokemon.battle_engine import MOVE_NAMES_ES
 
         try:
             inventario = items_service.obtener_inventario(user_id)
         except Exception:
             inventario = {}
 
-        from pokemon.battle_engine import MOVE_NAMES_ES
-
-        # Filtrar solo MTs que el usuario tiene
+        # FIX: filtrar usando MT_MAP en lugar de startswith("mt") | startswith("mo").
+        # El filtro anterior incluía moonstone, modestmint y cualquier ítem cuya
+        # clave empiece por esas letras. Ahora solo se muestran ítems reales de MT.
         mt_items = [
             (item_id, qty)
             for item_id, qty in inventario.items()
-            if item_id.startswith("mt") or item_id.startswith("mo")
-            if qty > 0
+            if item_id in MT_MAP and qty > 0
         ]
         mt_items.sort()
 
         if not mt_items:
             texto  = "📀 <b>MÁQUINAS TÉCNICAS</b>\n\nNo tienes MTs en tu mochila."
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"))
+            markup.add(types.InlineKeyboardButton(
+                "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
+            ))
             MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
             return
 
@@ -837,14 +754,16 @@ class MenuPokemon:
             move_key  = MT_MAP.get(item_id, "")
             mk_norm   = move_key.lower().replace(" ", "").replace("-", "")
             nombre_mv = MOVE_NAMES_ES.get(mk_norm, move_key.replace("-", " ").title()) if move_key else "???"
-            num       = item_id.upper().replace("MT", "MT").replace("MO", "MO")
+            num       = item_id.upper()
             label     = f"{num} — {nombre_mv}  ×{qty}"
             markup.add(types.InlineKeyboardButton(
                 label,
                 callback_data=f"pokebag_usemt_{user_id}_{item_id}",
             ))
 
-        markup.add(types.InlineKeyboardButton("⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
@@ -868,7 +787,11 @@ class MenuPokemon:
 
         item_data      = items_service.obtener_item(item_nombre) or {}
         nombre_display = _nombre_item(item_nombre, item_data)
-        descripcion    = item_data.get("desc") or item_data.get("descripcion") or "Sin descripción."
+
+        _desc_raw   = item_data.get("desc") or item_data.get("descripcion") or "Sin descripción."
+        # FIX: escapar la descripción para evitar error 400 con chars < > en Telegram
+        descripcion = _html.escape(str(_desc_raw))
+
         precio_compra  = item_data.get("precio", 0) or 0
         precio_venta   = math.ceil(precio_compra * 0.5) if precio_compra > 0 else 0
         tipo           = item_data.get("tipo", "") or ""
@@ -900,7 +823,6 @@ class MenuPokemon:
             callback_data=f"pokebag_give_{user_id}_{item_nombre}",
         ))
 
-        # Determinar categoría para el botón "volver"
         cat = _cat_de_item(item_nombre, item_data)
         markup.add(types.InlineKeyboardButton(
             "⬅️ Volver",
@@ -910,7 +832,6 @@ class MenuPokemon:
 
     @staticmethod
     def _procesar_venta_item(user_id: int, message, bot, item_nombre: str):
-        """Vende 1 unidad y devuelve ceil(precio_compra * 0.5) cosmos."""
         from pokemon.services import items_service
         from funciones import economy_service
 
@@ -947,7 +868,9 @@ class MenuPokemon:
                 f"💰 Recibiste <b>{precio_venta} Cosmos</b>."
             )
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"))
+            markup.add(types.InlineKeyboardButton(
+                "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
+            ))
             MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
         except Exception as e:
@@ -958,7 +881,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_dar_item(user_id: int, message, bot, item_nombre: str):
-        """Muestra el equipo para seleccionar a quién dar el item."""
         equipo = pokemon_service.obtener_equipo(user_id)
 
         if not equipo:
@@ -1016,14 +938,27 @@ class MenuPokemon:
 
             objeto_previo = poke.objeto
 
-            # Devolver objeto previo al inventario
             if objeto_previo:
-                items_service.agregar_item(user_id, objeto_previo, 1)
+                # Devolver objeto previo al inventario directamente en BD
+                # para no perder objetos que solo existen en ITEMS_COMPLETOS_DB
+                existing = db_manager.execute_query(
+                    "SELECT cantidad FROM INVENTARIO_USUARIO WHERE userID = ? AND item_nombre = ?",
+                    (user_id, objeto_previo),
+                )
+                if existing:
+                    db_manager.execute_update(
+                        "UPDATE INVENTARIO_USUARIO SET cantidad = cantidad + 1 "
+                        "WHERE userID = ? AND item_nombre = ?",
+                        (user_id, objeto_previo),
+                    )
+                else:
+                    db_manager.execute_update(
+                        "INSERT INTO INVENTARIO_USUARIO (userID, item_nombre, cantidad) "
+                        "VALUES (?, ?, 1)",
+                        (user_id, objeto_previo),
+                    )
 
-            # Consumir el nuevo item del inventario
             items_service.usar_item(user_id, item_nombre, 1)
-
-            # Equipar al Pokémon en BD
             db_manager.execute_update(
                 "UPDATE POKEMON_USUARIO SET objeto = ? WHERE id_unico = ?",
                 (item_nombre, poke_id),
@@ -1042,7 +977,9 @@ class MenuPokemon:
                 texto = f"✅ <b>{nombre_poke}</b> ahora lleva <b>{nombre_item}</b>."
 
             markup = types.InlineKeyboardMarkup()
-            markup.add(types.InlineKeyboardButton("⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"))
+            markup.add(types.InlineKeyboardButton(
+                "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
+            ))
             MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
         except Exception as e:
@@ -1053,24 +990,10 @@ class MenuPokemon:
 
     @staticmethod
     def _procesar_callback_mochila(call, bot):
-        """
-        Dispatcher de callbacks pokebag_*.
-
-        Formatos:
-            pokebag_cat_{uid}_{categoria}_{pagina}
-            pokebag_item_{uid}_{item_nombre}
-            pokebag_sell_{uid}_{item_nombre}
-            pokebag_use_{uid}_{item_nombre}
-            pokebag_give_{uid}_{item_nombre}
-            pokebag_give_pk_{uid}_{poke_id}_{item_nombre}
-        """
         try:
             data = call.data
 
-            # pokebag_give_pk tiene formato especial con 6 segmentos
             if data.startswith("pokebag_give_pk_"):
-                # pokebag_give_pk_{uid}_{poke_id}_{item_nombre}
-                # split con maxsplit=5 → ['pokebag','give','pk',uid,poke_id,item_nombre]
                 partes      = data.split("_", 5)
                 user_id     = int(partes[3])
                 poke_id     = int(partes[4])
@@ -1086,7 +1009,6 @@ class MenuPokemon:
                 MenuPokemon._procesar_dar_item(user_id, call.message, bot, poke_id, item_nombre)
                 return
 
-            # Formato genérico: pokebag_{accion}_{uid}_{payload}
             partes = data.split("_", 3)
             if len(partes) < 4:
                 return
@@ -1105,7 +1027,6 @@ class MenuPokemon:
                 pass
 
             if accion == "cat":
-                # payload = "{cat_id}_{pagina}"  (mismo parser que tienda)
                 ultimo_sep = payload.rfind("_")
                 if ultimo_sep == -1:
                     cat_id_bag, pagina_bag = payload, 0
@@ -1116,7 +1037,6 @@ class MenuPokemon:
                     except ValueError:
                         pagina_bag = 0
 
-                # MTs tienen vista especial (muestra el movimiento que enseñan)
                 if cat_id_bag == "MT/MO":
                     MenuPokemon._mostrar_categoria_mts(user_id, call.message, bot)
                 else:
@@ -1132,9 +1052,12 @@ class MenuPokemon:
 
             elif accion == "use":
                 if payload.startswith("mt") or payload.startswith("mo"):
-                    from pokemon.mt_system import iniciar_uso_mt
-                    iniciar_uso_mt(user_id, payload, call.message, bot)
-                    return
+                    from pokemon.mt_system import MT_MAP
+                    # Solo abrir selector de MT si es realmente una MT
+                    if payload in MT_MAP:
+                        from pokemon.mt_system import iniciar_uso_mt
+                        iniciar_uso_mt(user_id, payload, call.message, bot)
+                        return
                 # ── Ítems que requieren seleccionar un Pokémon ──────────────
                 from pokemon.item_use_system import (
                     necesita_selector_pokemon,
@@ -1154,9 +1077,12 @@ class MenuPokemon:
                 MenuPokemon._edit_or_send(call.message, bot, user_id, texto, markup)
 
             elif accion == "usemt":
-                # payload = item_id (ej: "mt085")
-                from pokemon.mt_system import iniciar_uso_mt
-                iniciar_uso_mt(user_id, payload, call.message, bot)
+                from pokemon.mt_system import MT_MAP, iniciar_uso_mt
+                if payload in MT_MAP:
+                    iniciar_uso_mt(user_id, payload, call.message, bot)
+                else:
+                    # No es una MT real, ignorar silenciosamente
+                    logger.warning(f"[MOCHILA] usemt recibido para item no-MT: {payload}")
 
             elif accion == "give":
                 MenuPokemon._mostrar_dar_item(user_id, call.message, bot, payload)
@@ -1172,9 +1098,8 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_pc(user_id: int, message, bot, pagina: int = 0):
-        """PC paginado: 4 columnas x 5 filas = 20 Pokémon por página."""
         PC_COLS = 4
-        PC_PAGE = 20  # 4 x 5
+        PC_PAGE = 20
 
         pc_total   = pokemon_service.obtener_pc(user_id, limit=9999)
         total      = len(pc_total)
@@ -1213,7 +1138,6 @@ class MenuPokemon:
         if fila:
             markup.row(*fila)
 
-        # Navegación de páginas
         nav = []
         if pagina > 0:
             nav.append(types.InlineKeyboardButton(
@@ -1226,7 +1150,6 @@ class MenuPokemon:
         if nav:
             markup.row(*nav)
 
-        # Botón Depositar: visible siempre, la lógica de validación está en _mostrar_selector_depositar
         equipo_actual = pokemon_service.obtener_equipo(user_id)
         if len(equipo_actual) > 1:
             markup.add(types.InlineKeyboardButton(
@@ -1241,7 +1164,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_pc_pokemon(user_id: int, pokemon_id: int, pagina: int, message, bot):
-        """Detalle de un Pokémon del PC con opción de moverlo al equipo."""
         p = pokemon_service.obtener_pokemon(pokemon_id)
         if not p:
             bot.send_message(user_id, "❌ Pokémon no encontrado.")
@@ -1299,9 +1221,9 @@ class MenuPokemon:
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     # ── EQUIPO ────────────────────────────────────────────────────────────────
+
     @staticmethod
     def _construir_equipo(user_id: int):
-        """Retorna (texto, markup) del panel de equipo. Reutilizable."""
         equipo = pokemon_service.obtener_equipo(user_id)
         texto  = "👥 <b>TU EQUIPO</b>\n\nToca un Pokémon para ver sus estadísticas.\n\n"
         markup = types.InlineKeyboardMarkup(row_width=1)
@@ -1323,7 +1245,6 @@ class MenuPokemon:
                 sexo   = {"M": " ♂", "F": " ♀"}.get(getattr(poke, "sexo", None) or "", "")
                 shiny  = " ✨" if getattr(poke, "shiny", False) else ""
                 nombre = poke.mote or poke.nombre
-  
                 label = f"{est} {nombre}{sexo}{shiny} Nv.{poke.nivel}  HP:{poke.hp_actual}/{hp_max}"
                 markup.add(types.InlineKeyboardButton(
                     label,
@@ -1333,7 +1254,9 @@ class MenuPokemon:
             markup.add(types.InlineKeyboardButton(
                 "🔀 Ordenar", callback_data=f"pokemenu_ordenar_{user_id}"
             ))
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+        ))
         return texto, markup
 
     @staticmethod
@@ -1343,7 +1266,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_modo_ordenar(user_id: int, message, bot):
-        """Modo ordenar: solo nombre + flechas ▲▼, sin info extra."""
         equipo = pokemon_service.obtener_equipo(user_id)
 
         texto  = "🔀 <b>ORDENAR EQUIPO</b>\n\nUsá las flechas para cambiar el orden:"
@@ -1378,19 +1300,9 @@ class MenuPokemon:
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     # ── DETALLE POKÉMON ───────────────────────────────────────────────────────
+
     @staticmethod
     def _mostrar_detalle_pokemon(user_id: int, pokemon_id: int, message, bot):
-        """
-        Envía el sprite animado del Pokémon (en loop) junto a su ficha completa:
-          — Encabezado: nombre/apodo, #ID, shiny, sexo, tipos, nat., hab.
-          — Nivel, EXP actual/requerida con barra visual
-          — HP actual/máximo con barra de color
-          — Tabla de stats: stat final | base | IV (con barra) | EV
-          — Resumen IVs totales (% perfección) y EVs totales
-          — Grupo huevo
-          — Movimientos
-          — Objeto equipado (con botón para desequipar)
-        """
         from pokemon.experience_system import ExperienceSystem
         from pokemon.services.pokedex_service import pokedex_service as _pdx
 
@@ -1402,7 +1314,6 @@ class MenuPokemon:
                 pass
             return
 
-        # ── Encabezado ────────────────────────────────────────────────────────
         nombre       = p.mote or p.nombre
         especie      = p.nombre if p.mote else ""
         shiny_sym    = "✨ " if getattr(p, "shiny", False) else ""
@@ -1413,13 +1324,11 @@ class MenuPokemon:
         tipos        = _pdx.obtener_tipos(p.pokemonID)
         tipos_str    = " / ".join(tipos)
 
-        # ── Nivel / EXP ───────────────────────────────────────────────────────
         exp_actual  = p.exp or 0
         exp_req     = ExperienceSystem.exp_necesaria_para_nivel(p.nivel)
         pct_exp10   = min(10, int(exp_actual / max(1, exp_req) * 10))
         barra_exp   = "█" * pct_exp10 + "░" * (10 - pct_exp10)
 
-        # ── HP ────────────────────────────────────────────────────────────────
         s       = p.stats or {}
         hp_max  = s.get("hp", p.hp_actual) or p.hp_actual
         hp_act  = p.hp_actual
@@ -1427,7 +1336,6 @@ class MenuPokemon:
         bloque_hp = "🟩" if pct_hp > 6 else ("🟨" if pct_hp > 3 else "🟥")
         barra_hp  = bloque_hp * pct_hp + "⬛" * (10 - pct_hp)
 
-        # ── Stats table ───────────────────────────────────────────────────────
         iv = p.ivs or {}
         ev = p.evs or {}
         sb = _pdx.obtener_stats_base(p.pokemonID) or {}
@@ -1445,16 +1353,15 @@ class MenuPokemon:
             filled = round(v / 31 * 5)
             return "▰" * filled + "▱" * (5 - filled)
 
-        # Determinar qué stat sube y cuál baja según la naturaleza
         from pokemon.services.pokedex_service import _NATURALEZAS
         _nat_data   = _NATURALEZAS.get(nat, {})
-        _stat_sube  = _nat_data.get("sube")   # e.g. "atq_sp"
-        _stat_baja  = _nat_data.get("baja")   # e.g. "atq"
+        _stat_sube  = _nat_data.get("sube")
+        _stat_baja  = _nat_data.get("baja")
 
         rows = ""
         for key, label in STAT_KEYS:
             if key == "hp":
-                mod = " "   # HP nunca tiene modificador de naturaleza
+                mod = " "
             elif key == _stat_sube:
                 mod = "+"
             elif key == _stat_baja:
@@ -1472,7 +1379,6 @@ class MenuPokemon:
         pct_ivs   = round(total_iv / 186 * 100, 1)
         total_ev  = sum(ev.get(k, 0) for k, _ in STAT_KEYS)
 
-        # ── Grupo huevo ───────────────────────────────────────────────────────
         try:
             from pokemon.services.crianza_service import GRUPOS_HUEVOS
             grupos_ids = GRUPOS_HUEVOS.get(p.pokemonID, [])
@@ -1480,7 +1386,6 @@ class MenuPokemon:
         except Exception:
             grupo_str = "—"
 
-        # ── Movimientos ───────────────────────────────────────────────────────
         movs = getattr(p, "movimientos", []) or []
         try:
             from pokemon.wild_battle_system import MOVE_NAMES_ES
@@ -1493,7 +1398,6 @@ class MenuPokemon:
                 movs_lines.append(f"  • {MOVE_NAMES_ES.get(key, mv.title())}")
         movs_txt = "\n".join(movs_lines) if movs_lines else "  —"
 
-        # ── Objeto equipado ───────────────────────────────────────────────────
         objeto     = getattr(p, "objeto", None)
         objeto_txt = (
             f"🎒 <b>Objeto:</b> {objeto.replace('_',' ').title()}"
@@ -1501,33 +1405,25 @@ class MenuPokemon:
             "🎒 <b>Objeto:</b> Ninguno"
         )
 
-        # ── Texto completo ────────────────────────────────────────────────────
         texto = (
             f"{shiny_sym}┌─ <b>{nombre}</b>{especie_str}{sexo_s}  <code>#{p.pokemonID}</code>\n"
             f"├ Tipo: {tipos_str}\n"
             f"├ Nat.: {nat}  |  Hab.: {hab}\n"
             f"└──────────────────────────────\n\n"
-
             f"⭐ <b>Nivel {p.nivel}</b>\n"
             f"📊 EXP: {exp_actual:,} / {exp_req:,}\n"
             f"   [{barra_exp}] {pct_exp10*10}%\n\n"
-
             f"❤️ HP: {hp_act:,} / {hp_max:,}\n"
             f"   {barra_hp}\n\n"
-
             f"<b>STATS</b> <i>(stat | base | IV▰▱ | EV)</i>\n"
             f"<code>{rows}</code>"
             f"🔬 IVs: {total_iv}/186 ({pct_ivs}% perfección)\n"
             f"💪 EVs: {total_ev}/510\n\n"
-
             f"🥚 <b>Grupo huevo:</b> {grupo_str}\n\n"
-
             f"<b>Movimientos:</b>\n{movs_txt}\n\n"
-
             f"{objeto_txt}"
         )
 
-        # ── Botones ───────────────────────────────────────────────────────────
         markup = types.InlineKeyboardMarkup(row_width=1)
         if objeto:
             markup.add(types.InlineKeyboardButton(
@@ -1542,7 +1438,6 @@ class MenuPokemon:
             "⬅️ Equipo", callback_data=f"pokemenu_teamfresh_{user_id}"
         ))
 
-        # ── Sprite animado en loop (descarga bytes para que Telegram no convierta a MP4) ──
         sprite_url = p.get_sprite_animado()
 
         try:
@@ -1588,10 +1483,6 @@ class MenuPokemon:
 
     @staticmethod
     def _procesar_desequipar_item(user_id: int, pokemon_id: int, call, bot):
-        """
-        Quita el objeto equipado a un Pokémon y lo devuelve al inventario.
-        Recibe `call` (no call.message) para poder llamar answer_callback_query.
-        """
         from pokemon.services import items_service as _items_svc
         from database import db_manager
 
@@ -1612,13 +1503,26 @@ class MenuPokemon:
                     pass
                 return
 
-            # Quitar de BD
             db_manager.execute_update(
                 "UPDATE POKEMON_USUARIO SET objeto = NULL WHERE id_unico = ?",
                 (pokemon_id,),
             )
-            # Devolver al inventario
-            _items_svc.agregar_item(user_id, objeto, 1)
+            # Devolver al inventario de forma robusta (mismo fix que _procesar_dar_item)
+            existing = db_manager.execute_query(
+                "SELECT cantidad FROM INVENTARIO_USUARIO WHERE userID = ? AND item_nombre = ?",
+                (user_id, objeto),
+            )
+            if existing:
+                db_manager.execute_update(
+                    "UPDATE INVENTARIO_USUARIO SET cantidad = cantidad + 1 "
+                    "WHERE userID = ? AND item_nombre = ?",
+                    (user_id, objeto),
+                )
+            else:
+                db_manager.execute_update(
+                    "INSERT INTO INVENTARIO_USUARIO (userID, item_nombre, cantidad) VALUES (?, ?, 1)",
+                    (user_id, objeto),
+                )
 
             nombre_obj = objeto.replace("_", " ").title()
             try:
@@ -1629,7 +1533,6 @@ class MenuPokemon:
             except Exception:
                 pass
 
-            # Refrescar la ficha actualizada
             MenuPokemon._mostrar_detalle_pokemon(user_id, pokemon_id, call.message, bot)
 
         except Exception as e:
@@ -1643,7 +1546,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_tienda(user_id: int, message, bot):
-        """Pantalla de categorías de la tienda."""
         from pokemon.shop_system import ShopSystem
         from funciones import economy_service
 
@@ -1665,19 +1567,22 @@ class MenuPokemon:
         for i in range(0, len(botones), 2):
             markup.row(*botones[i:i + 2])
 
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
     def _mostrar_tienda_categoria(user_id: int, message, bot, cat_id: str, pagina: int = 0):
-        """Muestra los items de una categoría con paginación."""
         from pokemon.shop_system import ShopSystem
         from funciones import economy_service
 
         exito, cat_nombre, items_list = ShopSystem.obtener_categoria(cat_id)
         if not exito:
-            bot.answer_callback_query(message.id if hasattr(message, "id") else 0,
-                                      "❌ Categoría no encontrada.", show_alert=True)
+            bot.answer_callback_query(
+                message.id if hasattr(message, "id") else 0,
+                "❌ Categoría no encontrada.", show_alert=True
+            )
             return
 
         saldo      = economy_service.get_balance(user_id)
@@ -1686,7 +1591,6 @@ class MenuPokemon:
         inicio     = pagina * _SHOP_PAGE_SIZE
         items_pag  = items_list[inicio: inicio + _SHOP_PAGE_SIZE]
 
-        import html as _html
         texto = (
             f"🏪 <b>{cat_nombre}</b>\n"
             f"💰 Saldo: <b>{saldo} Cosmos</b>\n"
@@ -1736,14 +1640,6 @@ class MenuPokemon:
 
     @staticmethod
     def _procesar_callback_tienda(call, bot):
-        """
-        Maneja callbacks pokeshop_*.
-
-        Formatos:
-            pokeshop_cat_{uid}_{cat_id}_{pagina}
-            pokeshop_buy_{uid}_{cat_id}|{item_id}_{qty}
-            pokeshop_noop_{uid}
-        """
         try:
             data = call.data
 
@@ -1812,7 +1708,6 @@ class MenuPokemon:
 
     @staticmethod
     def _ejecutar_compra(user_id: int, call, bot, cat_id: str, item_id: str, qty: int):
-        """Realiza la compra y actualiza la vista con feedback claro al usuario."""
         from pokemon.shop_system import ShopSystem
         import re
         import threading
@@ -1860,7 +1755,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_centro(user_id: int, message, bot):
-        # No se puede usar el Centro Pokémon durante una batalla activa.
         try:
             from pokemon.wild_battle_system import wild_battle_manager
             from pokemon.gym_battle_system import gym_manager
@@ -1871,7 +1765,9 @@ class MenuPokemon:
                 or pvp_manager.has_active_battle(user_id)
             ):
                 markup = types.InlineKeyboardMarkup()
-                markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+                markup.add(types.InlineKeyboardButton(
+                    "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+                ))
                 MenuPokemon._edit_or_send(
                     message, bot, user_id,
                     "⚔️ <b>¡Estás en combate!</b>\n\n"
@@ -1906,14 +1802,13 @@ class MenuPokemon:
                 f"✨ Curar ({centro_pokemon.COSTO_CURACION} cosmos)",
                 callback_data=f"pokemenu_heal_{user_id}",
             ))
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
     def _procesar_curacion(user_id: int, call, bot):
-        """Ejecuta la curación y actualiza el mensaje con el resultado."""
-        # Doble chequeo: el botón puede presionarse aunque la sesión de menú
-        # fuera abierta antes de iniciar el combate.
         try:
             from pokemon.wild_battle_system import wild_battle_manager
             from pokemon.gym_battle_system import gym_manager
@@ -1938,12 +1833,13 @@ class MenuPokemon:
         except Exception:
             pass
         markup = types.InlineKeyboardMarkup()
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+        ))
         MenuPokemon._edit_or_send(call.message, bot, user_id, msg, markup)
 
     @staticmethod
     def _procesar_liberar_pokemon(user_id: int, pokemon_id: int, call, bot):
-        """Libera un Pokémon del equipo y otorga cosmos = nivel * 10."""
         from funciones import economy_service as _econ
         from database import db_manager as _db
         try:
@@ -1987,10 +1883,7 @@ class MenuPokemon:
     # ── PC: LIBERAR DESDE PC ──────────────────────────────────────────────────
 
     @staticmethod
-    def _mostrar_pc_liberar_confirm(
-        user_id: int, pokemon_id: int, pagina: int, message, bot
-    ):
-        """Muestra diálogo de confirmación antes de liberar un Pokémon del PC."""
+    def _mostrar_pc_liberar_confirm(user_id: int, pokemon_id: int, pagina: int, message, bot):
         p = pokemon_service.obtener_pokemon(pokemon_id)
         if not p or p.usuario_id != user_id:
             bot.send_message(user_id, "❌ Pokémon no encontrado.")
@@ -2019,10 +1912,7 @@ class MenuPokemon:
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
-    def _procesar_liberar_desde_pc(
-        user_id: int, pokemon_id: int, pagina: int, call, bot
-    ):
-        """Libera (vende) un Pokémon que está en el PC y otorga nivel×10 cosmos."""
+    def _procesar_liberar_desde_pc(user_id: int, pokemon_id: int, pagina: int, call, bot):
         from funciones import economy_service as _econ
         from database import db_manager as _db
 
@@ -2034,7 +1924,6 @@ class MenuPokemon:
                 )
                 return
 
-            # El Pokémon debe estar en el PC (en_equipo = 0)
             if getattr(p, "en_equipo", False):
                 bot.answer_callback_query(
                     call.id,
@@ -2069,19 +1958,10 @@ class MenuPokemon:
 
         except Exception as e:
             logger.error(f"[PC-LIBERAR] Error: {e}", exc_info=True)
-            bot.answer_callback_query(
-                call.id, "❌ Error al liberar.", show_alert=True
-            )
+            bot.answer_callback_query(call.id, "❌ Error al liberar.", show_alert=True)
 
     @staticmethod
-    def _mostrar_pc_swap_equipo(
-        user_id: int, pid_pc: int, pagina: int, message, bot
-    ):
-        """
-        El equipo está lleno (6 Pokémon).
-        Muestra los miembros del equipo para que el usuario elija
-        cuál enviar al PC y sustituir por el Pokémon seleccionado.
-        """
+    def _mostrar_pc_swap_equipo(user_id: int, pid_pc: int, pagina: int, message, bot):
         p_pc   = pokemon_service.obtener_pokemon(pid_pc)
         equipo = pokemon_service.obtener_equipo(user_id)
 
@@ -2123,11 +2003,6 @@ class MenuPokemon:
 
     @staticmethod
     def _mostrar_selector_depositar(user_id: int, pid_ref: int, pagina: int, message, bot):
-        """
-        Muestra el equipo del usuario para que elija qué Pokémon
-        depositar en el PC. Solo muestra los que tienen HP > 0 y
-        no son el único miembro del equipo (no se puede dejar vacío).
-        """
         equipo = pokemon_service.obtener_equipo(user_id)
 
         if not equipo:
@@ -2163,13 +2038,8 @@ class MenuPokemon:
         ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
-
     @staticmethod
     def _procesar_depositar(user_id: int, pid_equipo: int, pagina: int, call, bot):
-        """
-        Mueve un Pokémon del equipo al PC.
-        Valida que no sea el último del equipo.
-        """
         from database import db_manager as _db
 
         try:
@@ -2209,14 +2079,7 @@ class MenuPokemon:
             bot.answer_callback_query(call.id, "❌ Error al depositar.", show_alert=True)
 
     @staticmethod
-    def _procesar_pc_swap(
-        user_id: int, pid_pc: int, pid_equipo: int, pagina: int, call, bot
-    ):
-        """
-        Intercambia un Pokémon del PC con uno del equipo:
-          - pid_pc     → entra al equipo
-          - pid_equipo → va al PC
-        """
+    def _procesar_pc_swap(user_id: int, pid_pc: int, pid_equipo: int, pagina: int, call, bot):
         from database import db_manager as _db
 
         try:
@@ -2235,22 +2098,18 @@ class MenuPokemon:
                 )
                 return
 
-            # Guardar posición del equipo que sale, para asignarla al que entra
             pos_saliente = getattr(p_equipo, "posicion_equipo", 0) or 0
 
-            # Enviar pokémon del equipo al PC
             _db.execute_update(
                 "UPDATE POKEMON_USUARIO SET en_equipo = 0, posicion_equipo = NULL "
                 "WHERE id_unico = ?",
                 (pid_equipo,),
             )
-            # Traer pokémon del PC al equipo, ocupando la misma posición
             _db.execute_update(
                 "UPDATE POKEMON_USUARIO SET en_equipo = 1, posicion_equipo = ? "
                 "WHERE id_unico = ?",
                 (pos_saliente, pid_pc),
             )
-            # Recompactar posiciones del equipo
             pokemon_service.inicializar_posiciones_equipo(user_id)
 
             nombre_entra = p_pc.mote or p_pc.nombre
@@ -2269,20 +2128,16 @@ class MenuPokemon:
             )
 
     # ── GUARDERÍA ─────────────────────────────────────────────────────────────
+
     @staticmethod
     def _mostrar_guarderia(user_id: int, message, bot):
-        """
-        Menú principal de guardería.
-        Muestra los dos slots (poke1 / poke2) con su estado actual.
-        """
         from pokemon.services.crianza_service import crianza_service
 
-        # obtener_pokemon_guarderia devuelve {"poke1": Pokemon|None, "poke2": Pokemon|None}
         guarderia = crianza_service.obtener_pokemon_guarderia(user_id)
         huevos    = crianza_service.obtener_huevos_usuario(user_id)
 
         texto = "🥚 <b>GUARDERÍA POKÉMON</b>\n\n"
-        texto +="📦 <b>Slots:</b>\n"
+        texto += "📦 <b>Slots:</b>\n"
 
         _slot_labels = {"poke1": "Slot 1", "poke2": "Slot 2"}
         for slot, poke in guarderia.items():
@@ -2312,7 +2167,9 @@ class MenuPokemon:
             markup.add(types.InlineKeyboardButton(
                 "🥚 Retirar huevo", callback_data=f"daycare_rethuevo_{user_id}"
             ))
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"pokemenu_back_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
@@ -2327,10 +2184,6 @@ class MenuPokemon:
 
     @staticmethod
     def _guarderia_depositar(user_id: int, message, bot):
-        """
-        Lista el equipo del usuario para que elija qué Pokémon depositar.
-        Muestra nombre, sexo, shiny y nivel para facilitar la elección.
-        """
         from pokemon.services.crianza_service import crianza_service
 
         equipo    = pokemon_service.obtener_equipo(user_id)
@@ -2359,18 +2212,15 @@ class MenuPokemon:
                     callback_data=f"daycare_dep_{user_id}_{pid}"
                 ))
 
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"daycare_menu_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"daycare_menu_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
     def _guarderia_retirar(user_id: int, message, bot):
-        """
-        Lista los Pokémon depositados por slot para que el usuario elija
-        cuál retirar. Usa el dict devuelto por obtener_pokemon_guarderia().
-        """
         from pokemon.services.crianza_service import crianza_service
 
-        # guarderia = {"poke1": Pokemon|None, "poke2": Pokemon|None}
         guarderia = crianza_service.obtener_pokemon_guarderia(user_id)
         ocupados  = {slot: poke for slot, poke in guarderia.items() if poke is not None}
 
@@ -2391,7 +2241,9 @@ class MenuPokemon:
                     callback_data=f"daycare_ret_{user_id}_{poke.id_unico}"
                 ))
 
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"daycare_menu_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"daycare_menu_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
     @staticmethod
@@ -2408,7 +2260,9 @@ class MenuPokemon:
                 callback_data=f"daycare_delhuevo_{user_id}_{h['id']}",
             ))
 
-        markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"daycare_menu_{user_id}"))
+        markup.add(types.InlineKeyboardButton(
+            "⬅️ Volver", callback_data=f"daycare_menu_{user_id}"
+        ))
         MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
 
 

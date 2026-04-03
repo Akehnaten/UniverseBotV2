@@ -594,6 +594,56 @@ MOVE_CAT_EMOJI = {
     "Estado":   "💫",
 }
 
+def _get_battle_item_tipo(item_nombre: str) -> tuple[str, dict]:
+    """
+    Devuelve (tipo, item_data) para la categorización de ítems en la mochila
+    de batalla. Combina items_service (claves españolas/legacy) con
+    items_database_complete (claves en inglés), e infiere el tipo por
+    sub-diccionario cuando ninguno lo declara explícitamente.
+ 
+    Args:
+        item_nombre: clave del ítem tal como está almacenada en el inventario.
+ 
+    Returns:
+        Tupla (tipo_str, item_data_dict). tipo_str puede ser '' si no se pudo
+        determinar, pero nunca lanza excepción.
+    """
+    from pokemon.services import items_service as _its
+ 
+    # ── 1. items_service (base española/legacy) ──────────────────────────────
+    item_data: dict = _its.obtener_item(item_nombre) or {}
+    tipo: str = item_data.get('tipo', '') or ''
+    if tipo:
+        return tipo, item_data
+ 
+    # ── 2. items_database_complete (base inglesa) ────────────────────────────
+    try:
+        from pokemon.items_database_complete import (
+            obtener_item_info,
+            POKEBALLS_DB,
+            MEDICINAS_DB,
+            BAYAS_DB,
+        )
+        complete: dict = obtener_item_info(item_nombre) or {}
+        if complete:
+            if not item_data:
+                item_data = complete
+            tipo = complete.get('tipo', '') or ''
+ 
+        # ── 3. Inferencia por sub-diccionario ─────────────────────────────────
+        if not tipo:
+            key = item_nombre.lower()
+            if key in POKEBALLS_DB:
+                tipo = 'pokeball'
+            elif key in BAYAS_DB:
+                tipo = 'baya'
+            elif key in MEDICINAS_DB:
+                tipo = 'medicina'
+    except Exception:
+        pass
+ 
+    return tipo, item_data
+
 def _apply_residual_effects(battle, log: list) -> None:
     """
     Adaptador de fin de turno.
@@ -1363,32 +1413,34 @@ class WildBattleManager:
             battle = self.get_battle(user_id)
             if not battle:
                 return False
-
+ 
             inventario = items_service.obtener_inventario(user_id)
-
+ 
             TIPOS_MEDICINA = {'medicina', 'curacion'}
             TIPOS_POKEBALL = {'pokeball'}
-            TIPOS_BAYA     = {'baya', 'baya_ofensiva', 'baya_mitigacion', 'baya_pp',
-                               'baya_estado', 'baya_hp'}
-
+            TIPOS_BAYA     = {
+                'baya', 'baya_ofensiva', 'baya_mitigacion', 'baya_pp',
+                'baya_estado', 'baya_hp',
+            }
+ 
             num_medicinas = 0
             num_pokeballs = 0
             num_bayas     = 0
-
+ 
             for item_nombre, cantidad in inventario.items():
-                item_data = items_service.obtener_item(item_nombre)
-                if item_data is None:
+                if not cantidad or cantidad <= 0:
                     continue
-                tipo = item_data.get('tipo', '')
+                # FIX: usar helper con fallback en lugar de items_service directo
+                tipo, _ = _get_battle_item_tipo(item_nombre)
                 if tipo in TIPOS_MEDICINA:
                     num_medicinas += cantidad
                 elif tipo in TIPOS_POKEBALL:
                     num_pokeballs += cantidad
                 elif tipo in TIPOS_BAYA:
                     num_bayas += cantidad
-
+ 
             text = "🎒 <b>Mochila</b>\n\nSelecciona una categoría:"
-
+ 
             keyboard = types.InlineKeyboardMarkup(row_width=2)
             keyboard.add(
                 types.InlineKeyboardButton(
@@ -1412,10 +1464,10 @@ class WildBattleManager:
                     callback_data=f"battle_back_{user_id}"
                 )
             )
-
+ 
             self._edit_battle_message(bot, user_id, battle.message_id, text, keyboard)
             return True
-
+ 
         except Exception as e:
             logger.error(f"Error en handle_bag_action: {e}")
             return False
@@ -1429,35 +1481,36 @@ class WildBattleManager:
             battle = self.get_battle(user_id)
             if not battle:
                 return False
-
+ 
             inventario = items_service.obtener_inventario(user_id)
-
+ 
             TIPOS_POR_CAT = {
                 'medicine' : {'medicina', 'curacion'},
                 'pokeballs': {'pokeball'},
-                'berries'  : {'baya', 'baya_ofensiva', 'baya_mitigacion',
-                               'baya_pp', 'baya_estado', 'baya_hp'},
+                'berries'  : {
+                    'baya', 'baya_ofensiva', 'baya_mitigacion',
+                    'baya_pp', 'baya_estado', 'baya_hp',
+                },
             }
             EMOJIS_CAT = {
                 'medicine' : '⚕️ Medicinas',
                 'pokeballs': '⚾ Poké Balls',
                 'berries'  : '🍓 Bayas',
             }
-
+ 
             tipos_validos     = TIPOS_POR_CAT.get(categoria, set())
             items_disponibles = []
-
+ 
             for item_nombre, cantidad in inventario.items():
-                if cantidad <= 0:
+                if not cantidad or cantidad <= 0:
                     continue
-                item_data = items_service.obtener_item(item_nombre)
-                if item_data is None:
-                    continue
-                if item_data.get('tipo', '') in tipos_validos:
+                # FIX: usar helper con fallback en lugar de items_service directo
+                tipo, item_data = _get_battle_item_tipo(item_nombre)
+                if tipo in tipos_validos:
                     items_disponibles.append((item_nombre, cantidad, item_data))
-
+ 
             titulo = EMOJIS_CAT.get(categoria, '🎒 Items')
-
+ 
             if not items_disponibles:
                 text = f"🎒 <b>{titulo}</b>\n\n❌ No tienes ninguno."
                 keyboard = types.InlineKeyboardMarkup()
@@ -1470,30 +1523,30 @@ class WildBattleManager:
                     if "message is not modified" not in str(e):
                         raise
                 return True
-
+ 
             text = f"🎒 <b>{titulo}</b>\n\nElige un item:"
             keyboard = types.InlineKeyboardMarkup(row_width=1)
-
+ 
             for item_nombre, cantidad, item_data in items_disponibles:
-                desc     = item_data.get('desc', item_nombre)
+                desc     = item_data.get('desc', item_nombre) if item_data else item_nombre
                 label    = f"{item_nombre.title()} x{cantidad} — {desc}"
                 item_key = item_nombre.replace(' ', '~')
                 keyboard.add(types.InlineKeyboardButton(
                     label,
                     callback_data=f"battle_item_{user_id}_{item_key}"
                 ))
-
+ 
             keyboard.add(types.InlineKeyboardButton(
                 "◀️ Volver", callback_data=f"battle_bag_{user_id}"
             ))
-
+ 
             try:
                 self._edit_battle_message(bot, user_id, battle.message_id, text, keyboard)
             except Exception as e:
                 if "message is not modified" not in str(e):
                     raise
             return True
-
+ 
         except Exception as e:
             logger.error(f"Error en handle_bag_category: {e}")
             return False

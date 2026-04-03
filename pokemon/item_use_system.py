@@ -5,17 +5,23 @@ pokemon/item_use_system.py
 Sistema unificado de uso de ítems que requieren seleccionar un Pokémon.
 
 Ítems gestionados aquí:
-  · Piedras evolutivas  → firestone, waterstone, thunderstone, leafstone,
-                          moonstone, sunstone, shinystone, duskstone,
-                          dawnstone, icestone, ovalstone   (+ aliases en español)
-  · Cápsula Habilidad   → abilitycapsule  (cambia a otra habilidad NO oculta)
-  · Parche Habilidad    → abilitypatch    (cambia a la habilidad OCULTA)
-  · Mentas              → timidmint, modestmint, adamantmint, boldmint,
-                          jollyмint, calmмint, impishмint, carefulмint,
-                          hastymint, naivemint, relaxedmint, quietmint,
-                          rashмint, gentlemint, sassymint, braveмint,
-                          lonelymint, naughtymint, laxmint, mildmint
-                          (también variantes en español: menta_timida, etc.)
+  · Medicinas / pociones / revivir → muestran selector de Pokémon del equipo
+  · Piedras evolutivas
+  · Cápsula Habilidad / Parche Habilidad
+  · Mentas
+  · Vitaminas / Sueros EV
+  · Caramelos EXP / Caramelo Raro
+  · Chapas (IVs)
+  · Bayas de combate (equipar)
+
+CORRECCIONES (2025-07):
+  • Bug 3: pociones, super-pociones, hiper-pociones, poción máxima, restaurar
+    todo, revivir, antídoto, despertar, antiquemar, antiparalizar, antihielo
+    y cura total ahora muestran el selector de Pokémon en lugar de intentar
+    consumirse sin objetivo.
+  • Bug 2: beast ball y cualquier pokéball del inventario no lanzaban acción
+    al usarse desde la mochila. Las pokéballs se usan SÓLO en combate; se
+    muestra mensaje explicativo si se intentan usar fuera de él.
 
 Flujo de callbacks:
   itemuse_sel_{uid}_{item}          → pantalla selector de Pokémon del equipo
@@ -32,6 +38,7 @@ from typing import Optional
 from telebot import types
 
 logger = logging.getLogger(__name__)
+
 
 def _get_item_data(item_nombre: str) -> dict:
     """
@@ -52,27 +59,20 @@ def _get_item_data(item_nombre: str) -> dict:
             data = {}
     return data
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAPEO: nombre interno del ítem → naturaleza destino
-# Soporta tanto claves en inglés (items_database_complete) como español
-# (items_service legacy).
 # ─────────────────────────────────────────────────────────────────────────────
 MENTA_A_NATURALEZA: dict[str, str] = {
-    # ── inglés (claves de items_database_complete) ───────────────────────────
+    # ── inglés ───────────────────────────────────────────────────────────────
     "timidmint":    "Timid",
     "modestmint":   "Modest",
     "adamantmint":  "Adamant",
     "boldmint":     "Bold",
     "jollymint":    "Jolly",
     "calmmint":     "Calm",
-    "impishмint":   "Impish",    # обратите внимание: la м es cirílica en algunos nombres
     "impíshmint":   "Impish",
     "impishmint":   "Impish",
-    "carefulмint":  "Careful",
-    "carefulмint":  "Careful",
-    "carefulмint":  "Careful",
-    "carefulмint":  "Careful",
-    "carefulмint":  "Careful",
     "carefulmint":  "Careful",
     "hastymint":    "Hasty",
     "naivemint":    "Naive",
@@ -88,52 +88,48 @@ MENTA_A_NATURALEZA: dict[str, str] = {
     "mildmint":     "Mild",
     "seriousmint":  "Serious",
     "hardymint":    "Hardy",
-    "docilемint":   "Docile",
-    "basiliskmint": "Bashful",   # bashful
     "bashfulmint":  "Bashful",
-    "quirkyмint":   "Quirky",
     "quirkymint":   "Quirky",
-    # ── español (items_service legacy) ───────────────────────────────────────
-    "menta_timida":   "Timid",
-    "menta_modesta":  "Modest",
-    "menta_adamante": "Adamant",
-    "menta_osada":    "Bold",
-    "menta_alegre":   "Jolly",
-    "menta_serena":   "Calm",
-    "menta_impish":   "Impish",
-    "menta_cuidadosa":"Careful",
-    "menta_activa":   "Hasty",
-    "menta_ingenua":  "Naive",
-    "menta_relajada": "Relaxed",
-    "menta_quieta":   "Quiet",
-    "menta_alocada":  "Rash",
-    "menta_gentil":   "Gentle",
-    "menta_grosera":  "Sassy",
-    "menta_audaz":    "Brave",
-    "menta_solitaria":"Lonely",
-    "menta_pícara":   "Naughty",
-    "menta_floja":    "Lax",
-    "menta_suave":    "Mild",
-    "menta_seria":    "Serious",
-    "menta_resistente":"Hardy",
-    "menta_docil":    "Docile",
-    "menta_tmida":    "Timid",
+    "docilmint":    "Docile",
+    # ── español ───────────────────────────────────────────────────────────────
+    "menta_timida":    "Timid",
+    "menta_modesta":   "Modest",
+    "menta_adamante":  "Adamant",
+    "menta_osada":     "Bold",
+    "menta_alegre":    "Jolly",
+    "menta_serena":    "Calm",
+    "menta_impish":    "Impish",
+    "menta_cuidadosa": "Careful",
+    "menta_activa":    "Hasty",
+    "menta_ingenua":   "Naive",
+    "menta_relajada":  "Relaxed",
+    "menta_quieta":    "Quiet",
+    "menta_alocada":   "Rash",
+    "menta_gentil":    "Gentle",
+    "menta_grosera":   "Sassy",
+    "menta_audaz":     "Brave",
+    "menta_solitaria": "Lonely",
+    "menta_pícara":    "Naughty",
+    "menta_floja":     "Lax",
+    "menta_suave":     "Mild",
+    "menta_seria":     "Serious",
+    "menta_resistente": "Hardy",
+    "menta_docil":     "Docile",
+    "menta_tmida":     "Timid",
 }
 
-# Traducción: clave inglesa (items_database_complete) → nombre en español
-# que usa evolucion_service en el campo "piedra" de su tabla de evoluciones.
 _PIEDRA_EN_A_ES: dict[str, str] = {
-    "firestone":    "piedra fuego",
-    "waterstone":   "piedra agua",
-    "thunderstone": "piedra trueno",
-    "leafstone":    "piedra hoja",
-    "moonstone":    "piedra lunar",
-    "sunstone":     "piedra solar",
-    "shinystone":   "piedra brillante",   # también "piedra dia" en algunos registros
-    "duskstone":    "piedra noche",
-    "dawnstone":    "piedra alba",
-    "icestone":     "piedra hielo",
-    "ovalstone":    "piedra oval",
+    "firestone":        "piedra fuego",
+    "waterstone":       "piedra agua",
+    "thunderstone":     "piedra trueno",
+    "leafstone":        "piedra hoja",
+    "moonstone":        "piedra lunar",
+    "sunstone":         "piedra solar",
+    "shinystone":       "piedra brillante",
+    "duskstone":        "piedra noche",
+    "dawnstone":        "piedra alba",
+    "icestone":         "piedra hielo",
+    "ovalstone":        "piedra oval",
     "piedra fuego":     "piedra fuego",
     "piedra agua":      "piedra agua",
     "piedra trueno":    "piedra trueno",
@@ -147,12 +143,23 @@ _PIEDRA_EN_A_ES: dict[str, str] = {
     "piedra oval":      "piedra oval",
 }
 
-# Piedras evolutivas — claves reconocidas (inglés y español legacy)
-# REEMPLAZAR la definición de _PIEDRAS:
 _PIEDRAS: frozenset = frozenset(_PIEDRA_EN_A_ES.keys())
 
-# Ítems de habilidad
 _HABILIDAD_ITEMS = {"abilitycapsule", "abilitypatch"}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SET DE POKÉBALLS — se usan sólo en combate, nunca desde la mochila
+# ─────────────────────────────────────────────────────────────────────────────
+_POKEBALL_TIPOS: frozenset = frozenset({
+    "pokeball", "greatball", "ultraball", "masterball",
+    "premierball", "cherishball", "quickball", "timerball",
+    "repeatball", "netball", "nestball", "diveball", "duskball",
+    "luxuryball", "healball", "levelball", "lureball", "moonball",
+    "friendball", "loveball", "heavyball", "fastball", "sportball",
+    "safariball", "parkball", "dreamball", "beastball",
+    # aliases en español
+    "pokébola", "superbola", "ultrabola",
+})
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -160,37 +167,74 @@ _HABILIDAD_ITEMS = {"abilitycapsule", "abilitypatch"}
 # ─────────────────────────────────────────────────────────────────────────────
 
 def es_piedra_evolutiva(item_id: str) -> bool:
-    """Devuelve True si el ítem es una piedra evolutiva conocida."""
     return item_id.lower() in _PIEDRAS
 
 
 def es_item_habilidad(item_id: str) -> bool:
-    """Devuelve True si el ítem afecta la habilidad del Pokémon."""
     return item_id.lower() in _HABILIDAD_ITEMS
 
 
 def es_menta(item_id: str) -> bool:
-    """Devuelve True si el ítem es una menta (cambia naturaleza)."""
     key = item_id.lower().replace(" ", "_")
     return key in MENTA_A_NATURALEZA or item_id.lower() in MENTA_A_NATURALEZA
 
 
+def es_pokeball(item_id: str) -> bool:
+    """Devuelve True si el ítem es una Pokéball (tipo pokeball en BD)."""
+    key = item_id.lower()
+    if key in _POKEBALL_TIPOS:
+        return True
+    # Comprobar campo "tipo" en la base de datos
+    data = _get_item_data(key)
+    return data.get("tipo", "") == "pokeball"
+
+
 _ITEMS_CON_SELECTOR = frozenset({
     "abilitycapsule", "abilitypatch", "bottlecap", "goldbottlecap",
-    # Caramelos EXP y rarecandy
     "expcandyxs", "expcandys", "expcandym", "expcandyl", "expcandyxl",
     "rarecandy",
 })
 
+# Claves que indican que el ítem cura/restaura a un Pokémon
+_CLAVES_MEDICINA: frozenset = frozenset({
+    "cura_hp", "revive", "revive_todos",
+    "cura_estado", "cura_todos_estados",
+    "pp", "pp_todos",
+})
+
+
 def necesita_selector_pokemon(item_id: str) -> bool:
+    """
+    Retorna True si usar este ítem requiere seleccionar un Pokémon del equipo.
+
+    CORRECCIÓN Bug 3: se añaden las claves de medicina (cura_hp, revive, etc.)
+    para que pociones y similares muestren el selector en lugar de consumirse
+    sin objetivo.
+    """
     key = item_id.lower()
+
+    # Pokéballs → NO necesitan selector (sólo se usan en combate)
+    if es_pokeball(key):
+        return False
+
     if es_piedra_evolutiva(key) or es_item_habilidad(key) or es_menta(key):
         return True
+
     if key in _ITEMS_CON_SELECTOR:
         return True
-    # Vitaminas: cualquier item con campo "ev" en su data
+
     data = _get_item_data(key)
-    return "ev" in data or "reduce_ev" in data
+
+    # ── BUG 3 FIX: cualquier ítem con efecto de medicina necesita selector ──
+    for clave_med in _CLAVES_MEDICINA:
+        if clave_med in data:
+            return True
+
+    # Vitaminas y sueros EV
+    if "ev" in data or "reduce_ev" in data:
+        return True
+
+    return False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -206,10 +250,20 @@ def mostrar_selector_pokemon(
     """
     Presenta al usuario su equipo para que elija a qué Pokémon aplicar el ítem.
     Solo muestra Pokémon del equipo activo (en_equipo=1).
-    Para piedras evolutivas, filtra adicionalmente los Pokémon compatibles.
+    Filtra candidatos según el tipo de ítem para mostrar sólo los relevantes.
     """
     from pokemon.services import pokemon_service
     from pokemon.services import items_service as _items
+
+    # ── Bug 2 FIX: las Pokéballs se usan sólo en combate ─────────────────────
+    if es_pokeball(item_nombre):
+        _responder(
+            message, bot, user_id,
+            "⚾ <b>Las Pokéballs sólo pueden usarse durante un combate</b>.\n\n"
+            "Entra en batalla contra un Pokémon salvaje para poder lanzarla.",
+            _boton_volver_mochila(user_id),
+        )
+        return
 
     equipo = pokemon_service.obtener_equipo(user_id)
     if not equipo:
@@ -218,22 +272,22 @@ def mostrar_selector_pokemon(
                    _boton_volver_mochila(user_id))
         return
 
-    item_data     = _items.obtener_item(item_nombre) or {}
+    item_data      = _items.obtener_item(item_nombre) or {}
     nombre_display = _nombre_display(item_nombre, item_data)
 
-    # Para piedras, filtrar solo Pokémon que pueden evolucionar con esa piedra
+    # ── Filtrar candidatos según tipo de ítem ─────────────────────────────────
     if es_piedra_evolutiva(item_nombre):
         candidatos = _filtrar_compatibles_piedra(equipo, item_nombre)
         if not candidatos:
             _responder(
                 message, bot, user_id,
                 f"💎 <b>{nombre_display}</b>\n\n"
-                f"❌ Ningún Pokémon de tu equipo puede evolucionar con esta piedra.",
+                "❌ Ningún Pokémon de tu equipo puede evolucionar con esta piedra.",
                 _boton_volver_mochila(user_id),
             )
             return
+
     elif es_menta(item_nombre):
-        # Excluir Pokémon que ya tienen esa naturaleza
         naturaleza_destino = _naturaleza_de_menta(item_nombre)
         candidatos = [p for p in equipo if p.naturaleza != naturaleza_destino]
         if not candidatos:
@@ -244,15 +298,20 @@ def mostrar_selector_pokemon(
                 _boton_volver_mochila(user_id),
             )
             return
+
     elif es_item_habilidad(item_nombre):
-        candidatos = equipo  # cualquier Pokémon del equipo
-    elif "revive" in item_data:
+        candidatos = equipo
+
+    # ── Revivir: sólo debilitados ─────────────────────────────────────────────
+    elif "revive" in item_data or "revive_todos" in item_data:
         candidatos = [p for p in equipo if p.hp_actual <= 0]
         if not candidatos:
             _responder(message, bot, user_id,
                        "💊 Ningún Pokémon está debilitado.",
                        _boton_volver_mochila(user_id))
             return
+
+    # ── Curar HP: sólo heridos y vivos ────────────────────────────────────────
     elif "cura_hp" in item_data:
         candidatos = [
             p for p in equipo
@@ -263,18 +322,22 @@ def mostrar_selector_pokemon(
                        "💊 Todos los Pokémon ya tienen HP completo.",
                        _boton_volver_mochila(user_id))
             return
+
+    # ── Curar estado: sólo vivos ──────────────────────────────────────────────
     elif "cura_estado" in item_data or "cura_todos_estados" in item_data:
         candidatos = [p for p in equipo if p.hp_actual > 0]
+
     elif _get_item_data(item_nombre).get("tipo") in ("baya_combate", "baya_mitigacion"):
         candidatos = equipo
+
     elif "ev" in _get_item_data(item_nombre) or "reduce_ev" in _get_item_data(item_nombre):
-        # Vitaminas y sueros: solo Pokémon vivos
         candidatos = [p for p in equipo if p.hp_actual > 0]
         if not candidatos:
             _responder(message, bot, user_id,
                        "❌ Todos tus Pokémon están debilitados.",
                        _boton_volver_mochila(user_id))
             return
+
     else:
         candidatos = equipo
 
@@ -294,9 +357,11 @@ def mostrar_selector_pokemon(
         shiny_emoji = " ✨" if getattr(poke, "shiny", False) else ""
         hab_info    = f"  [{poke.habilidad}]" if poke.habilidad else ""
         nat_info    = f"  ({poke.naturaleza})" if poke.naturaleza else ""
+        hp_max      = poke.stats.get("hp", 1) or 1
+        hp_txt      = f"  HP:{poke.hp_actual}/{hp_max}"
         label = (
             f"{nombre_poke}{sexo_emoji}{shiny_emoji} Nv.{poke.nivel}"
-            f"{nat_info}{hab_info}"
+            f"{hp_txt}{nat_info}{hab_info}"
         )
         markup.add(types.InlineKeyboardButton(
             label,
@@ -328,8 +393,18 @@ def aplicar_item_a_pokemon(
     from pokemon.services import items_service as _items
     from pokemon.services import pokemon_service
 
+    # ── Bug 2 FIX: Pokéballs no se aplican desde mochila ─────────────────────
+    if es_pokeball(item_nombre):
+        _responder(
+            message, bot, user_id,
+            "⚾ <b>Las Pokéballs sólo pueden usarse durante un combate</b>.\n\n"
+            "Entra en batalla contra un Pokémon salvaje para poder lanzarla.",
+            _boton_volver_mochila(user_id),
+        )
+        return
+
     # ── Verificar stock ───────────────────────────────────────────────────────
-    item_data = _get_item_data(item_nombre)   # usa fallback a items_database_complete
+    item_data  = _get_item_data(item_nombre)
     inventario = _items.obtener_inventario(user_id)
     if inventario.get(item_nombre, 0) < 1:
         _responder(message, bot, user_id,
@@ -360,8 +435,10 @@ def aplicar_item_a_pokemon(
     elif es_menta(item_nombre):
         _aplicar_menta(user_id, item_nombre, poke, nombre_poke, message, bot, _items)
 
-    elif any(k in item_data for k in ("cura_hp", "revive", "cura_estado", "cura_todos_estados")):
-        _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke, nombre_poke, message, bot, _items)
+    elif any(k in item_data for k in ("cura_hp", "revive", "revive_todos",
+                                       "cura_estado", "cura_todos_estados")):
+        _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke,
+                                   nombre_poke, message, bot, _items)
 
     elif item_nombre.lower() in ("bottlecap", "goldbottlecap"):
         _aplicar_bottlecap(
@@ -381,7 +458,6 @@ def aplicar_item_a_pokemon(
                             message, bot, _items)
 
     elif item_data.get("tipo") in ("baya_combate", "baya_mitigacion"):
-        # Bayas: se dan al Pokémon para usar en combate automáticamente
         _dar_baya_a_pokemon(user_id, item_nombre, poke, nombre_poke,
                              message, bot, _items)
 
@@ -397,6 +473,7 @@ def aplicar_item_a_pokemon(
 # ─────────────────────────────────────────────────────────────────────────────
 # EFECTOS INDIVIDUALES
 # ─────────────────────────────────────────────────────────────────────────────
+
 def _aplicar_suero_ev(user_id, item_nombre, poke, nombre_poke, message, bot, _items):
     """Suero reductor de EVs — baja EVs del stat correspondiente."""
     from database import db_manager
@@ -410,7 +487,6 @@ def _aplicar_suero_ev(user_id, item_nombre, poke, nombre_poke, message, bot, _it
                    _boton_volver_mochila(user_id))
         return
 
-    # La BD almacena EVs en columnas individuales: ev_hp, ev_atq, etc.
     _COL = {
         "hp":     "ev_hp",
         "atq":    "ev_atq",
@@ -461,26 +537,15 @@ def _aplicar_suero_ev(user_id, item_nombre, poke, nombre_poke, message, bot, _it
         "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
     ))
     _responder(message, bot, user_id, texto, markup)
-    
-def _aplicar_piedra(user_id, item_nombre, poke, nombre_poke, message, bot, _items):
-    """
-    Intenta evolucionar al Pokémon con la piedra indicada.
 
-    El inventario puede tener claves en inglés ('firestone') mientras que
-    evolucion_service usa claves en español ('piedra fuego').  Esta función:
-      1. Traduce la clave al nombre interno de evolucion_service.
-      2. Verifica la compatibilidad y ejecuta la evolución directamente
-         (sin delegar el consumo a usar_piedra_evolutiva para evitar
-         que intente consumir una clave que no existe en el inventario).
-      3. Consume el ítem del inventario original SOLO si la evolución tuvo éxito.
-    """
+
+def _aplicar_piedra(user_id, item_nombre, poke, nombre_poke, message, bot, _items):
+    """Intenta evolucionar al Pokémon con la piedra indicada."""
     from pokemon.services.evolucion_service import evolucion_service
     from database import db_manager
 
-    # Normalizar nombre a la clave interna de evolucion_service
     piedra_interna = _PIEDRA_EN_A_ES.get(item_nombre.lower(), item_nombre.lower())
 
-    # Verificar compatibilidad manualmente para evitar el ciclo consumo↔devolución
     especie_id   = str(poke.pokemonID)
     evoluciones  = evolucion_service.evoluciones.get(especie_id, [])
     evo_correcta = next(
@@ -498,15 +563,13 @@ def _aplicar_piedra(user_id, item_nombre, poke, nombre_poke, message, bot, _item
         )
         return
 
-    # Ejecutar evolución (forzada, ya verificamos la piedra)
     exito, mensaje, _ = evolucion_service.evolucionar_pokemon(
         poke.id_unico,
         forzar=True,
-        evo_data_override=evo_correcta,   # ← CRÍTICO para Eevee y cualquier
+        evo_data_override=evo_correcta,
     )
 
     if exito:
-        # Consumir el ítem con la clave ORIGINAL del inventario
         _items.usar_item(user_id, item_nombre, 1)
         texto = (
             f"💎 ¡<b>{nombre_poke}</b> usó la piedra!\n\n"
@@ -526,17 +589,12 @@ def _aplicar_piedra(user_id, item_nombre, poke, nombre_poke, message, bot, _item
 
 
 def _aplicar_parche_habilidad(user_id, item_nombre, poke, nombre_poke, message, bot, _items):
-    """
-    Parche Habilidad: asigna la habilidad OCULTA del Pokémon.
-    Si ya tiene la oculta, informa que no es necesario.
-    Consume el ítem si se aplicó correctamente.
-    """
+    """Parche Habilidad: asigna la habilidad OCULTA del Pokémon."""
     from pokemon.services.pokedex_service import pokedex_service
     from database import db_manager
 
     habilidades = pokedex_service.obtener_habilidades(poke.pokemonID)
 
-    # La convención del proyecto: última de la lista = oculta
     if not habilidades or len(habilidades) < 2:
         _responder(message, bot, user_id,
                    f"❌ <b>{nombre_poke}</b> no tiene habilidad oculta disponible.",
@@ -554,13 +612,11 @@ def _aplicar_parche_habilidad(user_id, item_nombre, poke, nombre_poke, message, 
 
     hab_anterior = poke.habilidad or "desconocida"
 
-    # Aplicar en BD
     db_manager.execute_update(
         "UPDATE POKEMON_USUARIO SET habilidad = ? WHERE id_unico = ?",
         (hab_oculta, poke.id_unico),
     )
 
-    # Consumir ítem
     _items.usar_item(user_id, item_nombre, 1)
 
     texto = (
@@ -576,11 +632,7 @@ def _aplicar_parche_habilidad(user_id, item_nombre, poke, nombre_poke, message, 
 
 
 def _aplicar_capsula_habilidad(user_id, item_nombre, poke, nombre_poke, message, bot, _items):
-    """
-    Cápsula Habilidad: rota entre las habilidades NO ocultas del Pokémon,
-    eligiendo una distinta a la actual.
-    Consume el ítem si se aplicó correctamente.
-    """
+    """Cápsula Habilidad: rota entre las habilidades NO ocultas del Pokémon."""
     from pokemon.services.pokedex_service import pokedex_service
     from database import db_manager
     import random
@@ -593,11 +645,7 @@ def _aplicar_capsula_habilidad(user_id, item_nombre, poke, nombre_poke, message,
                    _boton_volver_mochila(user_id))
         return
 
-    # Habilidades normales = todas menos la última (oculta)
-    # Si solo hay 1 habilidad, no hay nada que cambiar
     habs_normales = habilidades[:-1] if len(habilidades) > 1 else habilidades
-
-    # Filtrar habilidades distintas a la actual
     hab_actual    = (poke.habilidad or "").lower()
     candidatas    = [h for h in habs_normales if h.lower() != hab_actual]
 
@@ -612,13 +660,11 @@ def _aplicar_capsula_habilidad(user_id, item_nombre, poke, nombre_poke, message,
     nueva_hab    = random.choice(candidatas)
     hab_anterior = poke.habilidad or "desconocida"
 
-    # Aplicar en BD
     db_manager.execute_update(
         "UPDATE POKEMON_USUARIO SET habilidad = ? WHERE id_unico = ?",
         (nueva_hab, poke.id_unico),
     )
 
-    # Consumir ítem
     _items.usar_item(user_id, item_nombre, 1)
 
     texto = (
@@ -632,12 +678,12 @@ def _aplicar_capsula_habilidad(user_id, item_nombre, poke, nombre_poke, message,
     ))
     _responder(message, bot, user_id, texto, markup)
 
+
 def _aplicar_bottlecap(user_id, item_nombre, poke, nombre_poke,
                        message, bot, _items, *, maximiza_todos: bool):
     """Chapa Plateada (maximiza 1 IV) / Chapa Dorada (maximiza todos)."""
     from database import db_manager
 
-    # La BD almacena IVs en columnas individuales: iv_hp, iv_atq, etc.
     _COL = {
         "hp":     "iv_hp",
         "atq":    "iv_atq",
@@ -648,7 +694,6 @@ def _aplicar_bottlecap(user_id, item_nombre, poke, nombre_poke,
     }
     IVS = list(_COL.keys())
 
-    # Leer IVs actuales directamente de las columnas
     ivs_actuales = {
         s: int(getattr(poke, _COL[s], 0) or 0) for s in IVS
     }
@@ -657,7 +702,6 @@ def _aplicar_bottlecap(user_id, item_nombre, poke, nombre_poke,
         cambios = {s: 31 for s in IVS}
         desc = "todos los IVs a <b>31</b>"
     else:
-        # Maximizar el IV más bajo
         stat_baja = min(IVS, key=lambda s: ivs_actuales[s])
         cambios   = {stat_baja: 31}
         desc      = f"IV de <b>{stat_baja.upper()}</b> a <b>31</b>"
@@ -748,12 +792,9 @@ def _aplicar_vitamina(user_id, item_nombre, poke, nombre_poke, message, bot, _it
     ))
     _responder(message, bot, user_id, texto, markup)
 
+
 def _aplicar_menta(user_id, item_nombre, poke, nombre_poke, message, bot, _items):
-    """
-    Menta: cambia la naturaleza del Pokémon a la correspondiente.
-    Recalcula las stats en la BD.
-    Consume el ítem si se aplicó correctamente.
-    """
+    """Menta: cambia la naturaleza del Pokémon."""
     from database import db_manager
     from pokemon.experience_system import ExperienceSystem
 
@@ -772,19 +813,16 @@ def _aplicar_menta(user_id, item_nombre, poke, nombre_poke, message, bot, _items
                    _boton_volver_mochila(user_id))
         return
 
-    # Actualizar naturaleza en BD
     db_manager.execute_update(
         "UPDATE POKEMON_USUARIO SET naturaleza = ? WHERE id_unico = ?",
         (naturaleza_nueva, poke.id_unico),
     )
 
-    # Recalcular stats con la nueva naturaleza
     try:
         ExperienceSystem._recalcular_stats(poke.id_unico, poke.nivel)
     except Exception as exc:
         logger.warning(f"[MENTA] No se pudieron recalcular stats: {exc}")
 
-    # Consumir ítem
     _items.usar_item(user_id, item_nombre, 1)
 
     nombre_item_display = _nombre_display(item_nombre, {})
@@ -800,11 +838,21 @@ def _aplicar_menta(user_id, item_nombre, poke, nombre_poke, message, bot, _items
     ))
     _responder(message, bot, user_id, texto, markup)
 
-def _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke, nombre_poke, message, bot, _items):
-    """Aplica pociones, revivir y cura-estado al Pokémon elegido."""
+
+def _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke,
+                               nombre_poke, message, bot, _items):
+    """
+    Aplica pociones, revivir y cura-estado al Pokémon elegido.
+
+    Cubre (Bug 3 FIX):
+      • cura_hp    → pociones de todos los tipos
+      • revive     → revivir / revivir max
+      • cura_estado / cura_todos_estados → antídotos, cura total, etc.
+    """
     from database import db_manager
     efectos = []
 
+    # ── Revivir ───────────────────────────────────────────────────────────────
     if "revive" in item_data:
         if poke.hp_actual > 0:
             _responder(message, bot, user_id,
@@ -812,13 +860,30 @@ def _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke, nombre_poke
                        _boton_volver_mochila(user_id))
             return
         hp_max   = poke.stats.get("hp", 100)
-        nuevo_hp = max(1, int(hp_max * item_data["revive"]))
+        ratio    = item_data["revive"]
+        nuevo_hp = max(1, int(hp_max * ratio))
         db_manager.execute_update(
             "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
             (nuevo_hp, poke.id_unico),
         )
         efectos.append(f"revivió con {nuevo_hp} HP")
 
+    # ── Revivir a todos (ceniza sagrada, etc.) ────────────────────────────────
+    elif "revive_todos" in item_data:
+        from pokemon.services import pokemon_service
+        equipo_completo = pokemon_service.obtener_equipo(user_id)
+        revividos = 0
+        for p in equipo_completo:
+            if p.hp_actual <= 0:
+                hp_max = p.stats.get("hp", 100)
+                db_manager.execute_update(
+                    "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                    (hp_max, p.id_unico),
+                )
+                revividos += 1
+        efectos.append(f"todo el equipo fue revivido ({revividos} Pokémon)")
+
+    # ── Curar HP ──────────────────────────────────────────────────────────────
     elif "cura_hp" in item_data:
         if poke.hp_actual <= 0:
             _responder(message, bot, user_id,
@@ -831,14 +896,21 @@ def _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke, nombre_poke
                        f"⚠️ <b>{nombre_poke}</b> ya tiene HP completo.",
                        _boton_volver_mochila(user_id))
             return
-        curar    = min(int(item_data["cura_hp"]), hp_max - poke.hp_actual)
+        cura_raw = item_data["cura_hp"]
+        # Valor entero = HP fijo; float ≤ 1.0 = porcentaje del máximo
+        if isinstance(cura_raw, float) and cura_raw <= 1.0:
+            cura = int(hp_max * cura_raw)
+        else:
+            cura = int(cura_raw)
+        curar    = min(cura, hp_max - poke.hp_actual)
         nuevo_hp = poke.hp_actual + curar
         db_manager.execute_update(
             "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
             (nuevo_hp, poke.id_unico),
         )
-        efectos.append(f"recuperó {curar} HP")
+        efectos.append(f"recuperó {curar} HP ({poke.hp_actual} → {nuevo_hp})")
 
+    # ── Curar estado (antídoto, antiquemar, etc.) ─────────────────────────────
     if "cura_estado" in item_data or "cura_todos_estados" in item_data:
         db_manager.execute_update(
             "UPDATE POKEMON_USUARIO SET estado = NULL WHERE id_unico = ?",
@@ -853,34 +925,37 @@ def _aplicar_medicina_revivir(user_id, item_nombre, item_data, poke, nombre_poke
 
     _items.usar_item(user_id, item_nombre, 1)
 
-    texto  = f"💊 <b>{nombre_poke}</b> {', '.join(efectos)}! ✅"
+    nombre_item = _nombre_display(item_nombre, item_data)
+    texto  = f"💊 <b>{nombre_item}</b> usada en <b>{nombre_poke}</b>.\n\n"
+    texto += "\n".join(f"✅ {e}" for e in efectos)
+
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton(
         "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
     ))
     _responder(message, bot, user_id, texto, markup)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS INTERNOS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _naturaleza_de_menta(item_id: str) -> Optional[str]:
-    """Devuelve la naturaleza asociada a una menta, o None si no se reconoce."""
     key = item_id.lower().replace(" ", "_")
     return MENTA_A_NATURALEZA.get(key) or MENTA_A_NATURALEZA.get(item_id.lower())
 
+
 def _filtrar_compatibles_piedra(equipo: list, piedra_nombre: str) -> list:
-    """Filtra Pokémon que pueden evolucionar con la piedra dada."""
     from pokemon.services.evolucion_service import evolucion_service
-    # Traducir clave inglesa → nombre español de la piedra
     nombre_piedra_es = _PIEDRA_EN_A_ES.get(piedra_nombre.lower(), piedra_nombre)
-    # Alias adicionales por si el metodo usa variantes
     aliases = {nombre_piedra_es.lower()}
-    # Algunos registros almacenan "Piedra Fuego" otros "piedrafuego" etc.
     alias_sin_espacio = nombre_piedra_es.lower().replace(" ", "")
     alias_guion = nombre_piedra_es.lower().replace(" ", "-")
-    aliases.update([alias_sin_espacio, alias_guion,
-                    piedra_nombre.lower(), "stone " + piedra_nombre.lower().replace("stone","").strip()])
+    aliases.update([
+        alias_sin_espacio, alias_guion,
+        piedra_nombre.lower(),
+        "stone " + piedra_nombre.lower().replace("stone", "").strip(),
+    ])
 
     candidatos = []
     for poke in equipo:
@@ -897,8 +972,8 @@ def _filtrar_compatibles_piedra(equipo: list, piedra_nombre: str) -> list:
                 break
     return candidatos
 
+
 def _nombre_display(item_id: str, item_data: dict) -> str:
-    """Nombre legible del ítem."""
     if item_data:
         for key in ("nombre", "name", "nombre_es"):
             val = item_data.get(key)
@@ -908,7 +983,6 @@ def _nombre_display(item_id: str, item_data: dict) -> str:
 
 
 def _descripcion_item(item_id: str, item_data: dict) -> str:
-    """Descripción corta del ítem."""
     if item_data:
         desc = item_data.get("desc") or item_data.get("descripcion")
         if desc:
@@ -925,10 +999,7 @@ def _boton_volver_mochila(user_id: int) -> types.InlineKeyboardMarkup:
 
 
 def _responder(message, bot, user_id: int, texto: str, markup) -> None:
-    """Edita el mensaje existente o envía uno nuevo si no se puede editar.
-    Maneja correctamente mensajes con foto/animación (edita caption).
-    """
-    # Mensajes con adjunto: intentar editar el caption primero
+    """Edita el mensaje existente o envía uno nuevo si no se puede editar."""
     if getattr(message, "content_type", None) in ("photo", "animation", "document", "video"):
         try:
             bot.edit_message_caption(
@@ -942,7 +1013,6 @@ def _responder(message, bot, user_id: int, texto: str, markup) -> None:
         except Exception:
             pass
 
-    # Mensaje de texto puro
     try:
         bot.edit_message_text(
             texto,
@@ -957,13 +1027,14 @@ def _responder(message, bot, user_id: int, texto: str, markup) -> None:
         except Exception as exc:
             logger.error(f"[ITEM_USE] Error enviando respuesta: {exc}")
 
+
 def _aplicar_caramelo_exp(user_id, item_nombre, poke, nombre_poke,
                            message, bot, _items):
     """Caramelo Exp XS/S/M/L/XL — otorga EXP directamente al Pokémon."""
     from pokemon.experience_system import ExperienceSystem
     from pokemon.level_up_handler import LevelUpHandler
 
-    item_data = _items.obtener_item(item_nombre) or {}
+    item_data   = _items.obtener_item(item_nombre) or {}
     exp_otorgar = int(item_data.get("exp", 0))
 
     if poke.nivel >= 100:
@@ -990,7 +1061,6 @@ def _aplicar_caramelo_exp(user_id, item_nombre, poke, nombre_poke,
     ))
     _responder(message, bot, user_id, texto, markup)
 
-    # Disparar level-up handler si subió de nivel
     if resultado.get("subio_nivel"):
         try:
             LevelUpHandler.procesar_subida(
@@ -1015,10 +1085,9 @@ def _aplicar_rarecandy(user_id, item_nombre, poke, nombre_poke,
                    _boton_volver_mochila(user_id))
         return
 
-    # Dar la EXP necesaria para subir exactamente 1 nivel
     exp_necesaria = ExperienceSystem.exp_necesaria_para_nivel(poke.nivel)
     exp_faltante  = exp_necesaria - poke.exp if hasattr(poke, "exp") else exp_necesaria
-    resultado = ExperienceSystem.aplicar_experiencia(poke.id_unico, max(1, exp_faltante))
+    resultado     = ExperienceSystem.aplicar_experiencia(poke.id_unico, max(1, exp_faltante))
     _items.usar_item(user_id, item_nombre, 1)
 
     nivel_nuevo = resultado.get("nivel_nuevo", poke.nivel + 1)
@@ -1046,18 +1115,13 @@ def _aplicar_rarecandy(user_id, item_nombre, poke, nombre_poke,
 
 def _dar_baya_a_pokemon(user_id, item_nombre, poke, nombre_poke,
                          message, bot, _items):
-    """
-    Bayas de combate/mitigación: se equipan al Pokémon como objeto.
-    Se consumen automáticamente en batalla (ya implementado en battle_engine).
-    """
+    """Bayas de combate/mitigación: se equipan al Pokémon como objeto."""
     from database import db_manager
 
     objeto_previo = getattr(poke, "objeto", None)
     if objeto_previo:
-        # Devolver objeto previo al inventario
         _items.agregar_item(user_id, objeto_previo, 1)
 
-    # Consumir la baya del inventario y equiparla
     _items.usar_item(user_id, item_nombre, 1)
     db_manager.execute_update(
         "UPDATE POKEMON_USUARIO SET objeto = ? WHERE id_unico = ?",
@@ -1080,6 +1144,7 @@ def _dar_baya_a_pokemon(user_id, item_nombre, poke, nombre_poke,
     ))
     _responder(message, bot, user_id, texto, markup)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # REGISTRO DE CALLBACKS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1094,15 +1159,15 @@ def register_item_use_callbacks(bot) -> None:
       itemuse_apk_{uid}_{item}_{poke}   → aplicar ítem
     """
 
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("itemuse_sel_"))
+    @bot.callback_query_handler(func=lambda c: c.data is not None and c.data.startswith("itemuse_sel_"))
     def _cb_selector(call: types.CallbackQuery):
-        """
-        Formato: itemuse_sel_{user_id}_{item_nombre~con~tildes}
-        Separamos con maxsplit=3 para preservar ítems con nombres compuestos.
-        """
+        """Formato: itemuse_sel_{user_id}_{item_encoded}"""
+        # Verificación extra de seguridad dentro de la función
+        if not call.data:
+            return
+
         try:
             partes = call.data.split("_", 3)
-            # partes: ['itemuse', 'sel', uid, item_encoded]
             if len(partes) < 4:
                 bot.answer_callback_query(call.id, "❌ Datos inválidos.", show_alert=True)
                 return
@@ -1129,36 +1194,40 @@ def register_item_use_callbacks(bot) -> None:
             except Exception:
                 pass
 
-    @bot.callback_query_handler(func=lambda c: c.data.startswith("itemuse_apk_"))
+    @bot.callback_query_handler(func=lambda c: c.data and c.data.startswith("itemuse_apk_"))
     def _cb_aplicar(call: types.CallbackQuery):
-        """
-        Formato: itemuse_apk_{user_id}_{item_encoded}_{pokemon_id}
-        El pokemon_id es siempre el ÚLTIMO segmento (entero).
-        """
+        # 1. Verificación de seguridad para evitar el error "None"
+        if not call.data:
+            return
+
         try:
-            # split con maxsplit=3 → ['itemuse', 'apk', uid, 'item~encoded_pokemon_id']
+            # Dividimos en 4 partes máximo
             partes = call.data.split("_", 3)
+            
             if len(partes) < 4:
-                bot.answer_callback_query(call.id, "❌ Datos inválidos.", show_alert=True)
+                bot.answer_callback_query(call.id, "❌ Datos incompletos.", show_alert=True)
                 return
 
+            # partes[2] es el user_id según tu formato
             user_id = int(partes[2])
-            resto   = partes[3]  # "item~encoded_pokemon_id"
+            resto = partes[3]
 
-            # El pokemon_id es el último token separado por "_"
+            # Buscamos el último guion para separar item de pokemon_id
             ultimo_sep = resto.rfind("_")
             if ultimo_sep == -1:
-                bot.answer_callback_query(call.id, "❌ Datos inválidos.", show_alert=True)
+                bot.answer_callback_query(call.id, "❌ Formato de datos erróneo.", show_alert=True)
                 return
 
             item_encoded = resto[:ultimo_sep]
-            pokemon_id   = int(resto[ultimo_sep + 1:])
-            item_nombre  = item_encoded.replace("~", " ")
+            pokemon_id = int(resto[ultimo_sep + 1:])
+            item_nombre = item_encoded.replace("~", " ")
 
+            # 2. Validación de dueño del menú
             if call.from_user.id != user_id:
                 bot.answer_callback_query(call.id, "❌ Este menú no es tuyo.", show_alert=True)
                 return
 
+            # 3. Responder al callback para quitar el reloj de arena
             try:
                 bot.answer_callback_query(call.id)
             except Exception:
@@ -1169,7 +1238,7 @@ def register_item_use_callbacks(bot) -> None:
         except Exception as exc:
             logger.error(f"[ITEM_USE] Error en _cb_aplicar: {exc}", exc_info=True)
             try:
-                bot.answer_callback_query(call.id, "❌ Error interno.", show_alert=True)
+                bot.answer_callback_query(call.id, "❌ Error al procesar el item.", show_alert=True)
             except Exception:
                 pass
 

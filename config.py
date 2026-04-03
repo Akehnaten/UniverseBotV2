@@ -45,7 +45,7 @@ POKEMON_THREAD = POKECLUB
 # Valores válidos: "KANTO" | "JOHTO" | "HOENN" | "SINNOH" | "TESELIA" |
 #                  "KALOS" | "ALOLA" | "GALAR"  | "PALDEA"
 # ────────────────────────────────────────────────────────────────────────────
-POKEMON_REGION_SERVIDOR = "JOHTO"  # ✅ Agregado para batalla_vgc_service
+POKEMON_REGION_SERVIDOR = "KANTO"  # ✅ Agregado para batalla_vgc_service
 # Multiplicador de EXP respecto a los juegos oficiales.
 # 1.0 = idéntico a los juegos. 2.0 = la mitad de batallas necesarias para subir de nivel.
 POKEMON_EXP_MULTIPLIER = 1.0

@@ -359,9 +359,22 @@ except Exception as e:
 try:
     from pokemon.pvp_battle_callbacks import setup_pvp_callbacks
     setup_pvp_callbacks(bot)
-    logger.info("✅ Sistema PvP/VGC inicializado")
+    logger.info("✅ Callbacks PvP/VGC inicializados")
+
+    # Registra /retar, pvp_fmt_*, pvp_accept/reject y el listener de @username
+    from pokemon.pvp_battle_system import pvp_cmd
+    pvp_cmd.register(bot)
+    logger.info("✅ Comandos PvP (/retar, desafíos) registrados")
 except Exception as e:
     logger.warning(f"[WARN] PvP: {e}")
+
+# Sistema de uso de ítems con selector de Pokémon (piedras, mentas, chapas…)
+try:
+    from pokemon.item_use_system import register_item_use_callbacks
+    register_item_use_callbacks(bot)
+    logger.info("✅ Callbacks de uso de ítems registrados")
+except Exception as e:
+    logger.warning(f"[WARN] item_use_callbacks: {e}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
