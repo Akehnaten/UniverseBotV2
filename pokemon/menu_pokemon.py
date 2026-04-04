@@ -896,11 +896,16 @@ class MenuPokemon:
     def _procesar_venta_item(user_id: int, message, bot, item_nombre: str):
         """
         Vende (o elimina si precio=0) 1 unidad de un item del inventario.
-        Precio 0 → elimina del inventario sin dar cosmos.
+        Precio 0   → elimina del inventario sin dar cosmos.
+        Precio > 0 → vende por la mitad del precio de compra.
+ 
+        Incluye fallback directo a BD para items de categoría "otros"
+        (items con datos erróneos o no catalogados) que usar_item no reconoce.
         """
         from pokemon.services import items_service
         from funciones import economy_service
-
+        from database import db_manager
+ 
         try:
             inventario = items_service.obtener_inventario(user_id)
             if inventario.get(item_nombre, 0) <= 0:
@@ -909,21 +914,60 @@ class MenuPokemon:
                     "❌ Ya no tienes ese item.", types.InlineKeyboardMarkup()
                 )
                 return
-
-            item_data     = items_service.obtener_item(item_nombre) or {}
+ 
+            # Obtener datos del ítem; fallback a items_database_complete
+            item_data = items_service.obtener_item(item_nombre) or {}
+            if not item_data:
+                try:
+                    from pokemon.items_database_complete import obtener_item_info
+                    item_data = obtener_item_info(item_nombre) or {}
+                except Exception:
+                    pass
+ 
             precio_compra = item_data.get("precio", 0) or 0
             precio_venta  = math.ceil(precio_compra * 0.5)
-
-            # Consumir del inventario
+ 
+            # Intentar reducir stock vía items_service
             ok, msg = items_service.usar_item(user_id, item_nombre, 1)
+ 
             if not ok:
-                MenuPokemon._edit_or_send(message, bot, user_id, f"❌ {msg}", types.InlineKeyboardMarkup())
-                return
-
+                # Fallback: modificar BD directamente para items "otros" o erróneos
+                try:
+                    qty_actual = inventario.get(item_nombre, 0)
+                    if qty_actual > 1:
+                        db_manager.execute_update(
+                            "UPDATE INVENTARIO_USUARIO "
+                            "SET cantidad = cantidad - 1 "
+                            "WHERE userID = ? AND item_nombre = ? AND cantidad > 0",
+                            (user_id, item_nombre),
+                        )
+                    else:
+                        db_manager.execute_update(
+                            "DELETE FROM INVENTARIO_USUARIO "
+                            "WHERE userID = ? AND item_nombre = ?",
+                            (user_id, item_nombre),
+                        )
+                    ok = True
+                    logger.info(
+                        f"[MOCHILA] Item '{item_nombre}' eliminado vía fallback BD "
+                        f"para usuario {user_id}"
+                    )
+                except Exception as _db_e:
+                    logger.error(
+                        f"[MOCHILA] Fallback BD falló eliminando '{item_nombre}': {_db_e}"
+                    )
+                    MenuPokemon._edit_or_send(
+                        message, bot, user_id,
+                        f"❌ No se pudo eliminar <b>{item_nombre}</b>.\n"
+                        "Contacta a un administrador.",
+                        types.InlineKeyboardMarkup(),
+                    )
+                    return
+ 
             # Dar cosmos solo si el precio de venta es mayor que 0
-            if precio_venta > 0:
+            if ok and precio_venta > 0:
                 economy_service.add_credits(user_id, precio_venta, f"Venta item: {item_nombre}")
-
+ 
             nombre_display = _nombre_item(item_nombre, item_data)
             if precio_venta > 0:
                 texto = (
@@ -931,14 +975,14 @@ class MenuPokemon:
                     f"💰 Recibiste <b>{precio_venta} Cosmos</b>."
                 )
             else:
-                texto = f"🗑️ <b>Eliminaste 1× {nombre_display}</b>"
-
+                texto = f"🗑️ <b>Eliminaste 1× {nombre_display}</b> de tu mochila."
+ 
             markup = types.InlineKeyboardMarkup()
             markup.add(types.InlineKeyboardButton(
                 "⬅️ Mochila", callback_data=f"pokemenu_bag_{user_id}"
             ))
             MenuPokemon._edit_or_send(message, bot, user_id, texto, markup)
-
+ 
         except Exception as e:
             logger.error(f"[MOCHILA] Error vendiendo item: {e}", exc_info=True)
             MenuPokemon._edit_or_send(
@@ -1822,28 +1866,36 @@ class MenuPokemon:
                 markup,
             )
             return
-
-        estado = centro_pokemon.verificar_estado_equipo(user_id)
-
-        texto = f"⭐ <b>CENTRO POKÉMON</b>\n\n💰 Costo: <b>{centro_pokemon.COSTO_CURACION}</b> cosmos\n\n"
-
+ 
+        estado        = centro_pokemon.verificar_estado_equipo(user_id)
+        costo_por_pk  = centro_pokemon.COSTO_POR_POKEMON
+        necesitan     = estado["heridos"] + estado["debilitados"]
+        costo_total   = necesitan * costo_por_pk
+ 
+        texto = (
+            f"⭐ <b>CENTRO POKÉMON</b>\n\n"
+            f"💰 Tarifa: <b>{costo_por_pk} cosmos por Pokémon</b>\n\n"
+        )
+ 
         if estado["total"] == 0:
             texto += "❌ No tienes Pokémon."
         elif not estado["necesita_curacion"]:
-            texto += "✅ Tus Pokémon están completamente curados."
+            texto += "✅ Tus Pokémon ya están completamente curados."
         else:
             texto += (
                 f"📊 <b>Estado del equipo:</b>\n"
                 f"💚 Sanos: {estado['sanos']}\n"
                 f"💛 Heridos: {estado['heridos']}\n"
                 f"💀 Debilitados: {estado['debilitados']}\n\n"
+                f"💰 Costo: <b>{costo_total} cosmos</b> "
+                f"({necesitan} Pokémon × {costo_por_pk})\n\n"
                 "¿Deseas curar a tus Pokémon?"
             )
-
+ 
         markup = types.InlineKeyboardMarkup()
         if estado["necesita_curacion"]:
             markup.add(types.InlineKeyboardButton(
-                f"✨ Curar ({centro_pokemon.COSTO_CURACION} cosmos)",
+                f"✨ Curar equipo ({costo_total} cosmos)",
                 callback_data=f"pokemenu_heal_{user_id}",
             ))
         markup.add(types.InlineKeyboardButton(

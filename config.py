@@ -78,7 +78,7 @@ RECOMPENSA_DIARIA = 500
 RECOMPENSA_DIARIA_P = 100
 
 # ============== CENTRO POKÉMON ==============
-COSTO_CENTRO_POKEMON = 100
+COSTO_CENTRO_POKEMON = 10
 
 # ============== MENSAJES ==============
 MSG_USUARIO_NO_REGISTRADO = "⚠️ No estás registrado. Usa /registrar"

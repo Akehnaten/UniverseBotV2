@@ -1292,8 +1292,33 @@ class GymBattleManager:
             ok, msg = gimnasio_service.otorgar_victoria_e4(battle.user_id, battle.lider_id)
         else:
             ok, msg = gimnasio_service.otorgar_medalla(battle.user_id, battle.lider_id)
-
+ 
         victoria_text = f"🏆 <b>¡VICTORIA!</b>\n\n{msg}"
+ 
+        # ── Master Ball: se otorga UNA vez al completar el Alto Mando ─────────
+        # Se detecta comprobando si ya no queda ningún E4 pendiente tras esta
+        # victoria.  `obtener_siguiente_e4` devuelve None cuando el jugador ha
+        # derrotado a todos los miembros del Alto Mando y es el nuevo Campeón.
+        if battle.is_e4 and ok:
+            try:
+                siguiente_e4 = gimnasio_service.obtener_siguiente_e4(battle.user_id)
+                if siguiente_e4 is None:
+                    # El jugador acaba de convertirse en Campeón de la región
+                    from pokemon.services import items_service as _its_champion
+                    _its_champion.agregar_item(battle.user_id, "masterball", 1)
+                    victoria_text += (
+                        "\n\n🔴 <b>¡Eres el nuevo Campeón de la región!</b>\n"
+                        "🎁 Como reconocimiento, recibiste una <b>Master Ball</b>.\n"
+                        "<i>(Solo se entrega una vez por región completada)</i>"
+                    )
+                    logger.info(
+                        f"[GYM] ¡Master Ball otorgada! Usuario={battle.user_id} "
+                        f"es el nuevo Campeón de la región."
+                    )
+            except Exception as _champion_err:
+                logger.warning(
+                    f"[GYM] No se pudo entregar Master Ball al Campeón: {_champion_err}"
+                )
         # 1. Editar el panel de batalla en curso (puede fallar silenciosamente)\n'
         self._edit_message(bot, battle, victoria_text)
         # 2. Enviar SIEMPRE un mensaje nuevo en el hilo.\n'

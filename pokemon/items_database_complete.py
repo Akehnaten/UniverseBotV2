@@ -80,8 +80,8 @@ MEDICINAS_DB = {
     "maxether": {"precio": 12, "pp": 999, "desc": "Éter Máximo - restaura PP completo a un move"},
     "elixir": {"precio": 15, "pp_todos": 10, "desc": "Elixir - restaura 10 PP a todos los moves"},
     "maxelixir": {"precio": 30, "pp_todos": 999, "desc": "Elixir Máximo - restaura PP completo a todos"},
-    "ppup": {"precio": 50, "pp_max": 1, "desc": "Más PP - +1 PP máximo permanente"},
-    "ppmax": {"precio": 150, "pp_max": 3, "desc": "PP Máximos - +3 PP máximo permanente"},
+    "ppup": {"precio": 50, "pp_max": 3, "desc": "Más PP - +3 PP máximo permanente"},
+    "ppmax": {"precio": 150, "pp_max": 9, "desc": "PP Máximos - +9 PP máximo permanente"},
 }
 
 # ========== VITAMINAS (50-500 cosmos) ==========

@@ -3,91 +3,27 @@ Servicio de Crianza Pokémon
 Sistema completo: guardería, huevos, herencia de IVs/naturaleza/movimientos,
 pasos por caracteres escritos, eclosión con notificación y mote.
 """
-
+ 
 import json
 import logging
 import random
 from typing import Optional, Dict, List, Tuple
 from database import db_manager
-
+ 
 logger = logging.getLogger(__name__)
-
+ 
 # ──────────────────────────────────────────────────────────────────────────────
 # CONSTANTES
 # ──────────────────────────────────────────────────────────────────────────────
-
+ 
 DITTO_ID = 132
-
+ 
 # Pasos (palabras escritas en el grupo) necesarios para que la guardería
 # produzca un huevo con los dos Pokémon depositados.
 # Amuleto Iris duplica los pasos que cuentan hacia este umbral.
-PASOS_PARA_PRODUCIR_HUEVO: int = 250
-PASOS_BASE_ECLOSION:       int = 1280   # 25 % de 5120
-# Factor reductor a aplicar si usas cálculos dinámicos de pasos:
-FACTOR_REDUCCION_PASOS: float = 0.25
-
-def aplicar_reduccion_pasos_guarderia() -> None:
-    """
-    Aplica la reducción de pasos al módulo crianza_service en tiempo de
-    ejecución, sin modificar el archivo fuente.
+# Reducido al 25 % del valor original para facilitar la cría.
+PASOS_PARA_PRODUCIR_HUEVO: int = 250    # era 1000
  
-    Llamar una sola vez al arrancar el bot (ej. en UniverseBot.py después
-    de importar todos los módulos):
- 
-        from pokemon.services.crianza_service_steps_patch import aplicar_reduccion_pasos_guarderia
-        aplicar_reduccion_pasos_guarderia()
-    """
-    try:
-        from pokemon.services import crianza_service as _cs
- 
-        # ── Constantes de producción ──────────────────────────────────────────
-        for attr in (
-            "PASOS_PARA_PRODUCIR_HUEVO",
-            "PASOS_PRODUCCION",
-            "PASOS_GUARDERIA",
-            "PASOS_HUEVO",
-        ):
-            val = getattr(_cs, attr, None)
-            if val is not None and isinstance(val, (int, float)):
-                nuevo = max(50, int(val * FACTOR_REDUCCION_PASOS))
-                setattr(_cs, attr, nuevo)
-                import logging as _log
-                _log.getLogger(__name__).info(
-                    f"[CRIANZA_PATCH] {attr}: {val} → {nuevo}"
-                )
- 
-        # ── Constantes de eclosión ────────────────────────────────────────────
-        for attr in (
-            "PASOS_BASE_ECLOSION",
-            "PASOS_ECLOSION",
-            "CICLOS_ECLOSION",
-            "PASOS_CICLO",
-        ):
-            val = getattr(_cs, attr, None)
-            if val is not None and isinstance(val, (int, float)):
-                nuevo = max(50, int(val * FACTOR_REDUCCION_PASOS))
-                setattr(_cs, attr, nuevo)
-                import logging as _log
-                _log.getLogger(__name__).info(
-                    f"[CRIANZA_PATCH] {attr}: {val} → {nuevo}"
-                )
- 
-        # ── Si usa un dict de pasos por especie / grupo ───────────────────────
-        for attr in ("PASOS_POR_GRUPO", "PASOS_POR_ESPECIE", "EGG_STEPS"):
-            d = getattr(_cs, attr, None)
-            if d is not None and isinstance(d, dict):
-                for k in d:
-                    if isinstance(d[k], (int, float)):
-                        d[k] = max(50, int(d[k] * FACTOR_REDUCCION_PASOS))
-                import logging as _log
-                _log.getLogger(__name__).info(
-                    f"[CRIANZA_PATCH] {attr}: reducido al 25 %"
-                )
- 
-    except Exception as e:
-        import logging as _log
-        _log.getLogger(__name__).error(f"[CRIANZA_PATCH] Error aplicando reducción: {e}")
-
 # Pokémon que no pueden criar (legendarios y asexuados especiales)
 POKEMON_UNDISCOVERED: set = {
     144, 145, 146, 150, 151,
@@ -99,13 +35,13 @@ POKEMON_UNDISCOVERED: set = {
     785, 786, 787, 788, 789, 790, 791, 792, 800, 801, 802,
     888, 889, 890, 891, 892, 893, 894, 895, 896, 897, 898,
 }
-
+ 
 # 100% macho
 SOLO_MACHO: set = {32, 33, 34, 106, 107, 128, 236, 237}
-
+ 
 # 100% hembra
 SOLO_HEMBRA: set = {29, 30, 31, 115, 238, 241}
-
+ 
 # Sin género — incluye Ditto, Magnemite, Voltorb, Staryu, Porygon, etc.
 SIN_GENERO: set = {
     81, 82,          # Magnemite, Magneton
@@ -116,7 +52,7 @@ SIN_GENERO: set = {
     343, 344,        # Baltoy, Claydol
     374, 375, 376,   # Beldum, Metang, Metagross
 }
-
+ 
 # Grupos de huevos por pokemonID (Gen 1-4 completo + más comunes Gen 5+)
 GRUPOS_HUEVOS: Dict[int, List[str]] = {
     # ── GEN 1 ─────────────────────────────────────────────────────────────────
@@ -591,20 +527,34 @@ GRUPOS_HUEVOS: Dict[int, List[str]] = {
     894: ["Undiscovered"],895: ["Undiscovered"],
     896: ["Undiscovered"],897: ["Undiscovered"],898: ["Undiscovered"],
 }
-
+ 
+# Pasos por grupo de huevo reducidos al 25 % del valor oficial para
+# facilitar la cría. Valores originales entre paréntesis.
 PASOS_POR_GRUPO: Dict[str, int] = {
-    "Monster": 5120, "Water1": 5120, "Bug": 3840, "Flying": 5120,
-    "Field": 5120, "Fairy": 3840, "Grass": 5120, "Human-Like": 5120,
-    "Water3": 5120, "Mineral": 5120, "Amorphous": 5120, "Water2": 5120,
-    "Ditto": 5120, "Dragon": 10240, "Undiscovered": 999999,
+    "Monster":      1280,   # era 5120
+    "Water1":       1280,   # era 5120
+    "Bug":           960,   # era 3840
+    "Flying":       1280,   # era 5120
+    "Field":        1280,   # era 5120
+    "Fairy":         960,   # era 3840
+    "Grass":        1280,   # era 5120
+    "Human-Like":   1280,   # era 5120
+    "Water3":       1280,   # era 5120
+    "Mineral":      1280,   # era 5120
+    "Amorphous":    1280,   # era 5120
+    "Water2":       1280,   # era 5120
+    "Ditto":        1280,   # era 5120
+    "Dragon":       2560,   # era 10240
+    "Undiscovered": 999999, # no puede criar
 }
-
+ 
+# Pasos especiales por especie también reducidos al 25 %.
 PASOS_ESPECIALES: Dict[int, int] = {
-    131: 10240,  # Lapras
-    133: 8960,   # Eevee
-    143: 10240,  # Snorlax
+    131: 2560,   # Lapras  (era 10240)
+    133: 2240,   # Eevee   (era 8960)
+    143: 2560,   # Snorlax (era 10240)
 }
-
+ 
 NATURALEZAS: List[str] = [
     "Hardy", "Lonely", "Brave", "Adamant", "Naughty",
     "Bold", "Docile", "Relaxed", "Impish", "Lax",
@@ -612,18 +562,18 @@ NATURALEZAS: List[str] = [
     "Modest", "Mild", "Quiet", "Bashful", "Rash",
     "Calm", "Gentle", "Sassy", "Careful", "Quirky",
 ]
-
+ 
 HABILIDAD_CUERPO_LLAMA = "cuerpo llama"
-
-
+ 
+ 
 # ──────────────────────────────────────────────────────────────────────────────
 # HELPER PÚBLICO: sexo
 # ──────────────────────────────────────────────────────────────────────────────
-
+ 
 def determinar_sexo(pokemon_id: int) -> Optional[str]:
     """
     Determina el sexo aleatorio de un Pokémon según las mecánicas oficiales.
-
+ 
     Returns:
         'M', 'F' o None (asexuado)
     """
@@ -643,31 +593,31 @@ def determinar_sexo(pokemon_id: int) -> Optional[str]:
     if pokemon_id in starters_y_pseudo:
         return "M" if random.random() < 0.875 else "F"
     return "M" if random.random() < 0.5 else "F"
-
-
+ 
+ 
 # ──────────────────────────────────────────────────────────────────────────────
 # SERVICIO
 # ──────────────────────────────────────────────────────────────────────────────
-
+ 
 class CrianzaService:
     """Servicio completo de crianza de Pokémon"""
-
+ 
     def __init__(self):
         self.db = db_manager
         self._migrar_tabla_huevos()
-
+ 
     def _migrar_tabla_huevos(self) -> None:
         """
         Agrega columnas nuevas a HUEVOS y POKEMON_USUARIO si no existen.
         SQLite no permite IF NOT EXISTS en ALTER TABLE, por eso se usa
         try/except: si la columna ya existe la excepción se ignora silenciosamente.
-
+ 
         Columnas añadidas a HUEVOS:
           - en_equipo          : obsoleto (se mantiene por compatibilidad)
           - es_shiny           : shiny pre-determinado al crear el huevo
           - placeholder_pokemon_id : id_unico del row de POKEMON_USUARIO
                                      que representa al huevo en el equipo
-
+ 
         Columnas añadidas a POKEMON_USUARIO:
           - es_huevo  : 1 si el row es un placeholder de huevo
           - huevo_ref : id del huevo en HUEVOS (FK lógica)
@@ -694,15 +644,15 @@ class CrianzaService:
                 logger.info("[CRIANZA] Columna '%s' agregada.", descripcion)
             except Exception:
                 pass  # ya existe — comportamiento normal en arranques posteriores
-
+ 
     # ══════════════════════════════════════════════
     # GUARDERÍA
     # ══════════════════════════════════════════════
-
+ 
     def obtener_pokemon_guarderia(self, user_id: int) -> Dict:
         """
         Retorna el estado de la guardería como diccionario de slots.
-
+ 
         Returns:
             Dict con estructura:
                 {
@@ -712,12 +662,12 @@ class CrianzaService:
         Siempre devuelve ambas claves aunque estén vacías.
         """
         from pokemon.services.pokemon_service import pokemon_service as _ps
-
+ 
         resultados = self.db.execute_query(
             "SELECT slot, pokemon_id FROM GUARDERIA WHERE userID = ? ORDER BY slot",
             (user_id,)
         ) or []
-
+ 
         guarderia: Dict[str, object] = {"poke1": None, "poke2": None}
         for row in resultados:
             slot = row.get("slot") or "poke1"
@@ -725,9 +675,9 @@ class CrianzaService:
             if slot in guarderia and pid:
                 poke = _ps.obtener_pokemon(int(pid))
                 guarderia[slot] = poke  # puede ser None si el Pokémon fue borrado
-
+ 
         return guarderia
-
+ 
     def obtener_pokemon_guarderia_lista(self, user_id: int) -> List:
         """
         Versión de compatibilidad que devuelve lista de Pokémon presentes
@@ -735,50 +685,50 @@ class CrianzaService:
         """
         d = self.obtener_pokemon_guarderia(user_id)
         return [p for p in d.values() if p is not None]
-
+ 
     def depositar_en_guarderia(self, user_id: int, pokemon_id: int) -> Tuple[bool, str]:
         """
         Deposita un Pokémon en la guardería usando el primer slot libre.
-
+ 
         Reglas:
           - Máximo 2 Pokémon (slots poke1 y poke2).
           - No se aceptan legendarios / grupo Undiscovered.
           - El Pokémon se saca del equipo (en_equipo = 0).
           - Al llenar el segundo slot se intenta producir un huevo si
             los dos Pokémon son compatibles.
-
+ 
         Returns:
             (exito, mensaje)
         """
         try:
             from pokemon.services.pokemon_service import pokemon_service
-
+ 
             # ── Validaciones básicas ──────────────────────────────────────────
             poke = pokemon_service.obtener_pokemon(pokemon_id)
             if not poke:
                 return False, "❌ Pokémon no encontrado."
             if poke.usuario_id != user_id:
                 return False, "❌ Ese Pokémon no te pertenece."
-
+ 
             grupos = GRUPOS_HUEVOS.get(poke.pokemonID, ["Undiscovered"])
             if "Undiscovered" in grupos or poke.pokemonID in POKEMON_UNDISCOVERED:
                 return False, f"❌ {poke.nombre} no puede quedarse en la guardería."
-
+ 
             # ── Determinar slot libre ─────────────────────────────────────────
             guarderia = self.obtener_pokemon_guarderia(user_id)
-
+ 
             # Verificar que no esté ya depositado
             for slot_poke in guarderia.values():
                 if slot_poke and getattr(slot_poke, "id_unico", None) == pokemon_id:
                     return False, f"❌ {poke.nombre} ya está en la guardería."
-
+ 
             if guarderia["poke1"] is None:
                 slot_libre = "poke1"
             elif guarderia["poke2"] is None:
                 slot_libre = "poke2"
             else:
                 return False, "❌ La guardería ya tiene 2 Pokémon. Retira uno primero."
-
+ 
             # ── Sacar del equipo y registrar ──────────────────────────────────
             self.db.execute_update(
                 "UPDATE POKEMON_USUARIO SET en_equipo = 0 WHERE id_unico = ?",
@@ -788,12 +738,12 @@ class CrianzaService:
                 "INSERT INTO GUARDERIA (userID, pokemon_id, slot) VALUES (?, ?, ?)",
                 (user_id, pokemon_id, slot_libre)
             )
-
+ 
             logger.info(
                 f"🏡 {poke.nombre} (slot {slot_libre}) depositado "
                 f"en guardería por usuario {user_id}"
             )
-
+ 
             # ── Si el segundo slot acaba de llenarse, verificar compatibilidad ─
             # El huevo NO se produce de inmediato: hay que escribir en el grupo
             # para acumular PASOS_PARA_PRODUCIR_HUEVO pasos de guardería.
@@ -812,27 +762,27 @@ class CrianzaService:
                     )
                 else:
                     msg_compatibilidad = f"\n❌ {msg_compat}"
-
+ 
             return True, (
                 f"✅ {poke.nombre} fue dejado en la guardería (slot {slot_libre})."
                 f"{msg_compatibilidad}"
             )
-
+ 
         except Exception as e:
             logger.error(f"❌ Error depositando en guardería: {e}")
             return False, f"Error: {str(e)}"
-
+ 
     def retirar_de_guarderia(self, user_id: int, pokemon_id: int) -> Tuple[bool, str]:
         """
         Retira un Pokémon de la guardería liberando su slot.
         Lo devuelve al equipo si hay lugar, o al PC si está lleno.
-
+ 
         Returns:
             (exito, mensaje)
         """
         try:
             from pokemon.services.pokemon_service import pokemon_service
-
+ 
             # Verificar que esté realmente en la guardería
             fila = self.db.execute_query(
                 "SELECT id, slot FROM GUARDERIA WHERE userID = ? AND pokemon_id = ?",
@@ -840,13 +790,13 @@ class CrianzaService:
             )
             if not fila:
                 return False, "❌ Ese Pokémon no está en la guardería."
-
+ 
             # Liberar el slot
             self.db.execute_update(
                 "DELETE FROM GUARDERIA WHERE userID = ? AND pokemon_id = ?",
                 (user_id, pokemon_id)
             )
-
+ 
             # Devolver al equipo o al PC
             equipo = pokemon_service.obtener_equipo(user_id)
             if len(equipo) < 6:
@@ -857,7 +807,7 @@ class CrianzaService:
                 destino = "devuelto a tu equipo"
             else:
                 destino = "guardado en el PC (equipo lleno)"
-
+ 
             poke   = pokemon_service.obtener_pokemon(pokemon_id)
             nombre = poke.nombre if poke else f"Pokémon #{pokemon_id}"
             slot   = fila[0].get("slot", "?")
@@ -866,19 +816,19 @@ class CrianzaService:
                 f"por usuario {user_id}"
             )
             return True, f"✅ {nombre} fue retirado ({slot}). Fue {destino}."
-
+ 
         except Exception as e:
             logger.error(f"❌ Error retirando de guardería: {e}")
             return False, f"Error: {str(e)}"
-
+ 
     # ══════════════════════════════════════════════
     # COMPATIBILIDAD
     # ══════════════════════════════════════════════
-
+ 
     def pueden_criar(self, pokemon1_id: int, pokemon2_id: int) -> Tuple[bool, str]:
         """
         Verifica compatibilidad de cría.
-
+ 
         Reglas oficiales:
         - No puede criar consigo mismo.
         - Ditto cría con cualquiera que no sea Undiscovered.
@@ -887,27 +837,27 @@ class CrianzaService:
         """
         try:
             from pokemon.services.pokemon_service import pokemon_service
-
+ 
             if pokemon1_id == pokemon2_id:
                 return False, "Un Pokémon no puede criar consigo mismo."
-
+ 
             poke1 = pokemon_service.obtener_pokemon(pokemon1_id)
             poke2 = pokemon_service.obtener_pokemon(pokemon2_id)
             if not poke1 or not poke2:
                 return False, "Uno o ambos Pokémon no existen."
-
+ 
             id1, id2 = poke1.pokemonID, poke2.pokemonID
             grupos1 = GRUPOS_HUEVOS.get(id1, ["Undiscovered"])
             grupos2 = GRUPOS_HUEVOS.get(id2, ["Undiscovered"])
-
+ 
             if "Undiscovered" in grupos1 or id1 in POKEMON_UNDISCOVERED:
                 return False, f"{poke1.nombre} no puede tener crías."
             if "Undiscovered" in grupos2 or id2 in POKEMON_UNDISCOVERED:
                 return False, f"{poke2.nombre} no puede tener crías."
-
+ 
             if id1 == DITTO_ID or id2 == DITTO_ID:
                 return True, "✅ Compatibles (con Ditto)"
-
+ 
             # Sin Ditto: verificar sexo
             sexo1 = poke1.sexo
             sexo2 = poke2.sexo
@@ -915,28 +865,28 @@ class CrianzaService:
                 return False, "Los Pokémon asexuados solo pueden criar con Ditto."
             if sexo1 == sexo2:
                 return False, "Los Pokémon deben ser de sexos opuestos."
-
+ 
             comunes = set(grupos1) & set(grupos2)
             if not comunes:
                 return False, f"{poke1.nombre} y {poke2.nombre} no comparten grupo de huevo."
-
+ 
             return True, f"✅ Compatibles (Grupo: {', '.join(comunes)})"
-
+ 
         except Exception as e:
             logger.error(f"❌ Error verificando compatibilidad: {e}")
             return False, f"Error: {str(e)}"
-
+ 
     # ══════════════════════════════════════════════
     # PRODUCCIÓN DE HUEVOS
     # ══════════════════════════════════════════════
-
+ 
     def intentar_producir_huevo(self, user_id: int) -> Tuple[bool, str, Optional[int]]:
         """
         Intenta producir un huevo con los 2 Pokémon en guardería.
         Llamar al depositar el segundo Pokémon.
-
+ 
         Regla: solo puede haber 1 huevo activo (no eclosionado) por usuario.
-
+ 
         Returns:
             (producido, mensaje, huevo_id)
         """
@@ -952,34 +902,34 @@ class CrianzaService:
                 "Retiralo al equipo y esperá a que eclosione antes de crear otro.",
                 None,
             )
-
+ 
         guardados_dict = self.obtener_pokemon_guarderia(user_id)
         guardados = [p for p in guardados_dict.values() if p is not None]
         if len(guardados) < 2:
             return False, "Se necesitan 2 Pokémon en la guardería.", None
-
+ 
         pueden, msg = self.pueden_criar(guardados[0].id_unico, guardados[1].id_unico)
         if not pueden:
             return False, msg, None
-
+ 
         return self._crear_huevo(user_id, guardados[0].id_unico, guardados[1].id_unico)
-
+ 
     def _crear_huevo(self, user_id: int, p1_id: int, p2_id: int) -> Tuple[bool, str, Optional[int]]:
         """
         Crea un huevo en BD con todos los datos heredados.
-
+ 
         El huevo nace en la guardería (en_equipo=0).  El usuario debe
         retirarlo con retirar_huevo() para que empiece a acumular pasos.
         El shiny se pre-determina aquí para que sea consistente.
         """
         try:
             from pokemon.services.pokemon_service import pokemon_service
-
+ 
             poke1 = pokemon_service.obtener_pokemon(p1_id)
             poke2 = pokemon_service.obtener_pokemon(p2_id)
             if not poke1 or not poke2:
                 return False, "Pokémon no encontrado.", None
-
+ 
             p1, p2 = vars(poke1), vars(poke2)
             especie    = self._determinar_especie_huevo(p1, p2)
             pasos      = self._calcular_pasos_necesarios(especie)
@@ -987,7 +937,7 @@ class CrianzaService:
             naturaleza = self._determinar_naturaleza(p1, p2)
             habilidad  = self._determinar_habilidad(especie)
             movimientos = self._calcular_movimientos_huevo(p1, p2, especie)
-
+ 
             # Pre-determinar shiny con multiplicador del Amuleto Iris
             try:
                 from funciones.pokedex_usuario import get_shiny_multiplier
@@ -997,7 +947,7 @@ class CrianzaService:
             except Exception:
                 _prob = 1 / 4096
             es_shiny = 1 if random.random() < _prob else 0
-
+ 
             self.db.execute_update(
                 """
                 INSERT INTO HUEVOS (
@@ -1011,10 +961,10 @@ class CrianzaService:
                     habilidad, json.dumps(movimientos), pasos, es_shiny,
                 )
             )
-
+ 
             id_r = self.db.execute_query("SELECT last_insert_rowid() AS id")
             huevo_id: Optional[int] = id_r[0]['id'] if id_r else None
-
+ 
             nombre = self._obtener_nombre_especie(especie)
             logger.info(
                 "[CRIANZA] 🥚 Huevo %s creado para user %s "
@@ -1027,15 +977,15 @@ class CrianzaService:
                 f"Pasos necesarios: {pasos}\n\n"
                 f"Retirá el huevo de la guardería para empezar a incubarlo."
             ), huevo_id
-
+ 
         except Exception as e:
             logger.error(f"❌ Error creando huevo: {e}")
             return False, f"Error: {str(e)}", None
-
+ 
     # ══════════════════════════════════════════════
     # SISTEMA DE PASOS
     # ══════════════════════════════════════════════
-
+ 
     def _tiene_amuleto_iris(self, user_id: int) -> bool:
         """True si el usuario tiene el Amuleto Iris (duplica pasos globalmente)."""
         try:
@@ -1043,7 +993,7 @@ class CrianzaService:
             return tiene_amuleto_iris(user_id)
         except Exception:
             return False
-
+ 
     def _tiene_cuerpo_llama(self, user_id: int) -> bool:
         """True si hay un Pokémon con habilidad Cuerpo Llama en el equipo."""
         try:
@@ -1055,15 +1005,15 @@ class CrianzaService:
             )
         except Exception:
             return False
-
+ 
     def retirar_huevo(self, user_id: int, huevo_id: int) -> Tuple[bool, str]:
         """
         Retira un huevo de la guardería al equipo del usuario.
-
+ 
         El huevo ocupa un slot real en POKEMON_USUARIO (es_huevo=1, en_equipo=1)
         y por tanto cuenta para el límite de 6.  Los pasos solo se acumulan
         mientras el huevo esté en el equipo.
-
+ 
         Returns:
             (exito, mensaje)
         """
@@ -1079,9 +1029,9 @@ class CrianzaService:
             )
             if not fila:
                 return False, "❌ Huevo no encontrado."
-
+ 
             huevo = fila[0]
-
+ 
             # Si ya tiene placeholder creado y en equipo, no crear otro
             if huevo.get('placeholder_pokemon_id'):
                 en_equipo = self.db.execute_query(
@@ -1090,7 +1040,7 @@ class CrianzaService:
                 )
                 if en_equipo and en_equipo[0].get('en_equipo'):
                     return False, "❌ Ese huevo ya está en tu equipo."
-
+ 
             # ── Verificar espacio en el equipo (máx 6 incluyendo huevos) ─────
             slots_ocupados = self.db.execute_query(
                 "SELECT COUNT(*) AS total FROM POKEMON_USUARIO "
@@ -1103,10 +1053,10 @@ class CrianzaService:
                     "❌ Tu equipo está lleno (6/6). "
                     "Mové un Pokémon al PC antes de llevar el huevo."
                 )
-
+ 
             especie_id = int(huevo['pokemon_id'])
             nombre     = self._obtener_nombre_especie(especie_id)
-
+ 
             # ── Crear fila placeholder en POKEMON_USUARIO ─────────────────────
             # Todos los stats en 0 / hp_actual 0 — no puede combatir
             placeholder_id = self.db.execute_insert(
@@ -1138,16 +1088,16 @@ class CrianzaService:
                     f"Huevo de {nombre}",
                 ),
             )
-
+ 
             if not placeholder_id:
                 return False, "❌ Error al crear el slot del huevo. Intenta de nuevo."
-
+ 
             # ── Vincular huevo ↔ placeholder ──────────────────────────────────
             self.db.execute_update(
                 "UPDATE HUEVOS SET placeholder_pokemon_id = ? WHERE id = ?",
                 (placeholder_id, huevo_id),
             )
-
+ 
             logger.info(
                 "[CRIANZA] User %s retiró huevo %s (%s) → placeholder_id=%s",
                 user_id, huevo_id, nombre, placeholder_id,
@@ -1157,11 +1107,11 @@ class CrianzaService:
                 f"({huevo['pasos_necesarios']} pasos para eclosionar).\n"
                 f"¡Escribí en el grupo para que avance!"
             )
-
+ 
         except Exception as e:
             logger.error("[CRIANZA] Error retirando huevo %s: %s", huevo_id, e)
             return False, f"Error: {str(e)}"
-
+ 
     def sumar_pasos_produccion(
         self,
         user_id:   int,
@@ -1171,24 +1121,24 @@ class CrianzaService:
     ) -> Optional[Dict]:
         """
         Suma pasos hacia la PRODUCCIÓN de un huevo (fase de guardería).
-
+ 
         Solo se ejecuta si el usuario tiene exactamente dos Pokémon
         compatibles en la guardería Y aún no tiene un huevo activo.
-
+ 
         Multiplicador:
           - Amuleto Iris activo: ×2 pasos contados.
           - Cuerpo Llama:        NO aplica aquí (es para eclosión).
-
+ 
         Usa la columna pasos_guarderia de USUARIOS como contador.
         Al alcanzar PASOS_PARA_PRODUCIR_HUEVO el huevo se crea y el
         contador se resetea a 0.
-
+ 
         Args:
             user_id:   Telegram ID del usuario.
             palabras:  Palabras escritas en el mensaje del grupo.
             chat_id:   Chat donde notificar si el huevo aparece.
             thread_id: Thread/topic del chat.
-
+ 
         Returns:
             Dict con datos del huevo producido, o None si no ocurrió nada.
         """
@@ -1198,22 +1148,22 @@ class CrianzaService:
             guardados = [p for p in guarderia.values() if p is not None]
             if len(guardados) < 2:
                 return None
-
+ 
             huevo_activo = self.db.execute_query(
                 "SELECT id FROM HUEVOS WHERE userID = ? AND eclosionado = 0 LIMIT 1",
                 (user_id,),
             )
             if huevo_activo:
                 return None  # ya hay un huevo en curso, no producir otro
-
+ 
             # Verificar compatibilidad antes de gastar pasos
             pueden, _ = self.pueden_criar(guardados[0].id_unico, guardados[1].id_unico)
             if not pueden:
                 return None
-
+ 
             mult = 2 if self._tiene_amuleto_iris(user_id) else 1
             pasos_a_sumar = palabras * mult
-
+ 
             # Leer contador actual de pasos de producción
             fila = self.db.execute_query(
                 "SELECT COALESCE(pasos_guarderia, 0) AS total FROM USUARIOS WHERE userID = ?",
@@ -1221,26 +1171,26 @@ class CrianzaService:
             )
             pasos_actuales = int(fila[0]["total"]) if fila else 0
             pasos_nuevos   = pasos_actuales + pasos_a_sumar
-
+ 
             self.db.execute_update(
                 "UPDATE USUARIOS SET pasos_guarderia = ? WHERE userID = ?",
                 (pasos_nuevos, user_id),
             )
-
+ 
             if pasos_nuevos < PASOS_PARA_PRODUCIR_HUEVO:
                 return None  # aún no se alcanzó el umbral
-
+ 
             # ── Umbral alcanzado: producir el huevo ───────────────────────────
             ok, mensaje, huevo_id = self._crear_huevo(
                 user_id, guardados[0].id_unico, guardados[1].id_unico
             )
-
+ 
             # Resetear contador de producción
             self.db.execute_update(
                 "UPDATE USUARIOS SET pasos_guarderia = 0 WHERE userID = ?",
                 (user_id,),
             )
-
+ 
             if ok and huevo_id:
                 logger.info(
                     "[CRIANZA] Huevo %s producido para user %s tras %s pasos de guardería.",
@@ -1252,13 +1202,13 @@ class CrianzaService:
                     "chat_id":  chat_id,
                     "thread_id": thread_id,
                 }
-
+ 
             return None
-
+ 
         except Exception as e:
             logger.error("[CRIANZA] Error en sumar_pasos_produccion (user %s): %s", user_id, e)
             return None
-
+ 
     def sumar_pasos(
         self,
         user_id:   int,
@@ -1269,18 +1219,18 @@ class CrianzaService:
         """
         Suma pasos hacia la ECLOSIÓN de los huevos que el usuario lleva
         en su equipo (placeholder en_equipo=1).
-
+ 
         Multiplicador:
           - Cuerpo Llama (Pokémon en equipo): ×2 pasos contados.
           - Amuleto Iris:                     NO aplica aquí
                                               (es para producción del huevo).
-
+ 
         Args:
             user_id:   Telegram ID del usuario.
             palabras:  Palabras escritas en el mensaje del grupo.
             chat_id:   Chat donde notificar la eclosión.
             thread_id: Thread/topic del chat.
-
+ 
         Returns:
             Lista de dicts con datos de cada eclosión producida.
         """
@@ -1301,22 +1251,22 @@ class CrianzaService:
             )
             if not huevos:
                 return []
-
+ 
             # Solo Cuerpo Llama — Amuleto Iris NO aplica en eclosión
             mult_cuerpo_llama = 2 if self._tiene_cuerpo_llama(user_id) else 1
             pasos_a_sumar     = palabras * mult_cuerpo_llama
-
+ 
             eclosionados: List[Dict] = []
-
+ 
             for row in huevos:
                 huevo        = dict(row)
                 pasos_nuevos = huevo.get('pasos_actuales', 0) + pasos_a_sumar
-
+ 
                 self.db.execute_update(
                     "UPDATE HUEVOS SET pasos_actuales = ? WHERE id = ?",
                     (pasos_nuevos, huevo['id']),
                 )
-
+ 
                 if pasos_nuevos >= huevo['pasos_necesarios']:
                     huevo['pasos_actuales'] = pasos_nuevos
                     resultado = self._eclosionar_huevo(huevo['id'], huevo)
@@ -1324,30 +1274,30 @@ class CrianzaService:
                         resultado['chat_id']   = chat_id
                         resultado['thread_id'] = thread_id
                         eclosionados.append(resultado)
-
+ 
             return eclosionados
-
+ 
         except Exception as e:
             logger.error("[CRIANZA] Error sumando pasos (user %s): %s", user_id, e)
             return []
-
+ 
     def _eclosionar_huevo(self, huevo_id: int, huevo: Dict) -> Optional[Dict]:
         """
         Eclosiona el huevo: convierte el row placeholder de POKEMON_USUARIO
         en el Pokémon real (UPDATE, no INSERT) y marca el huevo como eclosionado.
-
+ 
         Al usar UPDATE sobre el placeholder:
           - El id_unico queda igual → la posición en el equipo se mantiene.
           - No hace falta un paso extra para "agregar al equipo".
           - El handler puede luego pedir mote al usuario (finalizar_eclosion).
-
+ 
         Returns:
             Dict con datos del nuevo Pokémon, o None si falla.
         """
         try:
             from database import db_manager as _db
             from pokemon.services.pokedex_service import pokedex_service as _pdex
-
+ 
             ivs:        Dict = json.loads(huevo.get('ivs_heredados') or '{}')
             naturaleza: str  = huevo.get('naturaleza') or 'Hardy'
             especie_id: int  = int(huevo['pokemon_id'])
@@ -1355,7 +1305,7 @@ class CrianzaService:
             habilidad:  str  = huevo.get('habilidad') or ''
             sexo = determinar_sexo(especie_id)
             sexo_texto = {"M": "♂", "F": "♀"}.get(sexo or "", "◯")
-
+ 
             placeholder_id: Optional[int] = huevo.get('placeholder_pokemon_id')
             if not placeholder_id:
                 logger.error(
@@ -1363,11 +1313,11 @@ class CrianzaService:
                     huevo_id,
                 )
                 return None
-
+ 
             # ── Calcular stats reales con los IVs heredados ───────────────────
             evs_cero = {s: 0 for s in ("hp", "atq", "def", "atq_sp", "def_sp", "vel")}
             stats = _pdex.calcular_stats(especie_id, 1, ivs, evs_cero, naturaleza)
-
+ 
             # ── Obtener movimientos iniciales de nivel 1 ──────────────────────
             movimientos_huevo: List[str] = json.loads(
                 huevo.get('movimientos_huevo') or '[]'
@@ -1381,7 +1331,7 @@ class CrianzaService:
                 )
                 movs_nivel = movs_nivel[:4] if movs_nivel else ["placaje"]
                 moves = (movs_nivel + [None, None, None, None])[:4]
-
+ 
             # ── Convertir el placeholder en el Pokémon real ───────────────────
             campos_iv = (
                 "iv_hp = ?, iv_atq = ?, iv_def = ?, "
@@ -1421,7 +1371,7 @@ class CrianzaService:
                     placeholder_id,
                 ),
             )
-
+ 
             # fecha_captura en query separada — tolerante a BD antiguas que
             # aún no tienen la columna (la migración la agrega al arrancar,
             # pero si por alguna razón falló este UPDATE no debe romper todo)
@@ -1436,22 +1386,22 @@ class CrianzaService:
                     "[CRIANZA] No se pudo setear fecha_captura (id=%s): %s",
                     placeholder_id, _fc_err,
                 )
-
+ 
             # ── Marcar huevo como eclosionado ─────────────────────────────────
             self.db.execute_update(
                 "UPDATE HUEVOS SET eclosionado = 1, pokemon_nacido_id = ? WHERE id = ?",
                 (placeholder_id, huevo_id),
             )
-
+ 
             nombre   = self._obtener_nombre_especie(especie_id)
             iv_total = sum(ivs.values())
             shiny_tag = " ✨" if es_shiny else ""
-
+ 
             logger.info(
                 "[CRIANZA] 🐣 Huevo %s → %s (id_unico=%s, shiny=%s)",
                 huevo_id, nombre, placeholder_id, es_shiny,
             )
-
+ 
             return {
                 'huevo_id':   huevo_id,
                 'pokemon_id': placeholder_id,  # mismo id_unico que tenía el placeholder
@@ -1472,67 +1422,67 @@ class CrianzaService:
                     f"💎 IVs totales: {iv_total}/186"
                 ),
             }
-
+ 
         except Exception as e:
             logger.error("[CRIANZA] Error eclosionando huevo %s: %s", huevo_id, e)
             return None
-
+ 
     def finalizar_eclosion(self, user_id: int, pokemon_id: int,
                            mote: Optional[str]) -> Tuple[bool, str]:
         """
         Aplica el mote (opcional) al Pokémon recién eclosionado.
-
+ 
         No necesita mover al equipo: el placeholder ya estaba en_equipo=1
         y _eclosionar_huevo lo convirtió en el Pokémon real in-place.
-
+ 
         Args:
             user_id:    Telegram ID del usuario.
             pokemon_id: id_unico del Pokémon (era el placeholder).
             mote:       Apodo deseado, o None para no poner apodo.
-
+ 
         Returns:
             (exito, mensaje)
         """
         try:
             from pokemon.services.pokemon_service import pokemon_service
             from database import db_manager as _db
-
+ 
             if mote:
                 _db.execute_update(
                     "UPDATE POKEMON_USUARIO SET apodo = ? WHERE id_unico = ?",
                     (mote, pokemon_id),
                 )
-
+ 
             poke = pokemon_service.obtener_pokemon(pokemon_id)
             nombre_display = mote or (poke.nombre if poke else f"#{pokemon_id}")
             return True, f"✅ <b>{nombre_display}</b> ya es parte de tu equipo."
-
+ 
         except Exception as e:
             logger.error("[CRIANZA] Error finalizando eclosión: %s", e)
             return False, f"Error: {str(e)}"
-
+ 
     # ══════════════════════════════════════════════
     # HELPERS DE HERENCIA
     # ══════════════════════════════════════════════
-
+ 
     def _obtener_especie_base(self, especie_id: int) -> int:
         """
         Recorre la cadena evolutiva hacia atrás para encontrar la forma base.
-
+ 
         Construye un mapa inverso (quien_evoluciona_a → desde_quien) usando
         evolucion_service.evoluciones, luego sube hasta el tope.
-
+ 
         Ejemplos:
             Gengar (94)   → Gastly (92)
             Blastoise (9) → Squirtle (7)
             Kingdra (230) → Horsea (116)
             Scizor (212)  → Scyther (123)
-
+ 
         Límite de 10 pasos para evitar bucles infinitos en datos corruptos.
         """
         try:
             from pokemon.services.evolucion_service import evolucion_service
-
+ 
             # Construir mapa inverso: {id_evolucionado: id_preevolucion}
             inverso: Dict[int, int] = {}
             for pre_id_str, evo_list in evolucion_service.evoluciones.items():
@@ -1544,7 +1494,7 @@ class CrianzaService:
                             inverso[evo_a] = pre_id
                     except (ValueError, TypeError):
                         pass
-
+ 
             # Subir por la cadena hasta encontrar la raíz
             actual = especie_id
             for _ in range(10):
@@ -1552,16 +1502,16 @@ class CrianzaService:
                 if padre is None:
                     break
                 actual = padre
-
+ 
             return actual
-
+ 
         except Exception as e:
             logger.warning(
                 "[CRIANZA] No se pudo obtener especie base de %s: %s — usando la misma",
                 especie_id, e,
             )
             return especie_id
-
+ 
     def _determinar_especie_huevo(self, p1: Dict, p2: Dict) -> int:
         """
         Determina la especie del huevo según las reglas oficiales:
@@ -1572,7 +1522,7 @@ class CrianzaService:
         """
         id1 = int(p1.get('pokemonID') or p1.get('pokemon_id', 0))
         id2 = int(p2.get('pokemonID') or p2.get('pokemon_id', 0))
-
+ 
         if id1 == DITTO_ID:
             especie = id2
         elif id2 == DITTO_ID:
@@ -1583,9 +1533,9 @@ class CrianzaService:
             especie = id2
         else:
             especie = id1  # fallback
-
+ 
         return self._obtener_especie_base(especie)
-
+ 
     def _calcular_ivs_heredados(self, p1: Dict, p2: Dict) -> Dict:
         """
         Hereda 3 IVs de los padres (5 con Nudo Destino).
@@ -1596,23 +1546,23 @@ class CrianzaService:
             'hp': 'iv_hp', 'atq': 'iv_atq', 'def': 'iv_def',
             'atq_sp': 'iv_atq_sp', 'def_sp': 'iv_def_sp', 'vel': 'iv_vel'
         }
-
+ 
         ivs1 = {s: int(p1.get(iv_col[s]) or 0) for s in stats}
         ivs2 = {s: int(p2.get(iv_col[s]) or 0) for s in stats}
-
+ 
         item1 = str(p1.get('objeto') or '').lower()
         item2 = str(p2.get('objeto') or '').lower()
         n = 5 if ('nudo destino' in item1 or 'nudo destino' in item2) else 3
-
+ 
         resultado: Dict = {}
         for stat in random.sample(stats, n):
             resultado[stat] = ivs1[stat] if random.random() < 0.5 else ivs2[stat]
         for stat in stats:
             if stat not in resultado:
                 resultado[stat] = random.randint(0, 31)
-
+ 
         return resultado
-
+ 
     def _determinar_naturaleza(self, p1: Dict, p2: Dict) -> str:
         """Hereda naturaleza si alguno lleva Piedra Eterna, sino aleatoria."""
         item1 = str(p1.get('objeto') or '').lower()
@@ -1622,7 +1572,7 @@ class CrianzaService:
         if 'piedra eterna' in item2:
             return str(p2.get('naturaleza') or random.choice(NATURALEZAS))
         return random.choice(NATURALEZAS)
-
+ 
     def _determinar_habilidad(self, especie_id: int) -> str:
       """
       Selecciona habilidad de la especie con pesos canónicos Gen 5+.
@@ -1635,80 +1585,80 @@ class CrianzaService:
           return habilidades_service.seleccionar_habilidad(habs)
       except Exception:
           return "overgrow"  # fallback inocuo
-
+ 
     def _calcular_movimientos_huevo(self, p1: Dict, p2: Dict, especie_id: int) -> List[str]:
         """
         Calcula los movimientos huevo del nuevo Pokémon.
-
+ 
         Un movimiento es un "movimiento huevo" si:
           1. Al menos uno de los padres lo conoce en este momento.
           2. La especie hijo puede aprenderlo según su learnset.
-
+ 
         Los movimientos se normalizan (lowercase, sin espacios ni guiones)
         para coincidir con el formato de la BD.
-
+ 
         Returns:
             Lista de hasta 4 movimientos normalizados.
         """
         try:
             from pokemon.services import movimientos_service
-
+ 
             def _norm(m: str) -> str:
                 return m.lower().replace(" ", "").replace("-", "")
-
+ 
             # Movimientos actuales de los padres
             movs_p1 = [_norm(m) for m in (p1.get('movimientos') or []) if m]
             movs_p2 = [_norm(m) for m in (p2.get('movimientos') or []) if m]
             movs_padres = set(movs_p1 + movs_p2)
-
+ 
             if not movs_padres:
                 return []
-
+ 
             # Learnset completo de la especie hijo (todos los niveles)
             learnset = movimientos_service.obtener_learnset(especie_id)
             if not learnset:
                 return []
-
+ 
             movs_especie: set = set()
             for movs_nivel in learnset.values():
                 for m in movs_nivel:
                     movs_especie.add(_norm(m))
-
+ 
             # Intersección: movimientos que un padre conoce Y la especie puede aprender
             movs_huevo = [m for m in movs_padres if m in movs_especie]
-
+ 
             logger.debug(
                 "[CRIANZA] Movimientos huevo para especie %s: %s",
                 especie_id, movs_huevo[:4],
             )
             return movs_huevo[:4]
-
+ 
         except Exception as e:
             logger.error("[CRIANZA] Error calculando movimientos huevo: %s", e)
             return []
-
+ 
     def _calcular_pasos_necesarios(self, especie_id: int) -> int:
         """Pasos según grupo de huevo de la especie."""
         if especie_id in PASOS_ESPECIALES:
             return PASOS_ESPECIALES[especie_id]
         grupos = GRUPOS_HUEVOS.get(especie_id, ["Field"])
-        return PASOS_POR_GRUPO.get(grupos[0], 5120)
-
+        return PASOS_POR_GRUPO.get(grupos[0], 1280)
+ 
     def _obtener_nombre_especie(self, especie_id: int) -> str:
         try:
             from pokemon.services.pokedex_service import pokedex_service
             return pokedex_service.obtener_nombre(especie_id)
         except Exception:
             return f"Pokémon #{especie_id}"
-
+ 
     # ══════════════════════════════════════════════
     # CONSULTAS
     # ══════════════════════════════════════════════
-
+ 
     def obtener_huevos_usuario(self, user_id: int) -> List[Dict]:
         """
         Huevos pendientes del usuario con progreso calculado.
-
+ 
         Usa pasos_actuales (por huevo) en vez del sistema de offsets global.
         """
         try:
@@ -1730,7 +1680,7 @@ class CrianzaService:
         except Exception as e:
             logger.error(f"❌ Error obteniendo huevos: {e}")
             return []
-
+ 
     
 # Instancia global
 crianza_service = CrianzaService()

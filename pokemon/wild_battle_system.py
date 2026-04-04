@@ -144,6 +144,13 @@ CATCH_RATE_LEGENDARIOS_OVERRIDE: dict[int, int] = {
     1007: 3, 1008: 3,                      # Koraidon/Miraidon
 }
 
+# IDs de Ultra Entes (Gen 7). La Beast Ball da 5× a estos y 0.1× al resto.
+# Fuente: Bulbapedia — "Ultra Beast"
+_ULTRA_BEAST_IDS: frozenset[int] = frozenset({
+    793, 794, 795, 796, 797, 798, 799, 800,  # Nihilego … Stakataka (Gen 7 originals)
+    803, 804, 805, 806,                        # Poipole, Naganadel, Stakataka, Blacephalon
+})
+
 # ── Timer Ball: fórmula oficial Gen 6+ ───────────────────────────────────────
 def _timer_ball_bonus(turn_number: int) -> float:
     """
@@ -214,6 +221,12 @@ def _calcular_ball_ratio(
         hora = datetime.datetime.now().hour
         return 3.5 if (hora >= 20 or hora < 6) else 1.0
 
+    # ── Beast Ball: 5× vs Ultra Entes, 0.1× vs cualquier otro ───────────────
+    if condicion == "ultraente":
+        if wild.pokemon_id in _ULTRA_BEAST_IDS:
+            return 5.0
+        return 0.1   # penalización oficial vs Pokémon normales
+ 
     # ── Cualquier otra condición: devolver base_ratio ─────────────────────────
     # Cubre diveball (agua), noche_cueva, etc.
     return base_ratio
@@ -1741,7 +1754,15 @@ class WildBattleManager:
             self._cancel_turn_timer(battle)
 
             wild      = battle.wild_pokemon
+            # Obtener datos del ítem con fallback a items_database_complete.
+            # Necesario para balls como beastball que solo están en esa BD.
             item_data = items_service.obtener_item(pokeball_nombre) or {}
+            if not item_data:
+                try:
+                    from pokemon.items_database_complete import obtener_item_info as _get_ball_info
+                    item_data = _get_ball_info(pokeball_nombre) or {}
+                except Exception:
+                    pass
             condicion = item_data.get("condicion", "")
 
             # ── 1. Ball multiplier ────────────────────────────────────────────────

@@ -161,7 +161,9 @@ class PvPSide:
     confusion_turns:  int = 0       # ← NUEVO
     leechseeded:      bool = False   # ← NUEVO
     # Mensajes de Telegram
-    dm_message_id:    Optional[int] = None   # panel en DM
+    dm_message_id:       Optional[int] = None   # panel de texto con botones
+    sprite_message_id:   Optional[int] = None   # foto del sprite rival (se edita al cambiar)
+    last_sprite_rival_pid: Optional[int] = None  # ID del rival mostrado en el sprite
     # Acción elegida este turno (None = aún no eligió)
     pending_action:   Optional[dict] = None  # {"type":"move"|"switch","value":str|int}
     action_timer:     Optional[threading.Timer] = field(default=None, repr=False)
@@ -1485,6 +1487,75 @@ class PvPManager:
         except Exception:
             return f"User {user_id}"
 
+    # ── Sprites estáticos ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _get_static_sprite_url(pokemon_id: int, shiny: bool = False) -> str:
+        """
+        Devuelve la URL del sprite estático PNG de PokeAPI.
+        Se prefiere estático (no GIF) para no saturar el historial del DM.
+        """
+        base = "https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites/pokemon"
+        if shiny:
+            return f"{base}/shiny/{pokemon_id}.png"
+        return f"{base}/{pokemon_id}.png"
+
+    def _send_or_update_sprite(
+        self,
+        side: "PvPSide",
+        rival_side: "PvPSide",
+        bot,
+    ) -> None:
+        """
+        Envía o edita el mensaje de sprite para `side`.
+        Muestra el sprite frontal estático del Pokémon activo rival.
+        Si el sprite ya está enviado y corresponde al mismo Pokémon, no hace nada
+        (evita reenvíos innecesarios que llenarían el historial del DM).
+        """
+        rival_p = rival_side.get_active_pokemon()
+        if not rival_p:
+            return
+
+        rival_pid   = rival_p.pokemonID
+        rival_shiny = getattr(rival_p, "shiny", False)
+        rival_name  = rival_p.mote or rival_p.nombre
+        sprite_url  = self._get_static_sprite_url(rival_pid, rival_shiny)
+        caption     = f"🔴 <b>{rival_name}</b>{'  ✨' if rival_shiny else ''}"
+
+        # Si ya está enviado y es el mismo Pokémon, no hacer nada
+        if (side.sprite_message_id is not None
+                and side.last_sprite_rival_pid == rival_pid):
+            return
+
+        # ── Actualizar sprite existente (edit_message_media) ──────────────────
+        if side.sprite_message_id is not None:
+            try:
+                from telebot.types import InputMediaPhoto
+                bot.edit_message_media(
+                    media      = InputMediaPhoto(sprite_url, caption=caption,
+                                                 parse_mode="HTML"),
+                    chat_id    = side.user_id,
+                    message_id = side.sprite_message_id,
+                )
+                side.last_sprite_rival_pid = rival_pid
+                return
+            except Exception as exc:
+                logger.warning(f"[PVP] No se pudo editar sprite {side.user_id}: {exc}")
+                # Fallthrough: intentar enviar uno nuevo
+
+        # ── Primera vez: enviar foto ───────────────────────────────────────────
+        try:
+            msg = bot.send_photo(
+                side.user_id,
+                sprite_url,
+                caption    = caption,
+                parse_mode = "HTML",
+            )
+            side.sprite_message_id     = msg.message_id
+            side.last_sprite_rival_pid = rival_pid
+        except Exception as exc:
+            logger.warning(f"[PVP] No se pudo enviar sprite {side.user_id}: {exc}")
+
     # ── Sub-menú de ataques ───────────────────────────────────────────────────
 
     def handle_fight_action(self, user_id: int, bot) -> bool:
@@ -1739,7 +1810,26 @@ class PvPManager:
         return mk
 
     def _build_battle_panel(self, battle: PvPBattle, viewer_side: PvPSide) -> str:
-        from pokemon.battle_ui import build_pokemon_line, build_field_status_line
+        """
+        Construye el texto del panel de batalla PvP.
+
+        Layout (de arriba a abajo):
+          🔴 Rival  🔥Fuego/💧Agua  Nv.50
+             HP: [barra] X/Y
+             🔥 Quemado  +2Atk
+          💊 Rivales en pie: N  |  [campo si aplica]
+          ───────────── (sprites en mensaje separado) ─────────────
+             ⚡ Paralizado
+             HP: [barra] X/Y
+          🔵 Mi Pokémon  ⚡Elec  Nv.50
+
+          📋 Turno N: ...
+          💡 Tu turno — ¿Qué harás?
+        """
+        from pokemon.battle_ui import (
+            build_field_status_line, hp_bar, stages_str,
+            TYPE_EMOJI, STATUS_NOMBRES,
+        )
         from pokemon.services.pokedex_service import pokedex_service as _pdx_svc
 
         own   = viewer_side
@@ -1756,11 +1846,46 @@ class PvPManager:
 
         rival_username = self._get_username(rival.user_id) if rival else "?"
 
-        # ── Estado del campo (clima, terreno, salas, hazards) ──────────────────
-        _fl_txt    = build_field_status_line(battle)
-        field_line = (_fl_txt + "\n") if _fl_txt else ""
+        # ── Helper: tipos con emojis ───────────────────────────────────────────
+        def _tipos_str(tipos: list) -> str:
+            return " / ".join(
+                f"{TYPE_EMOJI.get(t, '⚪')}{t}" for t in tipos
+            )
 
-        # ── Pokémon restantes del rival (sin contar el activo) ─────────────────
+        # ── Helper: status + stages en una línea ──────────────────────────────
+        def _state_line(status: Optional[str], stages: dict) -> str:
+            parts = []
+            if status:
+                parts.append(STATUS_NOMBRES.get(status, status))
+            boosts = stages_str(stages)
+            if boosts:
+                parts.append(boosts)
+            return ("   " + "  ".join(parts)) if parts else ""
+
+        # ── Datos rival ───────────────────────────────────────────────────────
+        r_name  = (rival_p.mote or rival_p.nombre) if rival_p else "?"
+        r_sexo  = {"M": " ♂", "F": " ♀"}.get(
+            getattr(rival_p, "sexo", None) or "", ""
+        ) if rival_p else ""
+        r_nivel = rival_p.nivel  if rival_p else 0
+        r_hp    = rival_p.hp_actual if rival_p else 0
+        r_bar   = hp_bar(r_hp, rival_max)
+        r_state = _state_line(
+            rival.status if rival else None,
+            rival.stat_stages if rival else {},
+        )
+
+        # ── Datos propios ─────────────────────────────────────────────────────
+        o_name  = (own_p.mote or own_p.nombre) if own_p else "?"
+        o_sexo  = {"M": " ♂", "F": " ♀"}.get(
+            getattr(own_p, "sexo", None) or "", ""
+        ) if own_p else ""
+        o_nivel = own_p.nivel  if own_p else 0
+        o_hp    = own_p.hp_actual if own_p else 0
+        o_bar   = hp_bar(o_hp, own_max)
+        o_state = _state_line(own.status, own.stat_stages)
+
+        # ── Pokémon rivales en pie (sin contar el activo) ─────────────────────
         rival_restantes = 0
         if rival:
             for pid in rival.pokemon_ids:
@@ -1768,30 +1893,9 @@ class PvPManager:
                 if p and p.hp_actual > 0 and pid != (rival_p.id_unico if rival_p else -1):
                     rival_restantes += 1
 
-        # ── Líneas de Pokémon (mismo formato que gym) ─────────────────────────
-        rival_line = build_pokemon_line(
-            lado      = "🔴",
-            nombre    = (rival_p.mote or rival_p.nombre) if rival_p else "?",
-            sexo      = getattr(rival_p, "sexo", None)   if rival_p else None,
-            tipos     = rival_tipos,
-            nivel     = rival_p.nivel if rival_p else 0,
-            hp_actual = rival_p.hp_actual if rival_p else 0,
-            hp_max    = rival_max,
-            status    = rival.status if rival else None,
-            stages    = rival.stat_stages if rival else {},
-        )
-
-        own_line = build_pokemon_line(
-            lado      = "🔵",
-            nombre    = (own_p.mote or own_p.nombre) if own_p else "?",
-            sexo      = getattr(own_p, "sexo", None) if own_p else None,
-            tipos     = own_tipos,
-            nivel     = own_p.nivel if own_p else 0,
-            hp_actual = own_p.hp_actual if own_p else 0,
-            hp_max    = own_max,
-            status    = own.status,
-            stages    = own.stat_stages,
-        )
+        # ── Campo de batalla ──────────────────────────────────────────────────
+        _fl_txt    = build_field_status_line(battle)
+        field_part = (f"  {_fl_txt}") if _fl_txt else ""
 
         # ── Log de turnos recientes ────────────────────────────────────────────
         log_txt = ""
@@ -1804,17 +1908,50 @@ class PvPManager:
             log_texto = "\n─\n".join(entradas)
             log_txt   = f"\n\n{encabezado}\n{log_texto}"
 
-        return (
-            f"⚔️ <b>BATALLA PvP {battle.fmt.value}</b>\n"
-            f"👤 Rival: <b>{rival_username}</b>\n"
-            f"{field_line}"
-            f"\n"
-            f"{rival_line}\n"
-            f"💊 Pokémon restantes rival: {rival_restantes}\n\n"
-            f"{own_line}"
-            f"{log_txt}\n\n"
-            f"💡 <b>Tu turno</b> — ¿Qué harás?"
+        # ── Construir texto (rival arriba, propio abajo) ───────────────────────
+        lines: list = []
+
+        # Cabecera
+        lines.append(
+            f"⚔️ <b>PvP {battle.fmt.value}</b>  "
+            f"T{battle.turn_number}  |  🆚 <b>{rival_username}</b>"
         )
+        if field_part:
+            lines.append(field_part)
+        lines.append("")
+
+        # ── RIVAL (arriba) ────────────────────────────────────────────────────
+        lines.append(
+            f"🔴 <b>{r_name}</b>{r_sexo}  "
+            f"{_tipos_str(rival_tipos)}  Nv.{r_nivel}"
+        )
+        lines.append(f"   HP: {r_bar} {r_hp}/{rival_max}")
+        if r_state:
+            lines.append(r_state)
+        lines.append(
+            f"   💊 Rivales en pie: {rival_restantes + 1}"
+            f"  (quedan {rival_restantes} tras este)"
+        )
+
+        # Separador — el sprite rival está en el mensaje de foto de arriba
+        lines.append("━━━━━━━━━━━━━━━")
+
+        # ── PROPIO (abajo, orden invertido: estado→HP→nombre) ─────────────────
+        if o_state:
+            lines.append(o_state)
+        lines.append(f"   HP: {o_bar} {o_hp}/{own_max}")
+        lines.append(
+            f"🔵 <b>{o_name}</b>{o_sexo}  "
+            f"{_tipos_str(own_tipos)}  Nv.{o_nivel}"
+        )
+
+        # Log y CTA
+        if log_txt:
+            lines.append(log_txt)
+        lines.append("")
+        lines.append("💡 <b>Tu turno</b> — ¿Qué harás?")
+
+        return "\n".join(lines)
 
     def _build_battle_markup(
         self, battle: "PvPBattle", viewer_side: "PvPSide"
@@ -1869,14 +2006,12 @@ class PvPManager:
         """
         Envía el panel inicial de batalla a ambos jugadores por DM.
 
-        Retorna True únicamente si AMBOS paneles se enviaron con éxito.
-        Si falla alguno:
-          • Error «Forbidden» / «chat not found» → el usuario no abrió DM.
-          • Cualquier otro error                 → bug de código (se loguea
-            con traceback completo para facilitar el diagnóstico).
+        Orden por jugador:
+          1. Foto estática del sprite rival (sprite_message_id) — sin botones.
+          2. Texto del panel con botones (dm_message_id).
 
-        En ambos casos se restauran los stats previamente escalados y se
-        limpia el estado de la batalla para no dejar la BD corrompida.
+        Retorna True únicamente si AMBOS paneles se enviaron con éxito.
+        Si falla alguno restaura los stats y limpia el estado de la batalla.
         """
         _FORBIDDEN_KEYWORDS = (
             "forbidden", "chat not found", "bot was blocked",
@@ -1886,7 +2021,13 @@ class PvPManager:
         failed_users: list = []   # [(user_id, err_str, is_dm_error)]
 
         for side in (battle.side1, battle.side2):
+            rival_side = battle.get_opponent_side(side.user_id)
             try:
+                # ── 1. Enviar sprite del rival (foto sin botones) ──────────────
+                if rival_side:
+                    self._send_or_update_sprite(side, rival_side, bot)
+
+                # ── 2. Enviar panel de texto con botones ───────────────────────
                 txt = self._build_battle_panel(battle, side)
                 mk  = self._build_battle_markup(battle, side)
                 msg = bot.send_message(
@@ -1898,15 +2039,14 @@ class PvPManager:
                 logger.info(f"[PVP] Panel enviado a {side.user_id}")
 
             except Exception as exc:
-                err_str    = str(exc)
-                is_dm_err  = any(kw in err_str.lower() for kw in _FORBIDDEN_KEYWORDS)
+                err_str   = str(exc)
+                is_dm_err = any(kw in err_str.lower() for kw in _FORBIDDEN_KEYWORDS)
 
                 if is_dm_err:
                     logger.warning(
                         f"[PVP] Usuario {side.user_id} no tiene DM abierto: {exc}"
                     )
                 else:
-                    # Error de código: loguear con traceback completo.
                     logger.error(
                         f"[PVP] Error de código enviando panel a {side.user_id}: {exc}",
                         exc_info=True,
@@ -1915,10 +2055,8 @@ class PvPManager:
 
         if not failed_users:
             return True  # ✅ Ambos paneles enviados correctamente.
-        
+
         # ── FIX-2: Restaurar stats antes de cancelar ──────────────────────────
-        # _escalar_equipo_pvp ya fue llamado; si no restauramos aquí los Pokémon
-        # quedarían permanentemente a nivel 50 en la BD.
         self._restaurar_equipo_pvp(battle)
         logger.info(
             f"[PVP] Stats restauradas (cancelación temprana) "
@@ -1946,8 +2084,8 @@ class PvPManager:
                     pass
 
         # Construir aviso para el grupo.
-        has_dm_errors    = any(e[2] for e in failed_users)
-        has_code_errors  = any(not e[2] for e in failed_users)
+        has_dm_errors   = any(e[2] for e in failed_users)
+        has_code_errors = any(not e[2] for e in failed_users)
         aviso_lines: list = ["⚠️ <b>Batalla PvP cancelada</b>"]
 
         if has_dm_errors:
@@ -1987,8 +2125,13 @@ class PvPManager:
         return False
 
     def _update_panels(self, battle: PvPBattle, bot, extra_log: Optional[List[str]] = None):
-        """Edita los paneles de ambos jugadores. El extra_log se guarda en battle.battle_log."""
-        # Acumular el log del turno en el historial (lo muestra _build_battle_panel)
+        """
+        Edita los paneles de texto de ambos jugadores.
+        Si el Pokémon rival activo cambió desde el último sprite enviado,
+        edita también la foto de sprite (sin reenviar, para no llenar el DM).
+        El extra_log se acumula en battle.battle_log antes de reconstruir el panel.
+        """
+        # Acumular log del turno en el historial
         if extra_log:
             combined = "".join(extra_log).strip()
             if combined:
@@ -1997,7 +2140,13 @@ class PvPManager:
                     battle.battle_log = battle.battle_log[-5:]
 
         for side in (battle.side1, battle.side2):
+            rival_side = battle.get_opponent_side(side.user_id)
             try:
+                # Actualizar sprite rival si cambió el Pokémon activo
+                if rival_side:
+                    self._send_or_update_sprite(side, rival_side, bot)
+
+                # Actualizar texto del panel
                 txt = self._build_battle_panel(battle, side)
                 mk  = self._build_battle_markup(battle, side)
                 if side.dm_message_id:
@@ -2016,7 +2165,8 @@ class PvPManager:
                     )
                     side.dm_message_id = msg.message_id
             except Exception as e:
-                logger.warning(f"[PVP] No se pudo actualizar panel {side.user_id}: {e}")
+                if "message is not modified" not in str(e):
+                    logger.warning(f"[PVP] No se pudo actualizar panel {side.user_id}: {e}")
 
     # ──────────────────────────────────────────────────────────────────────────
     # BROADCAST EN GRUPO (PokeClub)
@@ -2085,10 +2235,10 @@ class PvPManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _end_battle(self, battle: PvPBattle, winner_id: int, bot, turn_log: list):
-        """Cierra la batalla, actualiza MMR y notifica."""
-        # ── Restaurar HP y stats originales (PvP no consume recursos) ────────────
+        """Cierra la batalla, actualiza MMR y notifica con el log completo del último turno."""
+        # ── Restaurar HP y stats originales (PvP no consume recursos) ─────────
         self._restaurar_equipo_pvp(battle)
-        battle.state    = PvPState.FINISHED
+        battle.state     = PvPState.FINISHED
         battle.winner_id = winner_id
         self._cancel_turn_timers(battle)
 
@@ -2102,21 +2252,38 @@ class PvPManager:
 
         turn_log.append(f"\n🏆 ¡<b>{w_name}</b> ganó la batalla!\n")
 
-        # Actualizar MMR (lógica ELO absorbida aquí — no depende de pvp_system)
+        # Actualizar MMR
         try:
             self._actualizar_mmr(winner_id, loser_id, battle.fmt.value)
         except Exception as _e:
             logger.warning(f"[PVP] No se pudo actualizar MMR: {_e}")
 
-        # Curar Pokémon del perdedor al 50% (opcional QoL)
-        # (no implementado aquí para no asumir política de juego)
+        # ── Guardar el log del último turno en el historial ────────────────────
+        combined_log = "".join(turn_log).strip()
+        if combined_log:
+            battle.battle_log.append(combined_log)
+            if len(battle.battle_log) > 5:
+                battle.battle_log = battle.battle_log[-5:]
 
-        # Notificar a ambos jugadores
-        result_txt = f"{'🏆' if winner_id == battle.side1.user_id else '💀'} ¡{w_name} ganó!\n"
+        # ── Notificar a ambos jugadores con el log del último turno ────────────
+        # El texto del último turno se muestra para que los jugadores vean
+        # exactamente qué movimiento/daño determinó el resultado.
+        last_turn_txt = "".join(turn_log[-10:])  # últimas 10 entradas del log
+
         for side in (battle.side1, battle.side2):
             try:
-                role = "🏆 ¡Ganaste!" if side.user_id == winner_id else "💀 Perdiste..."
-                txt  = f"{role}\n\n<b>Batalla terminada</b>\n{result_txt}"
+                role = "🏆 <b>¡Ganaste!</b>" if side.user_id == winner_id else "💀 <b>Perdiste...</b>"
+                txt  = (
+                    f"{role}\n\n"
+                    f"<b>Batalla terminada — {battle.fmt.value}</b>\n"
+                    f"Ganador: <b>{w_name}</b>\n"
+                    f"━━━━━━━━━━━━━━━\n"
+                    f"📋 <b>Último turno:</b>\n{last_turn_txt}"
+                )
+                # Recortar si es demasiado largo para Telegram (4096 chars)
+                if len(txt) > 3800:
+                    txt = txt[:3800] + "\n<i>…(log recortado)</i>"
+
                 if side.dm_message_id:
                     bot.edit_message_text(
                         txt,
@@ -2127,8 +2294,8 @@ class PvPManager:
                     )
                 else:
                     bot.send_message(side.user_id, txt, parse_mode="HTML")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(f"[PVP] Error notificando resultado a {side.user_id}: {exc}")
 
         # Actualizar broadcast
         self._update_group_broadcast(battle, bot, turn_log)

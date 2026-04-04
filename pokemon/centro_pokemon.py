@@ -3,7 +3,8 @@
 Centro Pokémon
 ==============
 El costo de curación se importa desde config.py (COSTO_CENTRO_POKEMON),
-permitiendo ajustarlo sin tocar la lógica de negocio.
+ahora representa el costo POR POKÉMON curado (no tarifa plana).
+Ejemplo: curar 3 Pokémon heridos = 3 × 10 = 30 cosmos.
 """
 
 import logging
@@ -19,25 +20,22 @@ logger = logging.getLogger(__name__)
 class CentroPokemon:
     """Centro Pokémon para curar el equipo completo."""
 
-    # Costo leído de config.py para facilitar ajustes sin editar este archivo.
-    COSTO_CURACION: int = COSTO_CENTRO_POKEMON
+    # Costo POR Pokémon curado (leído de config.py).
+    # Curar 1 Pokémon = COSTO_POR_POKEMON cosmos.
+    # Curar 6 Pokémon = 6 × COSTO_POR_POKEMON cosmos.
+    COSTO_POR_POKEMON: int = COSTO_CENTRO_POKEMON
 
     @staticmethod
     def curar_equipo(user_id: int) -> Tuple[bool, str]:
         try:
             from database import db_manager
 
-            # 1. Verificar saldo
-            saldo = economy_service.get_balance(user_id)
-            if saldo is None or saldo < CentroPokemon.COSTO_CURACION:
-                return False, "¡No tienes dinero suficiente para que te atendamos!"
-
-            # 2. Obtener equipo
+            # 1. Obtener equipo
             equipo = pokemon_service.obtener_equipo(user_id)
             if not equipo:
                 return False, "❌ No tienes Pokémon en tu equipo."
 
-            # 3. ¿Necesitan curación? Usar stats reales con naturaleza
+            # 2. ¿Necesitan curación? Usar stats reales con naturaleza
             from pokemon.services.pokedex_service import pokedex_service
 
             necesitan = []
@@ -51,14 +49,28 @@ class CentroPokemon:
             if not necesitan:
                 return False, "ℹ️ Tus Pokémon ya están completamente curados."
 
-            # 4. Descontar cosmos
+            # 3. Calcular costo total: COSTO_POR_POKEMON cosmos × Pokémon a curar
+            costo_total = len(necesitan) * CentroPokemon.COSTO_POR_POKEMON
+
+            # 4. Verificar saldo
+            saldo = economy_service.get_balance(user_id)
+            if saldo is None or saldo < costo_total:
+                return False, (
+                    f"¡No tienes cosmos suficientes para la curación!\n\n"
+                    f"💊 Pokémon a curar: <b>{len(necesitan)}</b>\n"
+                    f"💰 Costo total: <b>{costo_total} cosmos</b> "
+                    f"({CentroPokemon.COSTO_POR_POKEMON} × {len(necesitan)})\n"
+                    f"💳 Tienes: <b>{saldo or 0} cosmos</b>"
+                )
+
+            # 5. Descontar cosmos
             ok = economy_service.subtract_credits(
-                user_id, CentroPokemon.COSTO_CURACION, "Centro Pokémon"
+                user_id, costo_total, "Centro Pokémon"
             )
             if not ok:
                 return False, "❌ Error al descontar cosmos. Intenta de nuevo."
 
-            # 5. Curar HP
+            # 6. Curar HP
             curados = 0
             for poke, hp_max in necesitan:
                 db_manager.execute_update(
@@ -67,7 +79,7 @@ class CentroPokemon:
                 )
                 curados += 1
 
-            # 6. Restaurar PP
+            # 7. Restaurar PP
             try:
                 from pokemon.services.pp_service import pp_service
                 for poke in equipo:
@@ -84,14 +96,15 @@ class CentroPokemon:
 
             logger.info(
                 f"[CENTRO] Usuario {user_id} curó {curados} Pokémon "
-                f"(−{CentroPokemon.COSTO_CURACION} cosmos)"
+                f"(−{costo_total} cosmos)"
             )
 
             return True, (
                 f"✨ <b>¡Equipo curado!</b>\n\n"
                 f"💚 {curados} Pokémon restaurados\n"
                 f"💧 PP restaurados al máximo\n"
-                f"💰 Pagaste <b>{CentroPokemon.COSTO_CURACION}</b> cosmos\n\n"
+                f"💰 Pagaste <b>{costo_total} cosmos</b> "
+                f"({CentroPokemon.COSTO_POR_POKEMON} × {curados})\n\n"
                 "¡Tus Pokémon están listos para combatir!"
             )
 
