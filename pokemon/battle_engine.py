@@ -189,9 +189,15 @@ class BattleUtils:
         return max(1, int(base_stat * stage_multiplier(stage)))
 
     @staticmethod
-    def effective_speed(base_speed: int, stage: int) -> float:
-        """Velocidad efectiva con etapa aplicada."""
-        return base_speed * stage_multiplier(stage)
+    def effective_speed(base_speed: int, stage: int, status: Optional[str] = None) -> float:
+        """
+        Velocidad efectiva con etapa aplicada y penalización de parálisis.
+        Parálisis (Gen 7+): -50% sobre la velocidad ya modificada por stages.
+        """
+        vel = base_speed * stage_multiplier(stage)
+        if status == "par":
+            vel *= 0.5
+        return vel
     
     @staticmethod
     def calculate_flee_chance(
@@ -428,28 +434,22 @@ def determine_turn_order(
     stages_b: int,
     priority_a: int = 0,
     priority_b: int = 0,
+    status_a: Optional[str] = None,
+    status_b: Optional[str] = None,
 ) -> bool:
     """
     Determina si el bando A actúa primero en el turno.
 
     Considera:
       1. Prioridad del movimiento (Ataque Rápido = 1, etc.).
-      2. Velocidad efectiva con etapas aplicadas.
+      2. Velocidad efectiva con etapas aplicadas y parálisis (-50%).
       3. Empate exacto → aleatorio (50 / 50).
-
-    Args:
-        speed_a / speed_b: Stat de velocidad base de cada bando.
-        stages_a / stages_b: Etapa de velocidad de cada bando.
-        priority_a / priority_b: Prioridad del movimiento elegido.
-
-    Returns:
-        True si el bando A va primero, False si va el bando B.
     """
     if priority_a != priority_b:
         return priority_a > priority_b
 
-    eff_a = BattleUtils.effective_speed(speed_a, stages_a)
-    eff_b = BattleUtils.effective_speed(speed_b, stages_b)
+    eff_a = BattleUtils.effective_speed(speed_a, stages_a, status_a)
+    eff_b = BattleUtils.effective_speed(speed_b, stages_b, status_b)
 
     if eff_a == eff_b:
         return random.random() < 0.5

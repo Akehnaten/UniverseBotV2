@@ -327,40 +327,32 @@ class MovimientosService:
             return None
 
     def _cargar_learnset_region(self, pokemon_id: int, nombre_norm: str = "") -> Optional[Dict]:
-        """Intenta cargar el learnset desde el archivo regional correspondiente."""
-        try:
-            if pokemon_id <= 386:
-                archivo = self.learnsets_archivos["GEN3"]
-            elif pokemon_id <= 493:
-                archivo = self.learnsets_archivos["SINNOH"]
-            elif pokemon_id <= 649:
-                archivo = self.learnsets_archivos["TESELIA"]
-            elif pokemon_id <= 721:
-                archivo = self.learnsets_archivos["KALOS"]
-            elif pokemon_id <= 809:
-                archivo = self.learnsets_archivos["ALOLA"]
-            else:
-                return None
-
-            if not archivo.exists():
-                logger.debug(f"[LEARNSET] Archivo regional no encontrado: {archivo}")
-                return None
-
-            with open(archivo, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-
-            entry = self._buscar_en_data(data, pokemon_id, nombre_norm)
-            if entry is None:
-                return None
-
-            result = self._parsear_entry(entry)
-            if result:
-                logger.debug(f"[LEARNSET] Regional: Pokémon {pokemon_id} ({nombre_norm}) → {len(result)} niveles")
-            return result
-
-        except Exception as e:
-            logger.debug(f"[LEARNSET] Error regional para {pokemon_id}: {e}")
-            return None
+        """
+        Busca en archivos regionales de más reciente a más antigua:
+        ALOLA (Gen7) → KALOS (Gen6) → TESELIA (Gen5) → SINNOH (Gen4) → GEN3.
+        Retorna el primer hit encontrado.
+        """
+        orden_archivos = ["ALOLA", "KALOS", "TESELIA", "SINNOH", "GEN3"]
+        for clave in orden_archivos:
+            archivo = self.learnsets_archivos.get(clave)
+            if not archivo or not archivo.exists():
+                continue
+            try:
+                with open(archivo, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                entry = self._buscar_en_data(data, pokemon_id, nombre_norm)
+                if entry is None:
+                    continue
+                result = self._parsear_entry(entry)
+                if result:
+                    logger.debug(
+                        f"[LEARNSET] Regional {clave}: "
+                        f"Pokémon #{pokemon_id} ({nombre_norm}) → {len(result)} niveles"
+                    )
+                    return result
+            except Exception as e:
+                logger.debug(f"[LEARNSET] Error leyendo {clave} para #{pokemon_id}: {e}")
+        return None
 
     def _obtener_cadena_preevolutiva(self, pokemon_id: int) -> List[int]:
         """
@@ -394,34 +386,8 @@ class MovimientosService:
         return candidatos
 
     def _cargar_learnset_region_por_id(self, pokemon_id: int, nombre_norm: str = "") -> Optional[Dict]:
-        """
-        Igual que _cargar_learnset_region pero acepta un ID arbitrario y prueba
-        TODOS los archivos regionales desde el más reciente al más antiguo,
-        en lugar de seleccionar uno solo por rango de ID.
-        Útil para el fallback generacional.
-        """
-        # Orden: de gen más reciente (ALOLA=Gen7) a más antigua (GEN3=Gen3)
-        orden_archivos = ["ALOLA", "KALOS", "TESELIA", "SINNOH", "GEN3"]
-        for clave in orden_archivos:
-            archivo = self.learnsets_archivos.get(clave)
-            if not archivo or not archivo.exists():
-                continue
-            try:
-                with open(archivo, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                entry = self._buscar_en_data(data, pokemon_id, nombre_norm)
-                if entry is None:
-                    continue
-                result = self._parsear_entry(entry)
-                if result:
-                    logger.debug(
-                        f"[LEARNSET] Fallback regional {clave}: "
-                        f"Pokémon #{pokemon_id} ({nombre_norm}) → {len(result)} niveles"
-                    )
-                    return result
-            except Exception as e:
-                logger.debug(f"[LEARNSET] Error leyendo {clave} para #{pokemon_id}: {e}")
-        return None
+        """Alias de _cargar_learnset_region. Mantenido por compatibilidad."""
+        return self._cargar_learnset_region(pokemon_id, nombre_norm)
 
     def obtener_learnset(self, pokemon_id: int) -> Dict[int, List[str]]:
         """

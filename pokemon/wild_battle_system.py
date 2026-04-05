@@ -2443,21 +2443,6 @@ class WildBattleManager:
             logger.error(f"Error en _handle_capture_success: {e}", exc_info=True)
             return False
     
-    @staticmethod
-    def _vel_efectiva(base_vel: int, stage: int) -> float:
-        """
-        Velocidad real de combate aplicando la etapa de stat (-6 a +6).
-
-        Multiplicadores oficiales:
-          -6 → ×0.25 | -3 → ×0.40 | 0 → ×1.0 | +3 → ×2.5 | +6 → ×4.0
-        """
-        mult = {
-            -6: 2/8, -5: 2/7, -4: 2/6, -3: 2/5, -2: 2/4, -1: 2/3,
-             0: 1.0,
-             1: 3/2,  2: 4/2,  3: 5/2,  4: 6/2,  5: 7/2,  6: 8/2,
-        }.get(max(-6, min(6, stage)), 1.0)
-        return base_vel * mult
-    
     def execute_move(self, user_id: int, move_name: str, bot) -> bool:
         """
         Ejecuta el turno del jugador con orden de ataque basado en velocidad.
@@ -2541,13 +2526,15 @@ class WildBattleManager:
             _pp_service.usar_pp(battle.player_pokemon_id, move_name)
 
             # ── Determinar orden por velocidad efectiva ───────────────────────
-            player_vel = self._vel_efectiva(
+            player_vel = BattleUtils.effective_speed(
                 player_pokemon.stats.get("vel", 50),
                 battle.player_stat_stages.get("vel", 0),
+                battle.player_status,
             )
-            wild_vel = self._vel_efectiva(
+            wild_vel = BattleUtils.effective_speed(
                 wild.stats.get("vel", 50),
                 battle.wild_stat_stages.get("vel", 0),
+                battle.wild_status,
             )
 
             if player_vel == wild_vel:

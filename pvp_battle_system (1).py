@@ -928,12 +928,10 @@ class PvPManager:
             spd1 = BattleUtils.effective_speed(
                 p1.stats.get("vel", 50) if p1 else 50,
                 s1.stat_stages.get("vel", 0),
-                s1.status,
             ) if p1 else 0
             spd2 = BattleUtils.effective_speed(
                 p2.stats.get("vel", 50) if p2 else 50,
                 s2.stat_stages.get("vel", 0),
-                s2.status,
             ) if p2 else 0
 
             trick_room = getattr(battle, "trick_room", False)
@@ -1891,21 +1889,15 @@ class PvPManager:
         _fl_txt    = build_field_status_line(battle)
         field_line = (_fl_txt + "\n") if _fl_txt else ""
 
-        # ── Conteo de Pokémon vivos del rival ─────────────────────────────────
-        # rival_en_pie:     total con HP > 0 (incluye el activo)
-        # rival_en_reserva: los que quedan en reserva (excluye el activo)
-        rival_en_pie     = 0
-        rival_en_reserva = 0
+        # ── Pokémon restantes del rival (sin contar el activo) ─────────────────
+        rival_restantes = 0
         if rival:
-            rival_activo_id = rival_p.id_unico if rival_p else -1
             for pid in rival.pokemon_ids:
                 p = pokemon_service.obtener_pokemon(pid)
-                if p and p.hp_actual > 0:
-                    rival_en_pie += 1
-                    if pid != rival_activo_id:
-                        rival_en_reserva += 1
+                if p and p.hp_actual > 0 and pid != (rival_p.id_unico if rival_p else -1):
+                    rival_restantes += 1
 
-        # ── Línea del rival ────────────────────────────────────────────────────
+        # ── Líneas de Pokémon (mismo formato que gym) ─────────────────────────
         rival_line = build_pokemon_line(
             lado      = "🔴",
             nombre    = (rival_p.mote or rival_p.nombre) if rival_p else "?",
@@ -1917,17 +1909,7 @@ class PvPManager:
             status    = rival.status if rival else None,
             stages    = rival.stat_stages if rival else {},
         )
-        # Contador de equipo rival integrado debajo del bloque del rival
-        reserva_txt = (
-            f"   💊 En pie: <b>{rival_en_pie}</b>"
-            + (
-                f"  ({rival_en_reserva} en reserva)"
-                if rival_en_reserva > 0
-                else "  (ninguno en reserva)"
-            )
-        )
 
-        # ── Línea propia ───────────────────────────────────────────────────────
         own_line = build_pokemon_line(
             lado      = "🔵",
             nombre    = (own_p.mote or own_p.nombre) if own_p else "?",
@@ -1957,7 +1939,7 @@ class PvPManager:
             f"{field_line}"
             f"\n"
             f"{rival_line}\n"
-            f"{reserva_txt}\n\n"
+            f"💊 Pokémon restantes rival: {rival_restantes}\n\n"
             f"{own_line}"
             f"{log_txt}\n\n"
             f"💡 <b>Tu turno</b> — ¿Qué harás?"

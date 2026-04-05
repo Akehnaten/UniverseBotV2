@@ -663,6 +663,8 @@ class GymBattleManager:
             stages_b  = battle.wild_stat_stages.get("vel", 0),
             priority_a= move_prio,
             priority_b= npc_move_prio,
+            status_a  = battle.player_status,
+            status_b  = battle.wild_status,
         )
         # Trick Room invierte la prioridad de velocidad
         if battle.trick_room:
