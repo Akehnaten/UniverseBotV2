@@ -66,6 +66,13 @@ from pokemon.battle_engine import (
     MOVE_NAMES_ES,
     # Adaptación al nuevo sistema
     UniversalSide,
+    # ── Peso, Magic Guard, Skill Link (añadidos en el fix de habilidades) ──
+    get_peso_pokemon,
+    calcular_poder_lowkick,
+    calcular_poder_heavyslam,
+    _LOWKICK_MOVES,
+    _HEAVYSLAM_MOVES,
+    tiene_magic_guard,
     apply_move, 
     apply_end_of_turn, 
     apply_entry_ability,
@@ -780,18 +787,21 @@ def _apply_residual_effects(battle, log: list) -> None:
     fx_b = result.side_b
     if player and fx_b.hp_delta != 0:
         # CRÍTICO: no curar ni dañar a un Pokémon ya debilitado (hp == 0).
-        # Si hp_delta > 0 y hp_actual == 0, el Pokémon está K.O. y no debe
-        # resucitarse con curación de campo de hierba o efectos similares.
         if player.hp_actual > 0 or fx_b.hp_delta < 0:
-            new_hp = max(0, min(p_max_hp, player.hp_actual + fx_b.hp_delta))
-            player.hp_actual = new_hp
-            try:
-                db_manager.execute_update(
-                    "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
-                    (new_hp, battle.player_pokemon_id),
-                )
-            except Exception as _e:
-                logger.error(f"Error residual HP jugador: {_e}")
+            # Magic Guard: el jugador es inmune a daño indirecto (veneno, clima…)
+            _player_hab = getattr(player, "habilidad", "") or ""
+            if fx_b.hp_delta < 0 and tiene_magic_guard(_player_hab):
+                pass  # daño indirecto bloqueado por Magic Guard
+            else:
+                new_hp = max(0, min(p_max_hp, player.hp_actual + fx_b.hp_delta))
+                player.hp_actual = new_hp
+                try:
+                    db_manager.execute_update(
+                        "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                        (new_hp, battle.player_pokemon_id),
+                    )
+                except Exception as _e:
+                    logger.error(f"Error residual HP jugador: {_e}")
     if player:
         battle.player_toxic_counter = fx_b.new_toxic_counter
         # Bostezo
@@ -1983,6 +1993,15 @@ class WildBattleManager:
                     battle.awaiting_forced_switch = True
                 return log
 
+            # ── Poder variable por peso (Low Kick / Heavy Slam del salvaje) ─────
+            if move_key_wild in _LOWKICK_MOVES:
+                _def_peso_p = get_peso_pokemon(player.pokemonID)
+                poder = calcular_poder_lowkick(_def_peso_p)
+            elif move_key_wild in _HEAVYSLAM_MOVES:
+                _atk_peso_w = get_peso_pokemon(wild.pokemon_id)
+                _def_peso_p = get_peso_pokemon(player.pokemonID)
+                poder = calcular_poder_heavyslam(_atk_peso_w, _def_peso_p)
+                
             # ── Movimiento de estado ──────────────────────────────────────
             if categoria == "Estado" or poder == 0:
                 p_name_local = player.mote or player.nombre
@@ -3176,6 +3195,18 @@ class WildBattleManager:
             apply_entry_abilities_ordered(p_side, w_side, battle, log)
             sync_player_side(p_side, battle, persist=False)
             sync_wild_side(w_side, battle.wild_pokemon, battle)
+            # ── Intimidación: baja Ataque del salvaje 1 etapa ─────────────────
+            if hab_str in ("intimidacion", "intimidation"):
+                wild_p = getattr(battle, "wild_pokemon", None)
+                if wild_p:
+                    _old_stg = battle.wild_stat_stages.get("atq", 0)
+                    battle.wild_stat_stages["atq"] = max(-6, _old_stg - 1)
+                    if battle.wild_stat_stages["atq"] < _old_stg:
+                        log.append(
+                            f"  😤 ¡<b>Intimidación</b> de {nombre} bajó el "
+                            f"Ataque de {wild_p.nombre}!\n"
+                        )
+
             if hab_str == "impostor":
                 wild_imp    = battle.wild_pokemon
                 hp_orig     = nuevo_p.hp_actual

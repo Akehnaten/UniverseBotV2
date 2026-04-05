@@ -1428,6 +1428,161 @@ def calcular_mult_habilidad(
 
     return 1.0, False
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TABLA DE PESOS (kg) por pokemonID — usada por Low Kick y Heavy Slam/Heat Crash
+# Solo se incluyen los más comunes; los que no aparecen usan un valor
+# genérico de 40 kg (rango medio en la fórmula oficial).
+# ─────────────────────────────────────────────────────────────────────────────
+_PESOS_POKEMON: dict[int, float] = {
+    # Gen 1
+    1: 6.9,   2: 13.0,  3: 100.0, 4: 8.5,   5: 19.0,  6: 90.5,
+    7: 9.0,   8: 22.5,  9: 85.5,  10: 2.9,  11: 9.9,  12: 32.0,
+    13: 3.4,  14: 10.0, 15: 65.0, 16: 1.8,  17: 30.0, 18: 39.5,
+    19: 3.5,  20: 18.5, 25: 6.0,  26: 30.0, 39: 10.0, 40: 40.0,
+    52: 4.2,  53: 32.0, 74: 20.0, 75: 105.0,76: 400.0,
+    79: 36.0, 80: 175.0,81: 5.5,  82: 60.0, 95: 210.0,96: 36.0,
+    97: 76.5, 104:6.5,  105:45.0, 106:50.6, 107:50.2, 108:115.0,
+    109:1.0,  110:9.5,  111:100.0,112:180.0,113:76.0, 114:3.3,
+    115:80.0, 116:0.9,  117:8.0,  118:15.0, 119:39.0, 120:76.0,
+    121:80.0, 122:28.0, 123:56.0, 124:48.0, 125:30.0, 126:28.0,
+    127:55.0, 128:88.4, 129:10.0, 130:235.0,131:220.0,132:4.0,
+    133:6.5,  134:29.0, 135:24.5, 136:25.0, 137:36.5, 138:35.0,
+    139:77.5, 140:40.0, 141:25.0, 142:59.0, 143:460.0,144:55.4,
+    145:52.6, 146:60.0, 147:2.1,  148:16.5, 149:210.0,150:122.0,
+    # Gen 2
+    152:9.0,  153:13.0, 154:70.0, 155:7.9,  156:19.0, 157:79.5,
+    158:8.8,  159:17.0, 160:87.0, 161:5.0,  162:24.5, 163:2.1,
+    164:21.2, 172:2.0,  173:8.8,  174:13.2, 175:4.3,  176:28.0,
+    179:13.3, 180:41.5, 181:121.0,183:9.0,  184:65.0, 185:35.0,
+    186:78.5, 194:29.0, 195:75.0, 196:26.5, 197:27.0, 199:79.5,
+    200:1.5,  201:4.8,  202:33.3, 206:31.5, 213:77.0, 214:120.0,
+    215:28.0, 216:19.6, 217:125.0,241:275.0,242:45.5, 243:178.0,
+    244:198.0,245:187.0,248:202.0,249:216.0,250:199.0,
+    # Gen 3 (selección)
+    258:7.8,  259:19.0, 260:101.6,277:30.4, 279:23.8, 282:48.4,
+    289:25.0, 290:2.5,  291:3.4,  292:1.2,  294:24.9, 295:39.5,
+    302:1.8,  303:14.3, 306:640.0,315:5.6,  319:48.5, 323:220.0,
+    324:360.0,330:97.5, 334:19.0, 335:35.0, 336:69.5, 337:168.0,
+    338:163.0,344:11.5, 348:141.0,350:96.4, 351:4.0,  352:28.0,
+    357:11.5, 358:51.4, 359:46.4, 362:98.8, 368:14.4, 373:110.0,
+    374:60.0, 375:97.0, 376:600.0,377:280.0,378:267.0,379:346.0,
+    382:352.0,383:950.0,384:206.5,385:1.1,  386:30.8,
+    # Gen 4 (selección)
+    398:26.0, 400:27.0, 401:2.5,  402:6.4,  411:72.5, 423:29.5,
+    424:12.5, 427:17.0, 428:55.0, 445:95.0, 446:12.8, 448:64.0,
+    453:3.4,  454:53.5, 460:296.0,461:56.8, 464:282.8,465:71.0,
+    466:138.0,467:37.5, 469:52.0, 471:25.9, 473:450.5,474:30.5,
+    476:30.0, 477:47.5, 478:30.5, 479:3.0,  480:0.3,  481:0.3,
+    482:0.3,  483:683.0,484:336.0,485:430.0,486:420.0,487:750.0,
+    # Gen 5 (selección)
+    495:8.1,  496:24.5, 497:63.0, 501:13.7, 502:36.0, 503:63.5,
+    519:2.1,  520:3.0,  521:17.5, 559:9.3,  560:34.0, 561:12.5,
+    554:9.4,  555:33.0, 596:3.5,  597:6.6,  598:50.5, 612:50.5,
+    614:100.0,618:11.5, 620:34.0, 621:80.0, 622:44.5, 623:248.0,
+    624:18.8, 625:73.0, 631:3.0,  632:58.5, 633:17.3, 634:50.0,
+    635:160.0,638:300.0,639:187.5,640:52.5, 641:63.0, 642:61.0,
+    643:249.5,644:345.0,646:325.0,
+    # Gen 6 (selección)
+    650:8.2,  651:22.0, 652:78.5, 654:11.5, 655:38.5, 656:7.0,
+    657:17.5, 658:62.0, 699:26.0, 700:23.5, 701:54.0, 702:8.0,
+    703:6.8,  704:7.5,  706:88.0, 707:12.8, 710:0.5,  711:5.0,
+    712:0.8,  713:131.0,716:215.0,717:203.0,718:305.0,
+    # Gen 7 (selección)
+    722:2.6,  723:11.0, 724:29.5, 725:4.4,  726:19.0, 727:90.0,
+    728:7.0,  729:44.0, 730:98.0, 741:13.2, 750:100.0,751:0.8,
+    752:17.5, 753:0.8,  754:15.5, 770:1.0,  771:16.0, 774:0.3,
+    775:50.0, 776:10.0, 777:0.6,  779:8.0,  781:33.0, 782:7.8,
+    783:22.0, 784:120.5,785:18.5, 786:19.4, 787:14.5, 788:15.5,
+    791:230.0,792:120.0,793:4.0,  800:230.0,
+    # Gen 8 (selección)
+    813:11.0, 814:21.0, 815:64.0, 816:9.5,  817:17.5, 818:101.0,
+    819:2.0,  820:32.0, 821:1.5,  822:6.0,  823:75.0, 831:6.0,
+    832:92.5, 833:11.5, 834:115.0,835:3.0,  836:14.0, 837:6.5,
+    838:132.0,839:698.0,840:0.2,  841:2.0,  842:65.0, 843:30.0,
+    844:210.0,845:10.0, 847:100.0,849:17.0, 850:2.0,  851:10.0,
+    858:57.5, 860:2.1,  861:2.5,  862:157.5,863:92.0, 864:1.0,
+    867:0.5,  869:0.5,  873:20.0, 874:40.0, 879:880.0,880:792.0,
+    881:236.0,882:246.0,883:242.0,884:255.0,886:10.2, 887:92.0,
+    888:110.0,889:130.0,890:950.0,892:97.5,
+    # Gen 9 (selección)
+    906:10.2, 907:29.2, 908:60.0, 909:15.8, 910:56.0, 911:112.0,
+    912:2.7,  913:52.0, 916:48.0, 917:35.0, 918:160.0,920:9.1,
+    921:3.1,  922:2.1,  923:33.0, 924:1.4,  925:75.0, 926:52.0,
+    927:15.4, 928:12.0, 929:1.7,  930:2.9,  931:6.2,  932:110.0,
+    935:6.0,  936:37.0, 937:2.8,  938:10.4, 941:0.2,  942:1.6,
+    943:8.5,  944:1.5,  945:3.7,  946:28.0, 947:11.0, 948:0.6,
+    949:15.0, 950:1.0,  951:1.0,  952:3.5,  953:9.1,  954:18.2,
+    955:0.9,  956:6.5,  957:11.2, 958:49.0, 959:50.5, 960:115.0,
+    961:9.0,  962:34.5, 963:6.5,  964:14.0, 965:33.8, 966:70.0,
+    967:3.0,  968:1.0,  969:27.0, 970:0.5,  971:7.0,  972:45.0,
+    1001:72.0,1002:320.0,1003:122.0,1004:62.0,1007:303.0,1008:1054.0,
+}
+_PESO_GENERICO: float = 40.0   # fallback si el ID no está en la tabla
+
+
+def get_peso_pokemon(pokemon_id: int) -> float:
+    """Devuelve el peso en kg del Pokémon. Usa 40 kg como fallback."""
+    return _PESOS_POKEMON.get(pokemon_id, _PESO_GENERICO)
+
+
+def calcular_poder_lowkick(peso_defensor_kg: float) -> int:
+    """
+    Poder de Low Kick / Grass Knot según el peso del defensor (fórmula oficial).
+      < 10 kg  → 20
+      < 25 kg  → 40
+      < 50 kg  → 60
+      < 100 kg → 80
+      < 200 kg → 100
+      ≥ 200 kg → 120
+    """
+    if peso_defensor_kg < 10:   return 20
+    if peso_defensor_kg < 25:   return 40
+    if peso_defensor_kg < 50:   return 60
+    if peso_defensor_kg < 100:  return 80
+    if peso_defensor_kg < 200:  return 100
+    return 120
+
+
+def calcular_poder_heavyslam(peso_atacante_kg: float, peso_defensor_kg: float) -> int:
+    """
+    Poder de Heavy Slam / Heat Crash según la relación de pesos (fórmula oficial).
+    ratio = peso_atacante / peso_defensor
+      ≥ 5   → 120
+      ≥ 4   → 100
+      ≥ 3   → 80
+      ≥ 2   → 60
+      < 2   → 40
+    """
+    if peso_defensor_kg <= 0:
+        return 40
+    ratio = peso_atacante_kg / peso_defensor_kg
+    if ratio >= 5: return 120
+    if ratio >= 4: return 100
+    if ratio >= 3: return 80
+    if ratio >= 2: return 60
+    return 40
+
+
+# Movimientos cuyo poder depende del peso del defensor
+_LOWKICK_MOVES:    frozenset[str] = frozenset({"lowkick", "grassknot"})
+# Movimientos cuyo poder depende de la relación de pesos atacante/defensor
+_HEAVYSLAM_MOVES:  frozenset[str] = frozenset({"heavyslam", "heatcrash"})
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAGIC GUARD — habilidades que anulan daño indirecto
+# ─────────────────────────────────────────────────────────────────────────────
+_MAGIC_GUARD_ALIASES: frozenset[str] = frozenset({
+    "magicguard", "guardiamágica", "guardiamagica", "magicguard",
+})
+
+
+def tiene_magic_guard(ability_raw: str) -> bool:
+    """True si la habilidad es Magic Guard (inmune a daño indirecto)."""
+    if not ability_raw:
+        return False
+    return ability_raw.lower().replace(" ", "").replace("-", "") in _MAGIC_GUARD_ALIASES
+
 # Potenciadores de tipo: {item_key_normalizado: tipo_en_español}
 _TIPO_BOOST_ITEMS: dict[str, str] = {
     "silkscarf":       "Normal",
@@ -2467,6 +2622,15 @@ __all__ = [
     "_PUNCH_MOVES",
     "_CONTACT_MOVES",
     "_TIPO_BOOST_ITEMS",
+    # ── Pesos y movimientos de peso ──────────────────────────────────────
+    "get_peso_pokemon",
+    "calcular_poder_lowkick",
+    "calcular_poder_heavyslam",
+    "_LOWKICK_MOVES",
+    "_HEAVYSLAM_MOVES",
+    # ── Magic Guard ──────────────────────────────────────────────────────
+    "tiene_magic_guard",
+    "_MAGIC_GUARD_ALIASES",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2664,7 +2828,7 @@ def _roll_num_hits(move_key: str, ability: str = "") -> int:
       14.8 % → 4 golpes
       14.8 % → 5 golpes
 
-    Si el atacante tiene "Encadenado" (Skill Link), siempre golpea el máximo.
+    Si el atacante tiene Skill Link (Encadenado), siempre golpea el máximo.
     Movimientos con rango fijo (ej. 2–2, 3–3) siempre devuelven ese valor.
     """
     import random as _random
@@ -2674,8 +2838,13 @@ def _roll_num_hits(move_key: str, ability: str = "") -> int:
     lo, hi = cfg
     if lo == hi:
         return lo                         # golpes fijos (doublekick, surgingstrikes…)
-    if ability == "Encadenado":
-        return hi                         # Skill Link → siempre el máximo
+
+    # ── Skill Link: siempre el máximo de golpes ──────────────────────────────
+    # Acepta el nombre en español e inglés, con o sin espacios/guiones.
+    _hab = ability.lower().replace(" ", "").replace("-", "") if ability else ""
+    if _hab in ("encadenado", "skilllink"):
+        return hi
+
     # Distribución Gen 5+
     if lo == 2 and hi == 5:
         roll = _random.random()
@@ -2795,64 +2964,65 @@ def apply_move(
 
     weather_mult = apply_weather_boost(weather_now, tipo_mov)
     terrain_mult = apply_terrain_boost(getattr(field, "terrain", None), tipo_mov, is_grounded(attacker.types, shim))
-    
+
+    # ── Poder variable por peso (Low Kick / Grass Knot / Heavy Slam / Heat Crash) ──
+    if mk in _LOWKICK_MOVES:
+        _def_pid  = getattr(defender, "species_id", getattr(defender, "pokemon_db_id", 0))
+        poder     = calcular_poder_lowkick(get_peso_pokemon(_def_pid))
+    elif mk in _HEAVYSLAM_MOVES:
+        _atk_pid  = getattr(attacker, "species_id", getattr(attacker, "pokemon_db_id", 0))
+        _def_pid  = getattr(defender, "species_id", getattr(defender, "pokemon_db_id", 0))
+        poder     = calcular_poder_heavyslam(get_peso_pokemon(_atk_pid), get_peso_pokemon(_def_pid))
+
     # ── 6. Multi-hit y Resolución de Daño ───────────────────────────────────
     num_hits = _roll_num_hits(mk, attacker.ability)
     total_dmg = 0
-    
-    # Calcular multiplicador de habilidad UNA SOLA VEZ
+
     _hab_mult, _quitar_secundario = calcular_mult_habilidad(
         attacker.ability, mk, tipo_mov, categoria, poder,
         hp_ratio=(attacker.hp_actual / max(attacker.hp_max, 1)),
     )
-    # Calcular efectividad de tipo anticipada (para Expert Belt)
     _type_eff_pre = type_effectiveness_fn(tipo_mov, defender.types)
-    # Calcular multiplicador de objeto UNA SOLA VEZ
     _obj_mult, _obj_recoil = calcular_mult_objeto(
         attacker.objeto or "", tipo_mov, categoria, _type_eff_pre
     )
     _poder_base_con_hab = max(1, int(poder * _hab_mult * _obj_mult))
+    _obj_recoil_ratio   = _obj_recoil
+    _atk_magic_guard    = tiene_magic_guard(attacker.ability)
 
     if _hab_mult > 1.0 and attacker.ability:
-        log.append(f"  ✨ ¡<b>{attacker.ability}</b> potenció el ataque!\n")
+        log.append(f"  ✨ ¡La habilidad <b>{attacker.ability}</b> potenció el ataque!\n")
     if _obj_mult > 1.0 and attacker.objeto:
         log.append(f"  🎒 ¡<b>{attacker.objeto.title()}</b> potenció el ataque!\n")
 
-    # Life Orb recoil — aplicar DESPUÉS del loop de golpes
-    _obj_recoil_ratio = _obj_recoil   # guardamos para usarlo después del loop
-
-
-    if _hab_mult > 1.0 and attacker.ability:
-        log.append(
-            f"  ✨ ¡La habilidad <b>{attacker.ability}</b> potenció el ataque!\n"
-        )
     for hit_idx in range(num_hits):
         if defender.hp_actual <= 0: break
 
         hit_power = _poder_base_con_hab * (hit_idx + 1) if mk in {"triplekick", "tripleaxel"} else _poder_base_con_hab
-        
+
         res: DamageResult = resolve_damage_move(
-            attacker_name = attacker.name, 
-            defender_name = defender.name,
-            attacker_level = attacker.level, 
-            attacker_stats = attacker.stats,
-            attacker_types = attacker.types, 
-            attacker_stages = attacker.stat_stages,
-            defender_hp = defender.hp_actual, 
-            defender_stats = defender.stats,
-            defender_types = defender.types, 
-            defender_stages = defender.stat_stages,
-            move_name = move_es if hit_idx == 0 else f"{move_es} (golpe {hit_idx + 1})",
-            move_power = max(1, int(hit_power * weather_mult * terrain_mult)),
-            move_category = categoria, move_type=tipo_mov,
+            attacker_name         = attacker.name,
+            defender_name         = defender.name,
+            attacker_level        = attacker.level,
+            attacker_stats        = attacker.stats,
+            attacker_types        = attacker.types,
+            attacker_stages       = attacker.stat_stages,
+            defender_hp           = defender.hp_actual,
+            defender_stats        = defender.stats,
+            defender_types        = defender.types,
+            defender_stages       = defender.stat_stages,
+            move_name             = move_es if hit_idx == 0 else f"{move_es} (golpe {hit_idx + 1})",
+            move_power            = max(1, int(hit_power * weather_mult * terrain_mult)),
+            move_category         = categoria,
+            move_type             = tipo_mov,
             type_effectiveness_fn = type_effectiveness_fn,
-            drain_ratio = DRAIN_MOVES.get(mk, 0.0),
-            crit_stage = attacker.crit_stage + (1 if mk in _HIGH_CRIT_MOVES else 0),
-            defender_ability = defender.ability,
-            defender_hp_max  = defender.hp_max,
-            attacker_ability  = attacker.ability,
+            drain_ratio           = DRAIN_MOVES.get(mk, 0.0),
+            crit_stage            = attacker.crit_stage + (1 if mk in _HIGH_CRIT_MOVES else 0),
+            defender_ability      = defender.ability,
+            defender_hp_max       = defender.hp_max,
+            attacker_ability      = attacker.ability,
         )
-        
+
         log.extend(res.log)
         total_dmg += res.damage
         defender.hp_actual = max(0, defender.hp_actual - res.damage)
@@ -2861,7 +3031,8 @@ def apply_move(
             attacker.hp_actual = min(attacker.hp_max, attacker.hp_actual + res.drained_hp)
             log.append(f"  💚 ¡{attacker.name} absorbió {res.drained_hp} HP!\n")
 
-        if RECOIL_MOVES.get(mk, 0.0) and res.damage > 0:
+        # Retroceso — bloqueado por Magic Guard
+        if RECOIL_MOVES.get(mk, 0.0) and res.damage > 0 and not _atk_magic_guard:
             rdmg = max(1, int(res.damage * RECOIL_MOVES[mk]))
             attacker.hp_actual = max(0, attacker.hp_actual - rdmg)
             log.append(f"  💢 ¡{attacker.name} sufrió {rdmg} de retroceso!\n")
@@ -2869,13 +3040,13 @@ def apply_move(
     if num_hits > 1 and total_dmg > 0:
         log.append(f"  🔢 ¡{num_hits} golpes! Daño total: <b>{total_dmg}</b>\n")
 
-    # Life Orb recoil (10% HP max del portador, solo si causó daño)
-    if _obj_recoil_ratio > 0 and total_dmg > 0:
+    # Life Orb recoil — bloqueado por Magic Guard
+    if _obj_recoil_ratio > 0 and total_dmg > 0 and not _atk_magic_guard:
         _lo_recoil = max(1, int(attacker.hp_max * _obj_recoil_ratio))
         attacker.hp_actual = max(0, attacker.hp_actual - _lo_recoil)
         log.append(f"  🔴 ¡<b>{attacker.name}</b> perdió {_lo_recoil} HP por la Vida Esfera!\n")
 
-    if type_eff > 1.0: log.append("  💥 ¡Es muy eficaz!\n")
+        if type_eff > 1.0: log.append("  💥 ¡Es muy eficaz!\n")
     elif 0 < type_eff < 1.0: log.append("  😐 No es muy eficaz…\n")
 
     # ── 7. Efectos de Atrapado y Secundarios ─────────────────────────────────
@@ -3198,6 +3369,9 @@ def apply_end_of_turn(
     for side in (side_a, side_b):
         if side.hp_actual <= 0:
             continue
+        # Magic Guard: inmune a daño indirecto (veneno, quemadura, tóxico)
+        if tiene_magic_guard(getattr(side, "ability", "") or ""):
+            continue
         if side.status in ("psn", "brn"):
             dmg = max(1, side.hp_max // 8)
             side.hp_actual = max(0, side.hp_actual - dmg)
@@ -3225,6 +3399,9 @@ def apply_end_of_turn(
         emoji, wname, _ = WEATHER_INFO.get(weather, ("🌀", weather, 0))
         for side in (side_a, side_b):
             if side.hp_actual <= 0:
+                continue
+            # Magic Guard: también bloquea el daño de clima
+            if tiene_magic_guard(getattr(side, "ability", "") or ""):
                 continue
             if not any(t in immune for t in side.types):
                 dmg = max(1, side.hp_max // 16)
