@@ -2446,44 +2446,47 @@ class WildBattleManager:
     def execute_move(self, user_id: int, move_name: str, bot) -> bool:
         """
         Ejecuta el turno del jugador con orden de ataque basado en velocidad.
-
-        Lógica de orden:
-          1. Calcular vel_efectiva = stat_vel × multiplicador_de_etapa
-             para el Pokémon del jugador y el salvaje.
-          2. El más rápido actúa primero.
-          3. Empate exacto → aleatorio (comportamiento oficial Gen 3+).
-          4. Si el defensor cae en el primer ataque, el segundo no se ejecuta.
-          5. Si el jugador cae durante el turno del salvaje (cuando este es
-             más rápido), el jugador no puede contraatacar.
+ 
+        CAMBIOS:
+        - _cancel_turn_timer() es LO PRIMERO que se hace al entrar.
+        - Si el wild cae, se muestra el log del turno y se despacha
+          _handle_victory() con un delay de 2.5s para que sea legible.
+        - Si el jugador cae, igual: muestra log y despacha _handle_defeat()
+          con delay de 2.0s.
         """
         try:
             battle = self.get_battle(user_id)
             if not battle or battle.state != BattleState.ACTIVE:
                 return False
-
-            # El jugador actuó → cancelar el timer de turno
+ 
+            # ── PRIMERO: cancelar el timer ANTES de cualquier lógica ──────────
+            # Evita que un timeout "tardío" se dispare después de que el
+            # jugador ya eligió su movimiento.
             self._cancel_turn_timer(battle)
-
+ 
+            # No permitir acción mientras se elige reemplazo
+            if getattr(battle, "awaiting_faint_switch", False):
+                return False
+            if getattr(battle, "awaiting_pivot_switch", False):
+                return False
+ 
             wild           = battle.wild_pokemon
             player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-
+ 
             if not player_pokemon or wild.hp_actual <= 0 or player_pokemon.hp_actual <= 0:
                 return False
-
+ 
             move_data      = movimientos_service.obtener_movimiento(move_name)
-            # movimientos_service guarda claves del JSON (inglés): basePower, category, type
-            # Soportamos ambas variantes por si algún dato ya viene traducido
             move_poder     = int((move_data.get("basePower", move_data.get("poder", 0)) if move_data else 0) or 0)
             move_tipo      = (move_data.get("type",      move_data.get("tipo",      "Normal")) if move_data else "Normal")
             move_categoria = (move_data.get("category",  move_data.get("categoria", "Físico")) if move_data else "Físico")
-            # Normalizar categoría al español que usa el resto del sistema
             _cat_map = {"Physical": "Físico", "Special": "Especial", "Status": "Estado"}
             move_categoria = _cat_map.get(move_categoria, move_categoria)
             nombre_es      = MOVE_NAMES_ES.get(move_name.lower().replace(" ", ""), move_name.title())
             p_name         = player_pokemon.mote or player_pokemon.nombre
-
+ 
             log: list = []
-
+ 
             # ── Verificar PP ──────────────────────────────────────────────────
             pp_data: dict = {}
             try:
@@ -2496,7 +2499,7 @@ class WildBattleManager:
                     pp_data = _json.loads(r[0]["pp_data"])
             except Exception:
                 pass
-
+ 
             move_key = move_name.lower().replace(" ", "")
             _pp_val = pp_data.get(move_key, pp_data.get(move_name, 1))
             if isinstance(_pp_val, dict):
@@ -2506,26 +2509,24 @@ class WildBattleManager:
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
                 self._start_turn_timer(battle, user_id, bot)
                 return True
-
+ 
             # ── Verificar precisión ───────────────────────────────────────────
-            # Tratar True/None/0 como "nunca falla" (igual que en battle_engine.apply_move)
             _prec_raw = movimientos_service.obtener_precision(move_name)
             precision = 999 if (_prec_raw is True or not _prec_raw) else int(_prec_raw)
             if precision < 999 and random.randint(1, 100) > precision:
                 log.append(f"⚡ <b>{p_name}</b> usó <b>{nombre_es}</b>... ¡pero falló!\n")
-                # El jugador gastó su turno → el salvaje puede responder
                 enemy_log = self._execute_wild_turn(battle)
                 log.extend(enemy_log)
                 battle.turn_number += 1
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
                 self._start_turn_timer(battle, user_id, bot)
                 return True
-
+ 
             # ── Descontar PP ──────────────────────────────────────────────────
             from pokemon.services.pp_service import pp_service as _pp_service
             _pp_service.usar_pp(battle.player_pokemon_id, move_name)
-
-            # ── Determinar orden por velocidad efectiva ───────────────────────
+ 
+            # ── Determinar orden por velocidad ────────────────────────────────
             player_vel = BattleUtils.effective_speed(
                 player_pokemon.stats.get("vel", 50),
                 battle.player_stat_stages.get("vel", 0),
@@ -2536,121 +2537,125 @@ class WildBattleManager:
                 battle.wild_stat_stages.get("vel", 0),
                 battle.wild_status,
             )
-
+ 
             if player_vel == wild_vel:
                 wild_first = random.random() < 0.5
             else:
-                # Trick Room invierte el orden de velocidad
                 if getattr(battle, "trick_room", False):
                     wild_first = player_vel > wild_vel
                 else:
                     wild_first = wild_vel > player_vel
-
+ 
             if wild_first:
                 log.append(
                     f"⚡ <i>{wild.nombre} es más rápido "
                     f"({int(wild_vel)} vs {int(player_vel)} Vel) y ataca primero!</i>\n"
                 )
-
-            # ── Closure: lógica de ataque del jugador ────────────────────────
+ 
+            # ── Closure: ataque del jugador ───────────────────────────────────
             player_damage = 0
-
+ 
             def _player_attacks() -> bool:
-                """
-                Ejecuta el ataque del jugador contra el wild usando apply_move
-                del battle_engine central. Devuelve True si el wild quedó KO.
-                """
                 nonlocal player_damage
-
+ 
                 p_side = side_from_player(player_pokemon, battle)
                 w_side = side_from_wild(wild, battle)
-
+ 
                 ko = apply_move(
                     p_side, w_side, battle,
                     move_name, move_data if move_data is not None else {}, log,
                     type_effectiveness_fn=movimientos_service._calcular_efectividad,
                 )
-
+ 
                 sync_player_side(p_side, battle, persist=True)
                 sync_wild_side(w_side, wild, battle)
-
-                player_damage = p_side.hp_max - p_side.hp_actual  # aproximación para el log
+ 
+                player_damage = p_side.hp_max - p_side.hp_actual
                 return ko
-
-            # ── Ejecutar en orden de velocidad ───────────────────────────────
+ 
+            # ── Ejecutar en orden de velocidad ────────────────────────────────
+            wild_died = False
             if wild_first:
-                # El salvaje ataca primero
                 enemy_log = self._execute_wild_turn(battle)
                 log.extend(enemy_log)
-
-                # ¿El jugador cayó antes de poder responder?
+ 
                 updated_p = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
                 if updated_p and updated_p.hp_actual <= 0:
-                    self._handle_defeat(battle, bot)
+                    # Jugador cayó antes de atacar — mostrar log y manejar derrota
+                    battle.turn_number += 1
+                    self._append_turn_log(battle, p_name, nombre_es, player_damage, battle._last_enemy_entry or "")
+                    self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
+                    import threading as _th
+                    _th.Timer(2.0, lambda: self._handle_defeat(battle, bot)).start()
                     return True
-
-                # Ahora el jugador responde
+ 
                 wild_died = _player_attacks()
             else:
-                # El jugador ataca primero
                 wild_died = _player_attacks()
-
+ 
                 if not wild_died:
-                    # El salvaje contraataca
                     enemy_log = self._execute_wild_turn(battle)
                     log.extend(enemy_log)
-
+ 
             # ── Consolidar log del turno ──────────────────────────────────────
             battle.turn_number += 1
-            _p_entry = f"T{battle.turn_number}:\n  {p_name} usó {nombre_es}"
-            if player_damage:
-                _p_entry += f", causó {player_damage} de daño"
-            battle._last_player_entry = _p_entry
-
-            _enemy_entry  = getattr(battle, "_last_enemy_entry", "")
-            _player_entry = getattr(battle, "_last_player_entry", "")
-            if _player_entry or _enemy_entry:
-                combined = _player_entry
-                if _enemy_entry:
-                    combined += f"\n  {_enemy_entry}"
-                battle.battle_log.append(combined)
-                if len(battle.battle_log) > 3:
-                    battle.battle_log = battle.battle_log[-3:]
-
-            # ── Chequeo intermedio tras ataques directos ──────────────────────
-            # Si el wild cayó por daño directo, victoria antes de residuales.
-            if wild.hp_actual <= 0:
-                self._handle_victory(battle, player_pokemon, bot)
+            self._append_turn_log(battle, p_name, nombre_es, player_damage, getattr(battle, "_last_enemy_entry", ""))
+ 
+            # ── Si el wild cayó por daño directo ──────────────────────────────
+            if wild_died or wild.hp_actual <= 0:
+                self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
+                player_poke_final = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
+                import threading as _th
+                _th.Timer(2.5, lambda: self._handle_victory(battle, player_poke_final, bot)).start()
                 return True
-
+ 
+            # ── Verificar si jugador cayó (por contraataque) ──────────────────
             updated_p = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if updated_p and updated_p.hp_actual <= 0:
-                self._handle_defeat(battle, bot)
+                self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
+                import threading as _th
+                _th.Timer(2.0, lambda: self._handle_defeat(battle, bot)).start()
                 return True
-
+ 
             # ── Efectos residuales de fin de turno ────────────────────────────
-            # Se ejecutan UNA SOLA VEZ por turno, siempre AQUÍ (no dentro de
-            # _execute_wild_turn), después de que ambos atacantes ya actuaron.
-            # Incluye: drenadoras, veneno, quemadura, tóxico, clima, terreno.
             _apply_residual_effects(battle, log)
-
+ 
             # ── Chequeo post-residuales ───────────────────────────────────────
             if wild.hp_actual <= 0:
-                self._handle_victory(battle, player_pokemon, bot)
+                self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
+                player_poke_final2 = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
+                import threading as _th
+                _th.Timer(2.5, lambda: self._handle_victory(battle, player_poke_final2, bot)).start()
                 return True
-
+ 
             updated_p2 = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if updated_p2 and updated_p2.hp_actual <= 0:
-                self._handle_defeat(battle, bot)
+                self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
+                import threading as _th
+                _th.Timer(2.0, lambda: self._handle_defeat(battle, bot)).start()
                 return True
-
+ 
             self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
             self._start_turn_timer(battle, user_id, bot)
             return True
-
+ 
         except Exception as e:
             logger.error(f"Error en execute_move: {e}", exc_info=True)
             return False
+
+    def _append_turn_log(self, battle, p_name: str, nombre_es: str, player_damage: int, enemy_entry: str):
+        """Helper: consolida una entrada en battle.battle_log sin duplicar lógica."""
+        _p_entry = f"T{battle.turn_number}:\n  {p_name} usó {nombre_es}"
+        if player_damage:
+            _p_entry += f", causó {player_damage} de daño"
+        battle._last_player_entry = _p_entry
+ 
+        combined = _p_entry
+        if enemy_entry:
+            combined += f"\n  {enemy_entry}"
+        battle.battle_log.append(combined)
+        if len(battle.battle_log) > 3:
+            battle.battle_log = battle.battle_log[-3:]
 
         
     def _apply_status_move(
@@ -3004,41 +3009,46 @@ class WildBattleManager:
             f"🔵 {player_pokemon.nombre}: {player_pokemon.hp_actual}/{player_pokemon.stats['hp']} HP"
         )
     
-    def _handle_victory(self, battle: "BattleData", player_pokemon, bot):
+    def _handle_victory(self, battle, player_pokemon, bot):
         """
         Procesa la victoria del jugador.
-        - Otorga EXP con fórmula Gen 9 (exp_base por especie × nivel × ratio).
-        - Otorga cosmos proporcionales al nivel del enemigo.
-        - Limpia el spawn y la batalla.
-        - Edita el mensaje del DM con el resultado.
-        - Edita el mensaje del GRUPO con el resultado.
+ 
+        CAMBIOS:
+        - Se cancela el timer SIEMPRE al entrar.
+        - La victoria ya llega con delay desde execute_move (2.5s),
+          por lo que no se añade un delay adicional aquí.
         """
         try:
+            # ── Cancelar timer SIEMPRE ────────────────────────────────────────
             self._cancel_turn_timer(battle)
-
+ 
             wild    = battle.wild_pokemon
             user_id = battle.user_id
-
-            # Fórmula Gen 9: necesita pokemon_id, nivel enemigo y nivel del ganador
+ 
+            # Si player_pokemon no se pasó o es None, intentar releer
+            if player_pokemon is None:
+                player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
+ 
             exp_ganada = ExperienceSystem.exp_por_victoria(
                 nivel_enemigo      = wild.nivel,
                 pokemon_id_enemigo = wild.pokemon_id,
-                nivel_ganador      = player_pokemon.nivel,
+                nivel_ganador      = player_pokemon.nivel if player_pokemon else 1,
                 es_salvaje         = True,
                 es_entrenador      = False,
             )
             money_reward = max(10, min(50, 10 + wild.nivel * 40 // 100))
             economy_service.add_credits(user_id, money_reward, "Victoria en batalla Pokémon")
-
-            linea_exp = _repartir_experiencia(battle, exp_ganada, user_id, bot, delay=2.5)
-
+ 
+            linea_exp = _repartir_experiencia(battle, exp_ganada, user_id, bot, delay=1.0)
+ 
             text = (
                 f"🏆 <b>¡Victoria!</b>\n\n"
                 f"🔴 {wild.nombre} fue derrotado.\n\n"
                 f"{linea_exp}\n"
-                f"💰 Ganaste <b>{money_reward} cosmos</b>\n")
-            
-            # ── EVs al Pokémon activo ─────────────────────────────────────────
+                f"💰 Ganaste <b>{money_reward} cosmos</b>\n"
+            )
+ 
+            # EVs al Pokémon activo
             try:
                 from pokemon.services.ev_service import ev_service
                 _, _ev_log = ev_service.otorgar_evs(
@@ -3049,118 +3059,139 @@ class WildBattleManager:
                     text += _ev_log
             except Exception as _ev_e:
                 logger.error(f"[EV] Error en victoria: {_ev_e}")
-
-            # ── Restaurar posiciones del equipo ───────────────────────────────
+ 
+            # Restaurar posiciones del equipo
             try:
                 if battle.posiciones_originales:
                     pokemon_service.restaurar_posiciones(battle.posiciones_originales)
             except Exception as _rp_e:
                 logger.error(f"[POS] Error restaurando posiciones: {_rp_e}")
-
+ 
             # Limpiar estado
             spawn_service.limpiar_spawn(battle.thread_id)
             if user_id in self.active_battles:
                 del self.active_battles[user_id]
-
-            # Actualizar DM y mensaje del grupo
+ 
             self._edit_battle_message(bot, user_id, battle.message_id, text)
-
+ 
             logger.info(
                 f"[BATTLE] Victoria: Usuario {user_id} derrotó {wild.nombre} "
                 f"Nv.{wild.nivel} → +{exp_ganada} EXP, +{money_reward} cosmos"
             )
-
+ 
         except Exception as e:
             logger.error(f"Error procesando victoria: {e}", exc_info=True)
     
-    def _handle_defeat(self, battle: "BattleData", bot):
+    def _handle_defeat(self, battle, bot):
         """
         Procesa la derrota del jugador.
-        Si quedan Pokémon vivos → ofrece cambiar.
-        Si todos están K.O. → termina la batalla y actualiza el GRUPO.
+ 
+        CAMBIOS:
+        - Se cancela el timer SIEMPRE al entrar.
+        - Si quedan reemplazos: se muestra el selector de Pokémon CON el
+          keyboard correcto Y sin arrancar ningún timer (el jugador no
+          tiene límite de tiempo para elegir reemplazo).
+        - Si es derrota total: se edita el mensaje final directamente
+          (sin delay adicional porque el llamador ya puso un delay).
         """
         try:
+            # ── Cancelar timer SIEMPRE ────────────────────────────────────────
             self._cancel_turn_timer(battle)
-
-            wild = battle.wild_pokemon
+ 
+            wild    = battle.wild_pokemon
             user_id = battle.user_id
-
+ 
             player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if not player_pokemon:
                 return
-
+ 
             team = pokemon_service.obtener_equipo(user_id)
             has_more = any(
                 p.hp_actual > 0 and p.id_unico != battle.player_pokemon_id
                 for p in team
             )
-
+ 
             if has_more:
-                # Cancelar el timer activo: el jugador no puede ser penalizado
-                # mientras elige su Pokémon de reemplazo.
-                self._cancel_turn_timer(battle)
-
+                # ── Mostrar selector de reemplazo ─────────────────────────────
+                # NO se arranca el timer aquí — el jugador elige sin presión.
+                p_name = player_pokemon.mote or player_pokemon.nombre
                 text = (
-                    f"💀 <b>{player_pokemon.mote or player_pokemon.nombre} fue derrotado!</b>\n\n"
+                    f"💀 <b>{p_name} fue derrotado!</b>\n\n"
                     "¿Enviás otro Pokémon?"
                 )
                 keyboard = types.InlineKeyboardMarkup()
                 keyboard.add(
-                types.InlineKeyboardButton("👥 Elegir Pokémon",
-                callback_data=f"battle_team_{user_id}")
+                    types.InlineKeyboardButton(
+                        "👥 Elegir Pokémon",
+                        callback_data=f"battle_team_{user_id}"
+                    )
                 )
                 keyboard.add(
-                types.InlineKeyboardButton("🏳️ Rendirse",
-                callback_data=f"battle_forfeit_{user_id}")
+                    types.InlineKeyboardButton(
+                        "🏳️ Rendirse",
+                        callback_data=f"battle_forfeit_{user_id}"
+                    )
                 )
-                battle.state               = BattleState.ACTIVE
+                battle.state                = BattleState.ACTIVE
                 battle.awaiting_faint_switch = True
                 self._edit_battle_message(bot, user_id, battle.message_id, text, keyboard)
+                # No llamar _start_turn_timer aquí
                 return
-
-            # Todos K.O. → derrota total
+ 
+            # ── Derrota total ─────────────────────────────────────────────────
             text = (
                 f"💀 <b>Derrota</b>\n\n"
                 f"{wild.nombre} derrotó a todos tus Pokémon.\n\n"
                 "Ve al Centro Pokémon para curarlos."
             )
             battle.state = BattleState.PLAYER_LOSE
-            # ── Restaurar posiciones del equipo ───────────────────────────
+ 
+            # Restaurar posiciones del equipo
             try:
                 if battle.posiciones_originales:
                     pokemon_service.restaurar_posiciones(battle.posiciones_originales)
             except Exception as _rp_e:
                 logger.error(f"[POS] Error restaurando posiciones en derrota: {_rp_e}")
+ 
             spawn_service.limpiar_spawn(battle.thread_id)
             if user_id in self.active_battles:
                 del self.active_battles[user_id]
-
+ 
             self._edit_battle_message(bot, user_id, battle.message_id, text)
-
+ 
         except Exception as e:
             logger.error(f"Error procesando derrota: {e}", exc_info=True)
     
-    def _on_pokemon_enter(self,battle: "BattleData",nuevo_pokemon_id: int,log: list,) -> None:
+    def _on_pokemon_enter(self, battle, nuevo_pokemon_id: int, log: list) -> None:
         """
-        Aplica todos los efectos de entrada cuando un Pokémon nuevo sale a combatir.
-        - Resetea etapas de stat (oficial: los boosts no se transfieren).
-        - Resetea contador de Bostezo (Yawn no se transfiere).
-        - Status (quemado, dormido, etc.) SÍ persiste en el Pokémon.
-        - Log del ingreso.
-        - Punto de extensión futuro: habilidades de entrada (Intimidación, etc.).
+        Aplica efectos de entrada cuando un Pokémon nuevo sale a combatir.
+ 
+        CAMBIOS:
+        - Limpia charging_move y recharge_pending del Pokémon entrante
+          (no hereda estados de 2-turno del anterior).
+        - Limpia cualquier pending_action residual del turno anterior.
         """
-        # 1. Resetear etapas del jugador (volátiles: no se transfieren)
+        # Resetear etapas del jugador (volátiles: no se transfieren)
         battle.player_stat_stages = {
             "atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0
         }
-        # 2. Resetear estados volátiles (no se transfieren al siguiente Pokémon)
-        battle.player_yawn_counter    = 0   # Bostezo
-        battle.player_crit_stage      = 0   # Etapa de crítico
-        battle.player_confusion_turns = 0   # Confusión (VOLÁTIL: se cura al cambiar)
-        # NOTA: player_status, player_leechseeded, player_sleep_turns, player_toxic_counter
-        # NO se resetean aquí: _restore_player_status los maneja con datos por pokémon.
-
-        # 3. Log de ingreso
+        # Resetear estados volátiles
+        battle.player_yawn_counter    = 0
+        battle.player_crit_stage      = 0
+        battle.player_confusion_turns = 0
+ 
+        # ── NUEVO: limpiar mecánicas de 2-turno ───────────────────────────────
+        # El Pokémon entrante no hereda una carga o recarga del anterior.
+        battle.player_charging_move    = None
+        battle.player_recharge_pending = False
+ 
+        # ── NUEVO: limpiar pending action residual ────────────────────────────
+        # Si el turno anterior quedó con algún movimiento "elegido" pero
+        # no ejecutado (edge case de race condition), lo limpiamos aquí.
+        # (En wild battles no hay pending_action explícito; el equivalente
+        #  es el flag awaiting_faint_switch que ya se limpia en switch_pokemon)
+ 
+        # Log de ingreso
         nuevo_p = pokemon_service.obtener_pokemon(nuevo_pokemon_id)
         if nuevo_p:
             nombre = nuevo_p.mote or nuevo_p.nombre
@@ -3169,20 +3200,18 @@ class WildBattleManager:
                 f"  🔄 ¡<b>{nombre}</b> salió a combatir! "
                 f"({nuevo_p.hp_actual}/{hp_max} HP)\n"
             )
-            # ── Habilidades de entrada (extensible) ─────────────────────────────
-            # Intimidación: baja Ataque del rival 1 etapa
+            # ── Habilidades de entrada ─────────────────────────────────────────
             hab_str = (getattr(nuevo_p, "habilidad", "") or "").lower().replace(" ", "").replace("-", "")
-            # Habilidades de entrada: aplica en orden de velocidad
-            # (el más rápido va primero, el más lento sobreescribe → lento gana el clima)
             from pokemon.battle_engine import apply_entry_abilities_ordered
             from pokemon.battle_adapter import side_from_player, side_from_wild, sync_player_side, sync_wild_side
-
+ 
             p_side = side_from_player(nuevo_p, battle)
             w_side = side_from_wild(battle.wild_pokemon, battle)
             apply_entry_abilities_ordered(p_side, w_side, battle, log)
             sync_player_side(p_side, battle, persist=False)
             sync_wild_side(w_side, battle.wild_pokemon, battle)
-            # ── Intimidación: baja Ataque del salvaje 1 etapa ─────────────────
+ 
+            # Intimidación explícita (compatibilidad)
             if hab_str in ("intimidacion", "intimidation"):
                 wild_p = getattr(battle, "wild_pokemon", None)
                 if wild_p:
@@ -3193,7 +3222,8 @@ class WildBattleManager:
                             f"  😤 ¡<b>Intimidación</b> de {nombre} bajó el "
                             f"Ataque de {wild_p.nombre}!\n"
                         )
-
+ 
+            # Impostor
             if hab_str == "impostor":
                 wild_imp    = battle.wild_pokemon
                 hp_orig     = nuevo_p.hp_actual
@@ -3202,11 +3232,8 @@ class WildBattleManager:
                 new_stats["hp"]     = hp_max_orig
                 nuevo_p.stats       = new_stats
                 nuevo_p.movimientos = list(wild_imp.moves)
-                nuevo_p.hp_actual   = hp_orig       # HP conservado
-                # Copiar etapas de stat
+                nuevo_p.hp_actual   = hp_orig
                 battle.player_stat_stages = dict(battle.wild_stat_stages)
-
-                # Transformar se deshace al salir de campo
                 battle.player_transformed     = False
                 battle.player_transform_stats = None
                 battle.player_transform_moves = None
@@ -3253,79 +3280,86 @@ class WildBattleManager:
             f"status={battle.player_status}"
         )
     def switch_pokemon(self, user_id: int, new_pokemon_id: int, bot, is_post_pivot: bool = False) -> bool:
-        """Cambia el Pokémon activo en batalla"""
+        """
+        Cambia el Pokémon activo en batalla.
+ 
+        CAMBIOS:
+        - Al inicio, SIEMPRE se cancela el timer activo (previene timeout
+          mientras el jugador estaba eligiendo reemplazo).
+        - Faint switch ya NO activa el timer hasta que se muestre el panel
+          actualizado (se llama al final).
+        - Se limpian charging_move y recharge_pending al entrar (via
+          _on_pokemon_enter).
+        """
         try:
             battle = self.get_battle(user_id)
             if not battle or battle.state != BattleState.ACTIVE:
                 return False
-
+ 
+            # ── Cancelar timer SIEMPRE al cambiar Pokémon ────────────────────
+            self._cancel_turn_timer(battle)
+ 
             new_pokemon = pokemon_service.obtener_pokemon(new_pokemon_id)
             if not new_pokemon or new_pokemon.hp_actual == 0:
                 return False
-
-            # Leer el flag ANTES de modificar battle para no perderlo,
-            # y resetearlo inmediatamente para que no contamine el siguiente switch.
-            # True  → faint switch (reemplazo limpio, salvaje no ataca).
-            # False → hard switch  (cambio voluntario, salvaje ataca).
+ 
+            # Leer flag antes de modificar
             is_faint_switch: bool = getattr(battle, "awaiting_faint_switch", False)
-            battle.awaiting_faint_switch = False   # ← resetear siempre aquí
-
-            # Cambiar Pokémon activo
+            battle.awaiting_faint_switch = False
+ 
             old_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if not old_pokemon:
                 logger.error("Pokemon no encontrado")
                 return False
-
-            # ── Guardar status del Pokémon que sale ──────────────────────────────────
+ 
+            # Guardar status del Pokémon que sale
             self._save_player_status(battle, old_pokemon.id_unico)
-
+ 
             battle.player_pokemon_id = new_pokemon_id
             battle.participant_ids.add(new_pokemon_id)
-
-            # Intercambiar posición en BD (para que el orden refleje el activo)
+ 
             old_id = old_pokemon.id_unico
             new_id = new_pokemon_id
             pokemon_service.intercambiar_posiciones(old_id, new_id)
-
-            # Limpiar estado de pivot pendiente
+ 
             battle.awaiting_pivot_switch = False
-
-            # Checks de entrada: resetea stages, confusión, bostezo, habilidades
+ 
+            # Checks de entrada: resetea stages, confusión, bostezo,
+            # charging_move, recharge_pending, habilidades
             entry_log: list = []
             self._on_pokemon_enter(battle, new_pokemon_id, entry_log)
-
-            # ── Restaurar status persistente del Pokémon que entra ───────────────────
-            # (se hace DESPUÉS de _on_pokemon_enter para no pisar el reset de confusión)
+ 
+            # Restaurar status persistente del Pokémon que entra
             self._restore_player_status(battle, new_pokemon_id)
-
-            # ── Post-pivot: el wild NO contraataca este turno ─────────────────
+ 
+            # ── Post-pivot: el wild NO contraataca ────────────────────────────
             if is_post_pivot:
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=entry_log)
                 self._start_turn_timer(battle, user_id, bot)
                 return True
-
-            # ── Faint switch: reemplazo limpio — el wild NO contraataca ───────
+ 
+            # ── Faint switch: reemplazo limpio — wild NO contraataca ──────────
             if is_faint_switch:
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=entry_log)
+                # Timer empieza DESPUÉS de que el panel se actualiza
                 self._start_turn_timer(battle, user_id, bot)
                 return True
-
-            # ── Hard switch: cambio voluntario — el wild SÍ contraataca ───────
+ 
+            # ── Hard switch: cambio voluntario — wild SÍ contraataca ──────────
             enemy_log = self._execute_wild_turn(battle)
             all_log   = entry_log + enemy_log
-
-            # Verificar si el nuevo Pokémon cayó por el contraataque
+ 
             updated_new = pokemon_service.obtener_pokemon(new_pokemon_id)
             if updated_new and updated_new.hp_actual <= 0:
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=all_log)
-                import threading
-                threading.Timer(1.5, lambda: self._handle_defeat(battle, bot)).start()
+                import threading as _th
+                _th.Timer(1.5, lambda: self._handle_defeat(battle, bot)).start()
                 return True
-
+ 
             self._refresh_battle_ui(battle, user_id, bot, extra_log=all_log)
             self._start_turn_timer(battle, user_id, bot)
             return True
-
+ 
         except Exception as e:
             logger.error(f"Error cambiando Pokémon: {e}")
             return False
@@ -3405,30 +3439,35 @@ class WildBattleManager:
             battle = self.get_battle(user_id)
             if not battle or battle.state != BattleState.ACTIVE:
                 return
-            # El jugador está eligiendo reemplazo → no penalizar
+            # El jugador está eligiendo reemplazo → no penalizar nunca
             if getattr(battle, "awaiting_faint_switch", False):
+                return
+            if getattr(battle, "awaiting_pivot_switch", False):
                 return
             # Si el turn_number ya avanzó, el jugador actuó → no hacer nada
             if battle.turn_number != turn_number_expected:
                 return
-
+ 
             logger.info(f"[BATTLE] Timeout de turno para usuario {user_id}")
-
+ 
             penalty_log = ["⏰ <b>¡Tiempo agotado!</b> Perdiste tu turno.\n"]
             enemy_log   = self._execute_wild_turn(battle)
             penalty_log.extend(enemy_log)
-
+ 
             # ¿Jugador derrotado?
             updated = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             if updated and updated.hp_actual <= 0:
-                self._handle_defeat(battle, bot)
+                # Mostrar lo que pasó antes de procesar la derrota
+                self._refresh_battle_ui(battle, user_id, bot, extra_log=penalty_log)
+                import threading as _th
+                _th.Timer(2.0, lambda: self._handle_defeat(battle, bot)).start()
                 return
-
+ 
             self._refresh_battle_ui(battle, user_id, bot, extra_log=penalty_log)
-
+ 
             # Arrancar nuevo timer para el siguiente turno
             self._start_turn_timer(battle, user_id, bot)
-
+ 
         except Exception as e:
             logger.error(f"Error en _turn_timeout: {e}", exc_info=True)
 
@@ -3438,7 +3477,19 @@ class WildBattleManager:
 # ══════════════════════════════════════════════════════════════════════════════
 
     def _start_turn_timer(self, battle, user_id: int, bot, seconds: int = 30):
-        """Arranca (o reinicia) el timer de 30 s para el turno actual."""
+        """
+        Arranca (o reinicia) el timer para el turno actual.
+ 
+        GUARD: nunca arrancar el timer mientras el jugador está eligiendo
+        reemplazo por faint switch; en ese estado no hay límite de tiempo.
+        """
+        # ── Guard: faint switch no tiene timer ────────────────────────────────
+        if getattr(battle, "awaiting_faint_switch", False):
+            return
+        # ── Guard: pivot pendiente tampoco tiene timer ────────────────────────
+        if getattr(battle, "awaiting_pivot_switch", False):
+            return
+ 
         self._cancel_turn_timer(battle)
         turn_snapshot = battle.turn_number
         t = threading.Timer(

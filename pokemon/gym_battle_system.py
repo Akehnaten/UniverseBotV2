@@ -155,7 +155,8 @@ class GymBattleData:
     player_leechseeded:     bool = False
     player_confusion_turns: int = 0
     player_delayed_attacks: list = field(default_factory=list)
-    player_charging_move:        Optional[str] = None
+    player_charging_move:   Optional[str] = None
+    player_recharge_pending: bool          = False
     player_focus_interrupted: bool          = False
     # Status persistente por Pokémon individual (clave = id_unico).
     # Permite que veneno, sueño, drenadoras, etc. sobrevivan al switch.
@@ -263,12 +264,24 @@ class GymBattleManager:
             battle.turn_timer = None
 
     def _start_timer(self, battle: GymBattleData, bot) -> None:
+        """
+        Arranca el timer de turno.
+ 
+        GUARD: no arrancar si el jugador está eligiendo reemplazo
+        (state == SWITCHING o is_faint_switch == True).
+        """
+        # ── Guard: no timer durante faint switch ──────────────────────────────
+        if battle.state == GymBattleState.SWITCHING:
+            return
+        if getattr(battle, "is_faint_switch", False):
+            return
+ 
         self._cancel_timer(battle)
-
+ 
         def _timeout() -> None:
             if self.get_battle(battle.user_id) is battle:
                 self._handle_defeat(battle, bot, motivo="⏱️ Tiempo agotado.")
-
+ 
         t = threading.Timer(_BATTLE_TIMEOUT, _timeout)
         t.daemon = True
         t.start()
@@ -589,159 +602,148 @@ class GymBattleManager:
     # ── Turno del jugador ─────────────────────────────────────────────────
 
     def handle_move(self, user_id: int, move_key: str, bot) -> bool:
-        """Procesa el movimiento elegido por el jugador en su turno."""
+        """
+        Procesa el movimiento elegido por el jugador en su turno.
+ 
+        CAMBIOS:
+        - _cancel_timer() es LO PRIMERO que se hace al entrar.
+        - Cuando un Pokémon cae, se muestra el log del turno y se despacha
+          la victoria/derrota con un delay de 2.5s / 2.0s.
+        - La lógica de faint switch se mueve a _on_player_faint().
+        """
         battle = self.get_battle(user_id)
         if not battle or battle.state != GymBattleState.ACTIVE:
             return False
-
+ 
+        # ── Cancelar timer SIEMPRE al recibir acción ──────────────────────────
         self._cancel_timer(battle)
-
-        # Guardia: debe haber Pokémon NPC activo
+ 
         npc_pid = battle.npc_pokemon_id
         if npc_pid is None:
-            # No hay más NPC → victoria (puede ocurrir si el índice ya avanzó)
             self._handle_victory(battle, bot)
             return True
-
+ 
         player = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
         npc    = pokemon_service.obtener_pokemon(npc_pid)
-
+ 
         if not player:
-            # Jugador sin datos: derrota por seguridad
             self._handle_defeat(battle, bot, motivo="⚠️ Error recuperando tu Pokémon.")
             return False
-
+ 
         if not npc:
-            # NPC desapareció (borrado por otra batalla concurrente — Bug A)
-            # Verificar si aún quedan NPCs en el índice actual
             logger.warning(
                 f"[GYM] NPC pid={npc_pid} no encontrado para battle user={battle.user_id}. "
                 "Posible colisión multi-batalla. Avanzando índice."
             )
             battle.npc_current_index += 1
             if battle.npc_pokemon_id is None:
-                # No quedan más NPCs → victoria
                 self._handle_victory(battle, bot)
             else:
-                # Todavía hay NPCs registrados, reiniciar timer para no congelar
                 self._start_timer(battle, bot)
             return True
-
+ 
         p_name   = player.mote or player.nombre
         npc_name = npc.nombre
         log: List[str] = []
-
-        # ── Elegir movimiento del NPC ahora (antes de ejecutar turnos) ────
+ 
+        # ── Elegir movimiento del NPC ─────────────────────────────────────────
         npc_moves_con_pp: List[str] = [
             mv for mv in (npc.movimientos or [])
             if pp_service.verificar_tiene_pp(npc_pid, mv)
         ] or ["tackle"]
-
+ 
         lider    = gimnasio_service.obtener_lider(battle.lider_id) or {}
         ia_cfg   = lider.get("ia_config", {})
         npc_move = GymBattleAI.seleccionar_movimiento(
-            movimientos       = npc_moves_con_pp,
-            estrategia        = ia_cfg.get("estrategia", "aggressive"),
-            hp_ratio          = npc.hp_actual / max(npc.stats.get("hp", 1), 1),
-            rival_tiene_status= bool(battle.player_status),
-            setup_aplicado    = battle.npc_setup_counter,
+            movimientos        = npc_moves_con_pp,
+            estrategia         = ia_cfg.get("estrategia", "aggressive"),
+            hp_ratio           = npc.hp_actual / max(npc.stats.get("hp", 1), 1),
+            rival_tiene_status = bool(battle.player_status),
+            setup_aplicado     = battle.npc_setup_counter,
         )
-
-        # ── Datos de movimientos ──────────────────────────────────────────
+ 
         move_data     = movimientos_service.obtener_movimiento(move_key) or {}
         npc_move_data = movimientos_service.obtener_movimiento(npc_move) or {}
-
+ 
         move_prio     = int(move_data.get("prioridad", 0) or 0)
         npc_move_prio = int(npc_move_data.get("prioridad", 0) or 0)
-
-        # ── Orden de turno ─────────────────────────────────────────────────
-        # determine_turn_order(speed_a, stages_a, speed_b, stages_b, priority_a, priority_b)
+ 
         player_va_primero = determine_turn_order(
-            speed_a   = player.stats.get("vel", 1),
-            stages_a  = battle.player_stat_stages.get("vel", 0),
-            speed_b   = npc.stats.get("vel", 1),
-            stages_b  = battle.wild_stat_stages.get("vel", 0),
-            priority_a= move_prio,
-            priority_b= npc_move_prio,
-            status_a  = battle.player_status,
-            status_b  = battle.wild_status,
+            speed_a    = player.stats.get("vel", 1),
+            stages_a   = battle.player_stat_stages.get("vel", 0),
+            speed_b    = npc.stats.get("vel", 1),
+            stages_b   = battle.wild_stat_stages.get("vel", 0),
+            priority_a = move_prio,
+            priority_b = npc_move_prio,
+            status_a   = battle.player_status,
+            status_b   = battle.wild_status,
         )
-        # Trick Room invierte la prioridad de velocidad
         if battle.trick_room:
             player_va_primero = not player_va_primero
-
+ 
         npc_fainted    = False
         player_fainted = False
-
+ 
         from pokemon.battle_engine import (
-            TWO_TURN_MOVES, FIXED_DAMAGE_MOVES, _roll_num_hits, 
+            TWO_TURN_MOVES, FIXED_DAMAGE_MOVES, _roll_num_hits,
             DRAIN_MOVES, RECOIL_MOVES, _HIGH_CRIT_MOVES
         )
-
+ 
         def _exec_player() -> None:
             nonlocal npc_fainted
-            
-            # 1. VALIDACIONES INICIALES Y CARGA DE DATOS
-            _p = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-            _npc = pokemon_service.obtener_pokemon(npc_pid)  # type: ignore[arg-type]
-            
+ 
+            _p   = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
+            _npc = pokemon_service.obtener_pokemon(npc_pid)
+ 
             if not _p or not _npc or _p.hp_actual <= 0:
                 return
-
-            # Limpieza de strings para lógica y nombres
-            mk_clean = move_key.lower().replace(" ", "").replace("-", "")
+ 
+            mk_clean  = move_key.lower().replace(" ", "").replace("-", "")
             nombre_es = MOVE_NAMES_ES.get(mk_clean, move_key.title())
-
+ 
             log.append(f"\n⚔️ <b>{p_name}</b> usó <b>{nombre_es}</b>!\n")
-
-            # 2. CHECKS DE ESTADO (Parálisis, Sueño, Confusión, etc.)
+ 
             if not check_can_move(battle, is_player=True, actor_name=p_name, log=log):
                 return
-            
+ 
             if check_confusion(
                 battle, is_player=True,
                 actor_name=p_name, actor_level=_p.nivel,
                 actor_atq=_p.stats.get("atq", 50), log=log
             ):
                 return
-
-            # 3. LÓGICA DE MOVIMIENTOS ESPECIALES (Focus Punch y Carga)
-            # Caso especial: Focus Punch (Interrupción si recibió daño antes)
+ 
             if getattr(battle, "player_focus_interrupted", False) and mk_clean == "focuspunch":
                 battle.player_focus_interrupted = False
                 battle.player_charging_move = None
                 log.append(f"  💔 ¡<b>{p_name}</b> perdió la concentración!\n")
                 return
-
-            # Movimientos de 2 turnos (Solar Beam, Fly, etc.)
+ 
             if mk_clean in TWO_TURN_MOVES:
-                cfg_tt = TWO_TURN_MOVES[mk_clean]
+                cfg_tt  = TWO_TURN_MOVES[mk_clean]
                 weather = getattr(battle, "weather", None)
-                skip = cfg_tt["skip_weather"] and weather == cfg_tt["skip_weather"]
-                
+                skip    = cfg_tt["skip_weather"] and weather == cfg_tt["skip_weather"]
+ 
                 if not skip and getattr(battle, "player_charging_move", None) != mk_clean:
                     battle.player_charging_move = mk_clean
                     msg = cfg_tt.get("msg_carga", "¡{nombre} está cargando!")
                     log.append(f"  ⚡ {msg.format(nombre=f'<b>{p_name}</b>')}\n")
                     return
                 else:
-                    battle.player_charging_move = None # Ejecución en segundo turno
-
-            # 4. PREPARACIÓN DE PARÁMETROS DE COMBATE
+                    battle.player_charging_move = None
+ 
             pp_service.usar_pp(battle.player_pokemon_id, move_key)
-            cat = move_data.get("categoria", "Normal")
-            poder = int(move_data.get("poder", 0) or 0)
+            cat     = move_data.get("categoria", "Normal")
+            poder   = int(move_data.get("poder", 0) or 0)
             tipo_mv = move_data.get("tipo", "Normal")
             npc_tipos = pokedex_service.obtener_tipos(_npc.pokemonID)
-            p_tipos = pokedex_service.obtener_tipos(_p.pokemonID)
-
-            # Acumuladores para minimizar llamadas a la DB
-            total_dmg_to_npc = 0
+            p_tipos   = pokedex_service.obtener_tipos(_p.pokemonID)
+ 
+            total_dmg_to_npc       = 0
             total_recoil_to_player = 0
-            total_drain_to_player = 0
-            last_result = None
-
-            # Multiplicador de habilidad del jugador
+            total_drain_to_player  = 0
+            last_result            = None
+ 
             from pokemon.battle_engine import calcular_mult_habilidad as _cmh
             _p_hab = getattr(_p, "habilidad", "") or ""
             _p_hab_mult, _p_quitar_sec = _cmh(
@@ -750,17 +752,11 @@ class GymBattleManager:
             )
             from pokemon.battle_engine import calcular_mult_objeto as _cmo
             _p_obj = getattr(_p, "objeto", "") or ""
-            # Efectividad anticipada para Expert Belt
             _p_type_eff_pre = movimientos_service._calcular_efectividad(tipo_mv, npc_tipos)
             _p_obj_mult, _p_obj_recoil = _cmo(_p_obj, tipo_mv, cat, _p_type_eff_pre)
             poder = max(1, int(poder * _p_hab_mult * _p_obj_mult)) if poder > 0 else poder
-
-            # Life Orb: rastrear para aplicar recoil DESPUÉS de los golpes
             _p_lo_recoil_ratio = _p_obj_recoil
-
-            # 5. RESOLUCIÓN DE DAÑO SEGÚN TIPO DE MOVIMIENTO
-            
-            # --- CASO A: DAÑO FIJO ---
+ 
             if mk_clean in FIXED_DAMAGE_MOVES:
                 cfg_fd = FIXED_DAMAGE_MOVES[mk_clean]
                 if any(t in cfg_fd.get("immune_types", []) for t in npc_tipos):
@@ -768,29 +764,28 @@ class GymBattleManager:
                 else:
                     total_dmg_to_npc = _p.nivel if cfg_fd["damage_fn"] == "level" else cfg_fd.get("damage", 40)
                     log.append(f"  ⚡ Causó <b>{total_dmg_to_npc}</b> de daño fijo.\n")
-
-            # --- CASO B: MOVIMIENTO DE ESTADO ---
+ 
             elif cat == "Estado" or poder == 0:
                 ok = _apply_status_move(
                     battle, move_key, p_name, npc_name,
                     battle.player_stat_stages, battle.wild_stat_stages,
                     log, is_player=True,
                 )
-                if not ok: log.append("  💫 ¡Pero no tuvo efecto!\n")
-
-            # --- CASO C: DAÑO NORMAL (Físico/Especial) ---
+                if not ok:
+                    log.append("  💫 ¡Pero no tuvo efecto!\n")
+ 
             else:
-                w_mult = apply_weather_boost(battle.weather, tipo_mv)
-                t_mult = apply_terrain_boost(battle.terrain, tipo_mv, is_grounded(p_tipos, battle))
+                w_mult   = apply_weather_boost(battle.weather, tipo_mv)
+                t_mult   = apply_terrain_boost(battle.terrain, tipo_mv, is_grounded(p_tipos, battle))
                 num_hits = _roll_num_hits(mk_clean, getattr(_p, "habilidad", "") or "")
-
+ 
                 for h in range(num_hits):
-                    # Verificar si el enemigo sigue vivo antes de cada golpe
-                    if (_npc.hp_actual - total_dmg_to_npc) <= 0: break
-                    
-                    _h_pow = poder * (h + 1) if mk_clean in {"triplekick", "tripleaxel"} else poder
+                    if (_npc.hp_actual - total_dmg_to_npc) <= 0:
+                        break
+ 
+                    _h_pow  = poder * (h + 1) if mk_clean in {"triplekick", "tripleaxel"} else poder
                     _h_name = nombre_es if h == 0 else f"{nombre_es} (golpe {h + 1})"
-
+ 
                     res = resolve_damage_move(
                         attacker_name=p_name, defender_name=npc_name,
                         attacker_level=_p.nivel, attacker_stats=_p.stats,
@@ -804,50 +799,41 @@ class GymBattleManager:
                         drain_ratio=DRAIN_MOVES.get(mk_clean, 0.0),
                         crit_stage=1 if mk_clean in _HIGH_CRIT_MOVES else 0,
                     )
-                    
+ 
                     log.extend(res.log)
                     total_dmg_to_npc += res.damage
-                    
-                    # Log de drenaje inmediato (ej: Gigadrenado)
+ 
                     if res.drained_hp > 0:
                         total_drain_to_player += res.drained_hp
                         log.append(f"  🍃 ¡<b>{p_name}</b> recuperó salud!\n")
-                    
-                    # Acumular retroceso para aplicar al final
+ 
                     recoil_ratio = RECOIL_MOVES.get(mk_clean, 0.0)
                     if recoil_ratio > 0 and res.damage > 0:
                         total_recoil_to_player += max(1, int(res.damage * recoil_ratio))
-                    
+ 
                     last_result = res
-
-                # Interrumpir Focus Punch del rival si recibió daño
+ 
                 if total_dmg_to_npc > 0 and getattr(battle, "npc_charging_move", None) == "focuspunch":
                     battle.npc_focus_interrupted = True
-
-            # 6. PERSISTENCIA EN BASE DE DATOS (Updates Únicos)
-            # Actualizar NPC
+ 
             if total_dmg_to_npc > 0:
                 _npc.hp_actual = max(0, _npc.hp_actual - total_dmg_to_npc)
                 db_manager.execute_update(
                     "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
                     (_npc.hp_actual, npc_pid)
                 )
-
-            # Actualizar Atacante (Drenaje y Retroceso)
+ 
             if total_drain_to_player > 0 or total_recoil_to_player > 0:
                 p_max = _p.stats.get("hp", 1)
                 nuevo_hp_p = min(p_max, max(0, _p.hp_actual + total_drain_to_player - total_recoil_to_player))
-                
                 if total_recoil_to_player > 0:
                     log.append(f"  🔙 ¡<b>{p_name}</b> se hirió con el retroceso! (<b>{total_recoil_to_player}</b> HP)\n")
-                    
                 _p.hp_actual = nuevo_hp_p
                 db_manager.execute_update(
                     "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
                     (_p.hp_actual, battle.player_pokemon_id)
                 )
-
-            # ── Self-KO: Explosión / Autodestrucción debilitan al atacante ──────
+ 
             from pokemon.battle_engine import SELF_KO_MOVES
             if mk_clean in SELF_KO_MOVES and total_dmg_to_npc > 0:
                 _p.hp_actual = 0
@@ -856,8 +842,7 @@ class GymBattleManager:
                     (battle.player_pokemon_id,)
                 )
                 log.append(f"  💥 ¡<b>{p_name}</b> se debilitó por el esfuerzo!\n")
-
-            # Life Orb del jugador
+ 
             if _p_lo_recoil_ratio > 0 and total_dmg_to_npc > 0:
                 _lo_p = max(1, int(_p.stats.get("hp", 1) * _p_lo_recoil_ratio))
                 nuevo_hp_p_lo = max(0, _p.hp_actual - _lo_p)
@@ -867,28 +852,25 @@ class GymBattleManager:
                     (nuevo_hp_p_lo, battle.player_pokemon_id)
                 )
                 log.append(f"  🔴 ¡<b>{p_name}</b> perdió {_lo_p} HP por la Vida Esfera!\n")
-     
-            # 7. EFECTOS SECUNDARIOS Y ESTADOS FINALES
+ 
             if last_result:
                 _apply_secondary_effect(
-                    move_key, last_result, battle, 
-                    is_player_attacker=True, 
+                    move_key, last_result, battle,
+                    is_player_attacker=True,
                     attacker_name=p_name, defender_name=npc_name, log=log
                 )
-
+ 
             if _npc.hp_actual <= 0:
                 log.append(f"  💀 ¡<b>{npc_name}</b> se ha debilitado!\n")
                 npc_fainted = True
-
-        # ─────────────────────────────────────────────────────────────────
+ 
         def _exec_npc() -> None:
-            """Delegación liviana al método de instancia reutilizable."""
             nonlocal player_fainted
             player_fainted = self._apply_npc_attack(
                 battle, npc_move, npc_pid, npc_name, log
             )
-
-        # ── Ejecutar en orden ─────────────────────────────────────────────
+ 
+        # ── Ejecutar en orden ─────────────────────────────────────────────────
         if player_va_primero:
             _exec_player()
             if not npc_fainted:
@@ -897,39 +879,43 @@ class GymBattleManager:
             _exec_npc()
             if not player_fainted:
                 _exec_player()
-
-        # ── Fin de turno ──────────────────────────────────────────────────
+ 
+        # ── Fin de turno ──────────────────────────────────────────────────────
         battle.turn_number += 1
         tick_field_turns(battle, log)
-        _apply_eot_status(battle, log)   # ← mantener llamada existente
-
-        # ── Verificar resultado ───────────────────────────────────────────
+        _apply_eot_status(battle, log)
+ 
+        # ── Verificar resultado ───────────────────────────────────────────────
         _npc_pid_final = battle.npc_pokemon_id
         npc_r    = pokemon_service.obtener_pokemon(_npc_pid_final) if _npc_pid_final is not None else None
         player_r = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-
+ 
         npc_dead    = bool(npc_r    and npc_r.hp_actual    <= 0)
         player_dead = bool(player_r and player_r.hp_actual <= 0)
-
+ 
         if npc_dead and player_dead:
-            # Ambos caen → derrota del jugador (regla estándar Pokémon)
             self._refresh_ui(battle, bot, extra_log=log)
-            self._handle_defeat(
+            import threading as _th
+            _th.Timer(2.0, lambda: self._handle_defeat(
                 battle, bot,
                 motivo="💀 Ambos Pokémon fueron debilitados al mismo tiempo."
-            )
+            )).start()
             return True
-
+ 
         if npc_dead:
+            # Mostrar el log del turno completo ANTES de procesar la caída del NPC
             self._refresh_ui(battle, bot, extra_log=log)
-            self._on_npc_faint(battle, bot)
+            import threading as _th
+            _th.Timer(2.0, lambda: self._on_npc_faint(battle, bot)).start()
             return True
-
+ 
         if player_dead:
+            # Mostrar el log del turno completo ANTES de procesar la caída del jugador
             self._refresh_ui(battle, bot, extra_log=log)
-            self._on_player_faint(battle, bot)
+            import threading as _th
+            _th.Timer(2.0, lambda: self._on_player_faint(battle, bot)).start()
             return True
-
+ 
         self._refresh_ui(battle, bot, extra_log=log)
         self._start_timer(battle, bot)
         return True
@@ -937,23 +923,33 @@ class GymBattleManager:
     # ── Cambio de Pokémon del jugador ─────────────────────────────────────
 
     def handle_switch(self, user_id: int, new_pokemon_id: int, bot) -> bool:
+        """
+        Cambia el Pokémon activo del jugador.
+ 
+        CAMBIOS:
+        - Cancelar el timer SIEMPRE al entrar.
+        - Limpiar charging_move y recharge_pending del entrante.
+        - Faint switch: no arrancar timer hasta después del refresh.
+        """
         battle = self.get_battle(user_id)
         if not battle:
             return False
-
+ 
+        # ── Cancelar timer SIEMPRE ────────────────────────────────────────────
+        self._cancel_timer(battle)
+ 
         new_p = pokemon_service.obtener_pokemon(new_pokemon_id)
         if not new_p or new_p.hp_actual <= 0:
             return False
-
+ 
         old_name = ""
         if battle.player_pokemon_id:
             old = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
             old_name = (old.mote or old.nombre) if old else ""
-
-        # Leer el flag ANTES de modificarlo
+ 
         es_faint_switch = battle.is_faint_switch
-
-        # ── Guardar status del Pokémon que sale ──────────────────────────────────
+ 
+        # Guardar status del Pokémon que sale
         old_pid = battle.player_pokemon_id
         if old_pid:
             battle.player_leechseeded = False
@@ -962,35 +958,57 @@ class GymBattleManager:
                 "sleep_turns":   battle.player_sleep_turns,
                 "toxic_counter": battle.player_toxic_counter,
             }
-
+ 
         battle.player_pokemon_id    = new_pokemon_id
-        # Volátiles: siempre se resetean al cambiar
-        battle.player_stat_stages   = {"atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0}
-        battle.player_yawn_counter  = 0
+ 
+        # ── NUEVO: limpiar mecánicas de 2-turno del entrante ──────────────────
+        battle.player_charging_move    = None
+        battle.player_recharge_pending = False
+ 
+        # Resetear volátiles
+        battle.player_stat_stages     = {"atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0}
+        battle.player_yawn_counter    = 0
         battle.player_confusion_turns = 0
-        battle.is_faint_switch      = False
-        battle.state                = GymBattleState.ACTIVE
-
-        # ── Restaurar status persistente del nuevo Pokémon ───────────────────────
+        battle.is_faint_switch        = False
+        battle.state                  = GymBattleState.ACTIVE
+ 
+        # Restaurar status persistente del nuevo Pokémon
         saved = battle._pokemon_statuses.get(new_pokemon_id, {})
         battle.player_status        = saved.get("status",        None)
         battle.player_sleep_turns   = saved.get("sleep_turns",   0)
         battle.player_toxic_counter = saved.get("toxic_counter", 0)
-        # leechseeded no se restaura: las Drenadoras se curan al hacer switch
-
+ 
         log = []
         if old_name and not es_faint_switch:
             log.append(f"↩️ ¡{old_name} volvió!\n")
         log.append(f"✅ ¡Adelante, <b>{new_p.mote or new_p.nombre}</b>!\n")
-
+ 
+        # Habilidades de entrada del nuevo Pokémon
+        npc_pid = battle.npc_pokemon_id
+        npc_p   = pokemon_service.obtener_pokemon(npc_pid) if npc_pid else None
+        hab     = (getattr(new_p, "habilidad", "") or "").lower().replace(" ", "").replace("-", "")
+        if hab and npc_p:
+            from pokemon.battle_adapter import side_from_player, side_from_gym_npc, sync_player_side, sync_gym_npc
+            from pokemon.battle_engine import apply_entry_ability
+            from pokemon.battle_adapter import side_from_gym_player
+            p_side = side_from_gym_player(battle)
+            # Ajustar hp_actual al nuevo pokemon
+            p_side.hp_actual = new_p.hp_actual
+            p_side.hp_max    = new_p.stats.get("hp", new_p.hp_actual)
+            n_side = side_from_gym_npc(battle)
+            apply_entry_ability(p_side, n_side, battle, log)
+            sync_player_side(p_side, battle, persist=False)
+            sync_gym_npc(n_side, battle, persist=False)
+ 
         if es_faint_switch:
             # Reemplazo gratuito — el NPC NO ataca este turno
             self._refresh_ui(battle, bot, extra_log=log)
+            # Timer empieza DESPUÉS del panel
             self._start_timer(battle, bot)
         else:
             # Switch voluntario — el NPC ataca
             self._exec_npc_free_move(battle, bot, log)
-
+ 
         return True
 
     # ── Lógica de ataque NPC reutilizable ─────────────────────────────────
@@ -1209,15 +1227,24 @@ class GymBattleManager:
     # ── Caída de Pokémon ──────────────────────────────────────────────────
 
     def _on_npc_faint(self, battle: GymBattleData, bot) -> None:
+        """
+        Maneja la caída del Pokémon del NPC.
+ 
+        CAMBIOS:
+        - Cancelar timer al entrar (llega desde Timer delay).
+        - El log ya fue mostrado antes de llamar aquí.
+        """
+        # ── Cancelar timer SIEMPRE ────────────────────────────────────────────
+        self._cancel_timer(battle)
+ 
         _fainted_pid = battle.npc_pokemon_id
-        npc = pokemon_service.obtener_pokemon(_fainted_pid) if _fainted_pid is not None else None
+        npc      = pokemon_service.obtener_pokemon(_fainted_pid) if _fainted_pid is not None else None
         npc_name = npc.nombre if npc else "Pokémon rival"
         log      = [f"\n💀 <b>{npc_name}</b> fue derrotado!\n"]
-
+ 
         self._grant_exp(battle, fainted_npc_pid=battle.npc_pokemon_id, log=log, bot=bot)
-
-        # Guardia: si el jugador también cayó (ej. por retroceso en el mismo turno)
-        # la derrota tiene prioridad sobre el avance al siguiente NPC.
+ 
+        # Guardia: si el jugador también cayó
         player_r = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
         if player_r and player_r.hp_actual <= 0:
             self._handle_defeat(
@@ -1225,7 +1252,7 @@ class GymBattleManager:
                 motivo="💀 Ambos Pokémon fueron debilitados al mismo tiempo."
             )
             return
-
+ 
         battle.npc_current_index  += 1
         battle.wild_stat_stages    = {"atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0}
         battle.wild_status         = None
@@ -1234,13 +1261,14 @@ class GymBattleManager:
         battle.wild_yawn_counter   = 0
         battle.wild_leechseeded    = False
         battle.npc_setup_counter   = 0
-
+ 
         next_pid = battle.npc_pokemon_id
         if next_pid is None:
             # No quedan más Pokémon del líder → victoria
             self._refresh_ui(battle, bot, extra_log=log)
-            self._handle_victory(battle, bot)
-            return  # ← evitar que el código continúe tras declarar victoria
+            import threading as _th
+            _th.Timer(1.5, lambda: self._handle_victory(battle, bot)).start()
+            return
         else:
             next_p  = pokemon_service.obtener_pokemon(next_pid)
             np_name = next_p.nombre if next_p else "Pokémon"
@@ -1253,25 +1281,39 @@ class GymBattleManager:
             self._start_timer(battle, bot)
 
     def _on_player_faint(self, battle: GymBattleData, bot) -> None:
+        """
+        Maneja la caída del Pokémon del jugador.
+ 
+        CAMBIOS:
+        - Cancelar timer al entrar (puede llegar desde un Timer delay).
+        - Limpiar cualquier estado residual del Pokémon caído.
+        - No arrancar timer mientras se muestra el selector.
+        """
+        # ── Cancelar timer SIEMPRE ────────────────────────────────────────────
+        self._cancel_timer(battle)
+ 
         player  = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
         p_name  = (player.mote or player.nombre) if player else "Tu Pokémon"
-        log     = [f"\n💀 <b>{p_name}</b> fue derrotado!\n"]
-
+ 
         equipo     = pokemon_service.obtener_equipo(battle.user_id)
         reemplazos = [
             p for p in equipo
             if p.hp_actual > 0 and p.id_unico != battle.player_pokemon_id
         ]
-
+ 
         if not reemplazos:
-            self._refresh_ui(battle, bot, extra_log=log)
             self._handle_defeat(battle, bot, motivo="💀 Todos tus Pokémon fueron derrotados.")
             return
-
-        battle.is_faint_switch  = True   # ← AGREGAR esta línea
-        battle.state            = GymBattleState.SWITCHING
+ 
+        # ── Preparar faint switch ─────────────────────────────────────────────
+        battle.is_faint_switch    = True
+        battle.state              = GymBattleState.SWITCHING
         battle.player_stat_stages = {"atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0}
-
+ 
+        # Limpiar mecánicas de 2-turno del Pokémon caído
+        battle.player_charging_move    = None
+        battle.player_recharge_pending = False
+ 
         text = f"💀 <b>{p_name}</b> fue derrotado!\n\n¿A quién envías ahora?"
         kb   = types.InlineKeyboardMarkup(row_width=1)
         for p in reemplazos:
@@ -1283,6 +1325,7 @@ class GymBattleManager:
                 callback_data=f"gym_switch_{battle.user_id}_{p.id_unico}",
             ))
         self._edit_message(bot, battle, text, kb)
+        # No arrancar timer — el jugador elige sin límite de tiempo
 
     # ── Victoria y derrota ────────────────────────────────────────────────
 
@@ -1342,9 +1385,17 @@ class GymBattleManager:
     def _handle_defeat(
         self, battle: GymBattleData, bot, motivo: str = ""
     ) -> None:
-        battle.state = GymBattleState.PLAYER_LOSE
+        """
+        Procesa la derrota del jugador.
+ 
+        CAMBIOS:
+        - Cancelar timer SIEMPRE al entrar.
+        """
+        # ── Cancelar timer SIEMPRE ────────────────────────────────────────────
         self._cancel_timer(battle)
-
+ 
+        battle.state = GymBattleState.PLAYER_LOSE
+ 
         lider = gimnasio_service.obtener_lider(battle.lider_id) or {}
         text  = (
             f"💀 <b>Derrota</b>\n\n"

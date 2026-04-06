@@ -773,111 +773,157 @@ class PvPManager:
     def submit_action(
         self,
         user_id: int,
-        action: dict,   # {"type": "move"|"switch", "value": str|int}
+        action: dict,
         bot,
     ) -> Tuple[bool, str]:
         """
         Registra la acción del jugador para este turno.
-
-        Reglas de switch:
-        • HARD SWITCH (acción voluntaria en turno normal): el rival SÍ ataca.
-          Ambos bandos eligen simultáneamente y el turno se resuelve en orden
-          de velocidad; cambiar usa el turno.
-        • CLEAN/FAINT SWITCH (reemplazo tras debilitarse):  el rival NO ataca.
-          needs_faint_switch=True → switch inmediato sin esperar al rival.
+ 
+        CAMBIOS:
+        - Al recibir cualquier acción (move o switch normal), se cancela
+          el timer del bando que acaba de actuar de forma inmediata.
+        - En faint switch: se limpian charging_move / stat_stages correctamente
+          y NO se arranca ningún timer hasta que ambos bandos tengan su
+          Pokémon en campo.
         """
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:
             return False, "❌ No tienes batalla activa."
-
+ 
         side = battle.get_side(user_id)
         if side is None:
             return False, "❌ Error interno."
-
+ 
+        # ── Cancelar timer del bando que acaba de actuar ──────────────────────
+        if side.action_timer:
+            try:
+                side.action_timer.cancel()
+            except Exception:
+                pass
+            side.action_timer = None
+ 
         # ── CASO ESPECIAL: faint switch (reemplazo limpio) ────────────────────
         if side.needs_faint_switch:
             if action.get("type") != "switch":
                 return False, "⚠️ Debes elegir un Pokémon de reemplazo."
-
+ 
             new_idx = int(action["value"])
             if new_idx >= len(side.pokemon_ids):
                 return False, "❌ Índice fuera de rango."
-
+ 
             new_p = pokemon_service.obtener_pokemon(side.pokemon_ids[new_idx])
             if not new_p or new_p.hp_actual <= 0:
                 return False, "❌ Ese Pokémon está debilitado."
-
-            # Ejecutar el switch de forma gratuita (sin turno del rival).
-            # Antes de cambiar active_index:
+ 
+            # Guardar status del caído y limpiar estados de 2-turno
             side.save_slot_status()
-
-            # Cambiar el índice activo
+ 
             old_index = side.active_index
             side.active_index = new_idx
-
-            # Después de reset_stages_on_switch():
             side.reset_stages_on_switch()
+ 
+            # ── NUEVO: limpiar mecánicas de 2-turno del entrante ──────────────
+            # El nuevo Pokémon no hereda charging_move ni pending_action del
+            # anterior que acaba de caer.
+            # PvPSide no tiene charging_move como atributo directo; se maneja
+            # a través del pending_action que fue del Pokémon caído.
+            # Asegurar que no quede ninguna acción residual del turno anterior.
+            side.pending_action = None   # limpiar acción del Pokémon caído
+ 
             side.restore_slot_status(new_idx)
             side.needs_faint_switch = False
-
+ 
             new_name   = new_p.mote or new_p.nombre
             faint_log  = [
                 f"  ✊ <b>{self._get_username(user_id)}</b> "
                 f"envió a <b>{new_name}</b> (reemplazo limpio — sin coste de turno).\n"
             ]
-
+ 
+            # Aplicar habilidades de entrada del nuevo Pokémon
             opponent = battle.get_opponent_side(user_id)
+            
+            # Validación de seguridad: solo procedemos si hay un oponente válido
+            if opponent is not None:
+                opponent_p = opponent.get_active_pokemon()
+                hab = getattr(new_p, "habilidad", "") or ""
+                
+                if hab and opponent_p:
+                    self._apply_pvp_entry_ability(
+                        battle, 
+                        side, 
+                        opponent,  # Ahora el linter sabe que no es None
+                        new_p, 
+                        opponent_p, 
+                        hab, 
+                        faint_log,
+                    )
 
-            # Si el rival también está en faint switch, esperar a que ambos elijan.
+ 
+            # Si el rival también está en faint switch, esperar
             if opponent and opponent.needs_faint_switch:
                 self._update_panels(battle, bot, extra_log=faint_log)
                 self._update_group_broadcast(battle, bot, faint_log)
                 return True, "✅ Pokémon enviado al campo."
-
-            # El rival ya tiene su Pokémon activo → iniciar siguiente turno.
+ 
+            # El rival ya tiene su Pokémon activo → iniciar siguiente turno
             self._update_panels(battle, bot, extra_log=faint_log)
             self._update_group_broadcast(battle, bot, faint_log)
-            self._start_turn_timer(battle, side.user_id, bot)
-            if opponent:
-                self._start_turn_timer(battle, opponent.user_id, bot)
+            # Timer solo si ninguno está en faint switch
+            if not battle.side1.needs_faint_switch and not battle.side2.needs_faint_switch:
+                self._start_turn_timer(battle, side.user_id, bot)
+                if opponent:
+                    self._start_turn_timer(battle, opponent.user_id, bot)
             return True, "✅ Pokémon enviado al campo."
-
+ 
         # ── TURNO NORMAL ──────────────────────────────────────────────────────
         if side.pending_action is not None:
             return False, "⏳ Ya elegiste una acción este turno."
-
+ 
         opponent = battle.get_opponent_side(user_id)
-
-        # Bloquear si el rival todavía está eligiendo reemplazo.
+ 
+        # Bloquear si el rival todavía está eligiendo reemplazo
         if opponent and opponent.needs_faint_switch:
             return (
                 False,
                 "⏳ Espera a que tu rival elija su Pokémon de reemplazo."
             )
-
+ 
         side.pending_action = action
-
+ 
         if battle.both_chose():
             self._cancel_turn_timers(battle)
             self._resolve_turn(battle, bot)
         else:
+            # El rival aún no eligió — arrancar su timer si no está activo
             if opponent and opponent.pending_action is None:
                 self._start_turn_timer(battle, opponent.user_id, bot)
-
+ 
         return True, "✅ Acción registrada."
 
     def _start_turn_timer(self, battle: PvPBattle, user_id: int, bot):
+        """
+        Arranca el timer de turno para un jugador.
+ 
+        GUARD: si cualquiera de los dos bandos está en faint switch,
+        no se arranca el timer — nadie tiene límite mientras se elige reemplazo.
+        """
+        # ── Guard: no timer durante faint switch ──────────────────────────────
+        if battle.side1.needs_faint_switch or battle.side2.needs_faint_switch:
+            return
+ 
         side = battle.get_side(user_id)
         if not side:
             return
-
+ 
         def _timeout():
             if battle.state != PvPState.ACTIVE:
+                return
+            # Si el bando está en faint switch al momento del timeout, ignorar
+            if side.needs_faint_switch:
                 return
             if side.pending_action is not None:
                 return
             logger.info(f"[PVP] Timeout de turno para {user_id}")
-            # Acción por defecto: primer movimiento disponible
             p = side.get_active_pokemon()
             default_move = (p.movimientos[0] if p and p.movimientos else "tackle")
             side.pending_action = {"type": "move", "value": default_move}
@@ -892,7 +938,7 @@ class PvPManager:
             if battle.both_chose():
                 self._cancel_turn_timers(battle)
                 self._resolve_turn(battle, bot)
-
+ 
         t = threading.Timer(self.TURN_TIMEOUT, _timeout)
         t.daemon = True
         t.start()
@@ -914,16 +960,22 @@ class PvPManager:
     def _resolve_turn(self, battle: PvPBattle, bot):
         """
         Resuelve el turno cuando ambos bandos eligieron acción.
-        Orden: determinar velocidades → el más rápido va primero.
+ 
+        CAMBIOS:
+        - Cuando hay ganador, se muestra el panel actualizado CON el log
+          del turno ANTES de llamar _end_battle(), con un delay de 2.5s
+          para que ambos jugadores puedan leer qué pasó.
+        - Cuando hay faint switch pendiente, NO se arrancan timers.
+        - El log del turno se agrega a battle.battle_log antes del panel.
         """
         try:
             battle.turn_number += 1
             turn_log: List[str] = [f"<b>— Turno {battle.turn_number} —</b>\n"]
-
+ 
             s1, s2 = battle.side1, battle.side2
             p1 = s1.get_active_pokemon()
             p2 = s2.get_active_pokemon()
-
+ 
             # Determinar orden por velocidad (Trick Room lo invierte)
             spd1 = BattleUtils.effective_speed(
                 p1.stats.get("vel", 50) if p1 else 50,
@@ -935,56 +987,61 @@ class PvPManager:
                 s2.stat_stages.get("vel", 0),
                 s2.status,
             ) if p2 else 0
-
+ 
             trick_room = getattr(battle, "trick_room", False)
             if trick_room:
                 first, second = (s1, s2) if spd1 <= spd2 else (s2, s1)
             else:
                 first, second = (s1, s2) if spd1 >= spd2 else (s2, s1)
-
+ 
             # Ejecutar primer atacante
             fainted = self._execute_action(battle, first, second, turn_log, bot)
             if not fainted:
-                # Ejecutar segundo atacante
                 self._execute_action(battle, second, first, turn_log, bot)
-
+ 
             # ── Efectos residuales ────────────────────────────────────────────
             a_ctx = side_from_pvp(battle.side1)
             b_ctx = side_from_pvp(battle.side2)
             apply_end_of_turn(a_ctx, b_ctx, battle, turn_log)
             sync_pvp_side(a_ctx, battle.side1)
             sync_pvp_side(b_ctx, battle.side2)
-
+ 
             # ── Verificar fin de batalla ──────────────────────────────────────
             winner = None
             if s1.all_fainted():
                 winner = s2.user_id
             elif s2.all_fainted():
                 winner = s1.user_id
-
+ 
             if winner:
-                self._end_battle(battle, winner, bot, turn_log)
+                # Mostrar panel actualizado con el log del turno ANTES de
+                # terminar — dar tiempo a leer qué pasó.
+                self._update_panels(battle, bot, extra_log=turn_log)
+                self._update_group_broadcast(battle, bot, turn_log)
+                import threading as _th
+                _th.Timer(2.5, lambda: self._end_battle(battle, winner, bot, [])).start()
                 return
-
+ 
             # ── Detectar faint switch necesario ──────────────────────────────
-            # Un bando necesita switch limpio si su Pokémon activo se debilitó
-            # pero aún quedan Pokémon vivos en el equipo.
             faint_switches: list = []
             for _side in (s1, s2):
                 _active = _side.get_active_pokemon()
                 if _active and _active.hp_actual <= 0 and not _side.all_fainted():
                     _side.needs_faint_switch = True
+                    # Limpiar pending_action del Pokémon caído
+                    _side.pending_action = None
                     faint_switches.append(_side)
-
-            # Limpiar acciones del turno.
-            s1.pending_action = None
-            s2.pending_action = None
-
+ 
+            # Limpiar acciones del turno en los bandos que NO tienen faint switch
+            for _side in (s1, s2):
+                if not _side.needs_faint_switch:
+                    _side.pending_action = None
+ 
             self._update_panels(battle, bot, extra_log=turn_log)
             self._update_group_broadcast(battle, bot, turn_log)
-
+ 
             if faint_switches:
-                # Avisar a cada jugador que debe elegir reemplazo.
+                # Avisar a cada jugador que debe elegir reemplazo
                 for _fside in faint_switches:
                     try:
                         bot.send_message(
@@ -997,13 +1054,13 @@ class PvPManager:
                         )
                     except Exception:
                         pass
-                # NO iniciamos timers; el turno se reanuda en submit_action.
+                # NO iniciar timers mientras haya faint switches pendientes
                 return
-
-            # ── Turno normal: arrancar timers para el siguiente turno ─────────
+ 
+            # ── Turno normal: arrancar timers ─────────────────────────────────
             self._start_turn_timer(battle, s1.user_id, bot)
             self._start_turn_timer(battle, s2.user_id, bot)
-
+ 
         except Exception as e:
             logger.error(f"[PVP] Error en _resolve_turn: {e}", exc_info=True)
 
@@ -2335,32 +2392,40 @@ class PvPManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _end_battle(self, battle: PvPBattle, winner_id: int, bot, turn_log: list):
-        """Cierra la batalla, actualiza MMR y notifica."""
-        # ── Restaurar HP y stats originales (PvP no consume recursos) ────────────
-        self._restaurar_equipo_pvp(battle)
-        battle.state    = PvPState.FINISHED
-        battle.winner_id = winner_id
+        """
+        Cierra la batalla, actualiza MMR y notifica.
+ 
+        CAMBIOS:
+        - El panel ya fue actualizado con el log del turno antes de llamar
+          aquí (desde _resolve_turn con delay). turn_log puede estar vacío.
+        - Se cancela los timers al inicio para evitar race conditions.
+        """
+        # ── Cancelar timers SIEMPRE al entrar ─────────────────────────────────
         self._cancel_turn_timers(battle)
-
+ 
+        # Restaurar HP y stats originales
+        self._restaurar_equipo_pvp(battle)
+        battle.state     = PvPState.FINISHED
+        battle.winner_id = winner_id
+ 
         loser_id = (
             battle.side2.user_id if winner_id == battle.side1.user_id
             else battle.side1.user_id
         )
-
+ 
         w_name = self._get_username(winner_id)
         l_name = self._get_username(loser_id)
-
-        turn_log.append(f"\n🏆 ¡<b>{w_name}</b> ganó la batalla!\n")
-
-        # Actualizar MMR (lógica ELO absorbida aquí — no depende de pvp_system)
+ 
+        result_log = [f"\n🏆 ¡<b>{w_name}</b> ganó la batalla!\n"]
+        if turn_log:
+            result_log = turn_log + result_log
+ 
+        # Actualizar MMR
         try:
             self._actualizar_mmr(winner_id, loser_id, battle.fmt.value)
         except Exception as _e:
             logger.warning(f"[PVP] No se pudo actualizar MMR: {_e}")
-
-        # Curar Pokémon del perdedor al 50% (opcional QoL)
-        # (no implementado aquí para no asumir política de juego)
-
+ 
         # Notificar a ambos jugadores
         result_txt = f"{'🏆' if winner_id == battle.side1.user_id else '💀'} ¡{w_name} ganó!\n"
         for side in (battle.side1, battle.side2):
@@ -2379,10 +2444,10 @@ class PvPManager:
                     bot.send_message(side.user_id, txt, parse_mode="HTML")
             except Exception:
                 pass
-
+ 
         # Actualizar broadcast
-        self._update_group_broadcast(battle, bot, turn_log)
-
+        self._update_group_broadcast(battle, bot, result_log)
+ 
         # Limpiar estado
         with self._lock:
             self._user_battle.pop(battle.side1.user_id, None)

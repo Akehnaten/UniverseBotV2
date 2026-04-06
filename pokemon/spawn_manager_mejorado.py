@@ -155,16 +155,23 @@ class SpawnManager:
                 f"⚔️ ¿Te atreves a combatirlo?"
             )
  
-            from telebot import types
+            # Aseguramos que son enteros puros
+            t_id = int(self.thread_id)
+            p_id = int(spawn.pokemon_id)
+
+            # Creamos el teclado desde cero absoluto
             keyboard = types.InlineKeyboardMarkup()
             keyboard.add(
                 types.InlineKeyboardButton(
-                    "⚔️ ¡Combatir!",
-                    callback_data=f"combatir_{self.thread_id}_{spawn.pokemon_id}",
+                    text="⚔️ ¡Combatir!",
+                    callback_data=f"combatir_{t_id}_{p_id}"
                 )
             )
  
             msg = self._enviar_sprite_o_texto(caption, keyboard)
+
+
+
             if msg:
                 self.spawn_messages[self.thread_id] = msg.message_id
                 logger.info(
@@ -184,90 +191,79 @@ class SpawnManager:
     def _enviar_sprite_o_texto(
         self,
         caption: str,
-        keyboard: types.InlineKeyboardMarkup,
+        keyboard: Optional[types.InlineKeyboardMarkup],
     ) -> Optional[types.Message]:
-        """
-        Envía el sprite desconocido (GIF/foto) o un mensaje de texto como fallback.
+        import json # Importación local para asegurar disponibilidad
+        
+        t_id = int(self.thread_id)
+        p_id = 0
+        
+        # Intentar extraer el ID del Pokémon del keyboard original
+        if keyboard and hasattr(keyboard, 'keyboard'):
+            try:
+                # Buscamos en la estructura de telebot: keyboard.keyboard es una lista de listas
+                for row in keyboard.keyboard:
+                    for btn in row:
+                        if hasattr(btn, 'callback_data') and btn.callback_data:
+                            p_id = int(btn.callback_data.split("_")[-1])
+                            break
+            except Exception:
+                p_id = 0
 
-        Estrategia de reintento con thread_id:
-          1. Intenta enviar sprite con message_thread_id.
-          2. Si el sprite falla por hilo inexistente (400 "message thread not found"),
-             reintenta el sprite SIN thread_id.
-          3. Si el sprite no existe o falla por otro motivo, cae a texto plano.
-          4. El fallback de texto también reintenta sin thread_id si el hilo no existe.
-        """
-        sprite_path = (
-            Path(self.sprite_desconocido)
-            if isinstance(self.sprite_desconocido, str)
-            else self.sprite_desconocido
-        )
-
-        def _hilo_no_existe(exc: Exception) -> bool:
-            """Detecta si la excepción es un 400 por hilo inexistente."""
-            return "message thread not found" in str(exc).lower()
+        # CONSTRUCCIÓN MANUAL DEL DICCIONARIO
+        markup_dict = {
+            "inline_keyboard": [[
+                {"text": "⚔️ ¡Combatir!", "callback_data": f"combatir_{t_id}_{p_id}"}
+            ]]
+        }
+        
+        # EL CAMBIO CLAVE: Convertir a STRING JSON manualmente
+        # Telegram API espera un string JSON en el parámetro reply_markup
+        markup_final = json.dumps(markup_dict)
 
         def _enviar_media(path: Path, thread_id: Optional[int]) -> Optional[types.Message]:
-            """Envía GIF o foto desde *path*; thread_id=None omite el hilo."""
             with open(path, "rb") as f:
                 is_gif = path.suffix.lower() == ".gif"
-                kwargs: dict = dict(
-                    chat_id=self.canal_id,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                )
+                kwargs = {
+                    "chat_id": self.canal_id,
+                    "caption": caption,
+                    "parse_mode": "HTML",
+                    "reply_markup": markup_final, # PASAMOS EL STRING JSON
+                }
                 if thread_id is not None:
                     kwargs["message_thread_id"] = thread_id
+                
                 if is_gif:
-                    kwargs["animation"] = f
-                    return self.bot.send_animation(**kwargs)
-                kwargs["photo"] = f
-                return self.bot.send_photo(**kwargs)
+                    return self.bot.send_animation(animation=f, **kwargs)
+                return self.bot.send_photo(photo=f, **kwargs)
 
         # ── Intentar envío con sprite ─────────────────────────────────────────
-        # La variable _path captura sprite_path ya verificado como Path (no None)
-        # para que el type checker lo vea con tipo concreto dentro de _enviar_media.
+        sprite_path = Path(self.sprite_desconocido) if self.sprite_desconocido else None
         if sprite_path and sprite_path.exists():
-            _path: Path = sprite_path
             try:
-                return _enviar_media(_path, self.thread_id)
+                return _enviar_media(sprite_path, self.thread_id)
             except Exception as exc:
-                if _hilo_no_existe(exc):
-                    logger.warning(
-                        "[SPAWN] Thread %s no encontrado al enviar sprite — "
-                        "reintentando sin thread_id.", self.thread_id
-                    )
-                    try:
-                        return _enviar_media(_path, None)
-                    except Exception as exc2:
-                        logger.warning(
-                            "[SPAWN] Error enviando sprite sin thread_id: %s — usando texto.", exc2
-                        )
-                else:
-                    logger.warning("[SPAWN] Error enviando sprite: %s — usando texto.", exc)
+                logger.warning(f"[SPAWN] Fallo sprite: {exc}")
 
-        # ── Fallback a texto plano ────────────────────────────────────────────
+        # ── Fallback a texto plano (SIN BOTONES SI FALLA OTRA VEZ) ─────────────
         try:
             return self.bot.send_message(
                 chat_id=self.canal_id,
                 text=caption,
                 parse_mode="HTML",
-                reply_markup=keyboard,
+                reply_markup=markup_final,
                 message_thread_id=self.thread_id,
             )
         except Exception as exc:
-            if _hilo_no_existe(exc):
-                logger.warning(
-                    "[SPAWN] Thread %s no encontrado en fallback texto — "
-                    "reintentando sin thread_id.", self.thread_id
-                )
-                return self.bot.send_message(
-                    chat_id=self.canal_id,
-                    text=caption,
-                    parse_mode="HTML",
-                    reply_markup=keyboard,
-                )
-            raise
+            logger.error(f"[SPAWN] Fallo con botones, enviando solo texto: {exc}")
+            # ÚLTIMA INSTANCIA: Solo texto. Si esto falla, el problema es el canal/hilo.
+            return self.bot.send_message(
+                chat_id=self.canal_id,
+                text=caption,
+                parse_mode="HTML",
+                message_thread_id=self.thread_id
+            )
+
 
     # ──────────────────────────────────────────────────────────────────────────
     # INICIO DE COMBATE (spawn público)
