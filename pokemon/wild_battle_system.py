@@ -838,7 +838,16 @@ class WildBattleManager:
         ]
         
         for uid in expired:
-            del self.active_battles[uid]
+            battle_exp = self.active_battles.pop(uid)
+            # Limpiar spawn: si la batalla crasheó sin llegar a
+            # _handle_victory/_handle_defeat, el spawn quedaba en
+            # spawns_activos bloqueando nuevos auto-spawns del canal.
+            try:
+                spawn_service.limpiar_spawn(battle_exp.thread_id)
+            except Exception as _se:
+                logger.warning(
+                    f"[BATTLE] Error limpiando spawn expirado user={uid}: {_se}"
+                )
             logger.info(f"[BATTLE] Batalla expirada limpiada: user {uid}")
         
         self._last_cleanup = time.time()
@@ -1256,8 +1265,14 @@ class WildBattleManager:
             if not battle:
                 return False
 
-            # Durante faint-switch el jugador debe elegir reemplazo primero
+            # ── Bloquear durante faint switch ─────────────────────────────────
+            # Cuando awaiting_faint_switch=True el jugador DEBE elegir un
+            # Pokémon de reemplazo. Usar un ítem activaba erróneamente la lógica
+            # de 'enviar al campo', haciendo que el Pokémon pareciera elegirse solo.
             if getattr(battle, "awaiting_faint_switch", False):
+                logger.debug(
+                    f"[BATTLE] item bloqueado (faint switch pendiente) user={user_id}"
+                )
                 return False
 
             player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
@@ -1665,75 +1680,69 @@ class WildBattleManager:
           - Error en aplicar item se muestra sin terminar el turno
         """
         try:
-            battle = self.get_battle(user_id)
-            if not battle or battle.state != BattleState.ACTIVE:
-                return False
+                battle = self.get_battle(user_id)
+                if not battle or battle.state != BattleState.ACTIVE:
+                    return False
 
-            # Verificar stock
-            inventario = items_service.obtener_inventario(user_id)
-            if inventario.get(item_nombre, 0) <= 0:
-                return False
+                # ── Bloquear durante faint switch ─────────────────────────────
+                # El jugador debe elegir un Pokémon de reemplazo antes de poder
+                # usar ítems. Permitirlo aquí pisaba log_lines y activaba
+                # erróneamente la lógica de "enviar al campo", haciendo que el
+                # Pokémon sobre el que se usaba el ítem se enviara solo al campo.
+                if getattr(battle, "awaiting_faint_switch", False):
+                    logger.debug(
+                        f"[BATTLE] item bloqueado (faint switch pendiente) user={user_id}"
+                    )
+                    return False
 
-            # Aplicar efecto
-            resultado = items_service.aplicar_item_batalla(item_nombre, pokemon_id)
+                # Verificar stock
+                inventario = items_service.obtener_inventario(user_id)
+                if inventario.get(item_nombre, 0) <= 0:
+                    return False
 
-            if not resultado.get("exito", False):
-                msg = resultado.get("mensaje", "No se pudo usar el item.")
-                # Mostrar error pero NO consumir ni avanzar turno
-                self._edit_battle_message(
-                    bot, user_id, battle.message_id,
-                    f"❌ {msg}\n\nElige otra acción.",
-                )
-                import threading
-                threading.Timer(1.5, lambda: self._send_battle_menu(battle, bot)).start()
-                return True   # handled
+                # Aplicar efecto
+                resultado = items_service.aplicar_item_batalla(item_nombre, pokemon_id)
 
-            # Consumir item del inventario
-            items_service.usar_item(user_id, item_nombre, 1)
+                if not resultado.get("exito", False):
+                    msg = resultado.get("mensaje", "No se pudo usar el item.")
+                    # Mostrar error pero NO consumir ni avanzar turno
+                    self._edit_battle_message(
+                        bot, user_id, battle.message_id,
+                        f"❌ {msg}\n\nElige otra acción.",
+                    )
+                    import threading
+                    threading.Timer(1.5, lambda: self._send_battle_menu(battle, bot)).start()
+                    return True   # handled
 
-            # Cancelar timer — el jugador actuó
-            self._cancel_turn_timer(battle)
+                # Consumir item del inventario
+                items_service.usar_item(user_id, item_nombre, 1)
 
-            # Log del turno del jugador
-            nombre_poke = self._get_pokemon_display_name(pokemon_id)
-            efecto_msg  = resultado.get("mensaje", "Efecto aplicado.")
-            log_lines   = [
-                f"✅ Usaste <b>{item_nombre.title()}</b> en {nombre_poke}.\n",
-                f"  {efecto_msg}\n",
-            ]
+                # Cancelar timer — el jugador actuó
+                self._cancel_turn_timer(battle)
 
-             # Leer el flag aquí mismo para ser autosuficientes,
-            # independientemente de si el header del patch fue aplicado.
-            # True  → faint switch: el Pokémon anterior se debilitó,
-            #          el jugador elige reemplazo fuera del turno → salvaje NO ataca.
-            # False → hard switch: cambio voluntario en combate → salvaje SÍ ataca.
-            is_faint_switch: bool = getattr(battle, "awaiting_faint_switch", False)
+                # Log del turno del jugador
+                nombre_poke = self._get_pokemon_display_name(pokemon_id)
+                efecto_msg  = resultado.get("mensaje", "Efecto aplicado.")
+                log_lines   = [
+                    f"✅ Usaste <b>{item_nombre.title()}</b> en {nombre_poke}.\n",
+                    f"  {efecto_msg}\n",
+                ]
 
-            log_lines = [f"🔄 ¡{nombre_poke} entró al combate!\n"]
-
-            if is_faint_switch:
-                # ── FAINT SWITCH: reemplazo limpio ────────────────────────────
-                battle.awaiting_faint_switch = False
-                battle.player_stat_stages = {k: 0 for k in battle.player_stat_stages}
-                log_lines.append("  ✊ Reemplazo limpio — el rival no ataca este turno.\n")
-                self._refresh_battle_ui(battle, user_id, bot, extra_log=log_lines)
-                self._start_turn_timer(battle, user_id, bot)
-
-            else:
-                # ── HARD SWITCH: cambio voluntario en combate ─────────────────
+                # El salvaje contraataca tras el uso del ítem (turno normal)
                 rival_log = self._execute_wild_turn(battle)
                 if rival_log:
                     log_lines.extend(rival_log)
 
                 updated = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
                 if updated and updated.hp_actual <= 0:
-                    self._handle_defeat(battle, bot)
+                    self._refresh_battle_ui(battle, user_id, bot, extra_log=log_lines)
+                    import threading as _th
+                    _th.Timer(2.0, lambda: self._handle_defeat(battle, bot)).start()
                     return True
 
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=log_lines)
                 self._start_turn_timer(battle, user_id, bot)
-
-            return True
+                return True
 
         except Exception as e:
             logger.error(f"Error en handle_use_item_on_pokemon: {e}", exc_info=True)
@@ -2284,20 +2293,11 @@ class WildBattleManager:
                         except Exception:
                             pass
 
-            # Si el jugador fue debilitado → manejar derrota
-            player_check = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-            if player_check and player_check.hp_actual <= 0:
-                threading.Timer(1.5, lambda: self._handle_defeat(battle, bot)).start()
-                return
-
-            # Si el salvaje fue debilitado → victoria
-            if battle.wild_pokemon.hp_actual <= 0:
-                player_check2 = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-                threading.Timer(1.5, lambda: self._handle_victory(battle, player_check2, bot)).start()
-                return
-
-            # Volver al menú principal (con sprite + HP actualizados + log)
-            threading.Timer(2.0, lambda: self._send_battle_menu(battle, bot)).start()
+            # _refresh_battle_ui SOLO actualiza la UI.
+            # execute_move es el único punto de decisión de victoria/derrota.
+            # La detección de KO aquí causaba que _handle_victory y
+            # _handle_defeat se llamaran dos veces (doble Timer), duplicando
+            # mensajes al usuario y logs en consola del servidor.
 
         except Exception as e:
             logger.error(f"Error en _refresh_battle_ui: {e}", exc_info=True)
@@ -3017,13 +3017,27 @@ class WildBattleManager:
         - Se cancela el timer SIEMPRE al entrar.
         - La victoria ya llega con delay desde execute_move (2.5s),
           por lo que no se añade un delay adicional aquí.
+        - Guard atómico al inicio: elimina la batalla de active_battles
+          para que un segundo llamado concurrente retorne inmediatamente.
         """
+        user_id = battle.user_id
+
+        # ── Guard atómico contra doble llamado ────────────────────────────────
+        # _refresh_battle_ui y execute_move programaban este método con dos
+        # threading.Timer distintos. El primero elimina la batalla y procesa.
+        # El segundo no la encuentra y retorna → ni EXP ni log duplicados.
+        if self.active_battles.get(user_id) is not battle:
+            logger.debug(
+                f"[BATTLE] _handle_victory ignorado (batalla ya cerrada) user={user_id}"
+            )
+            return
+        del self.active_battles[user_id]
+
         try:
             # ── Cancelar timer SIEMPRE ────────────────────────────────────────
             self._cancel_turn_timer(battle)
- 
-            wild    = battle.wild_pokemon
-            user_id = battle.user_id
+
+            wild = battle.wild_pokemon
  
             # Si player_pokemon no se pasó o es None, intentar releer
             if player_pokemon is None:
@@ -3067,13 +3081,11 @@ class WildBattleManager:
             except Exception as _rp_e:
                 logger.error(f"[POS] Error restaurando posiciones: {_rp_e}")
  
-            # Limpiar estado
+            # Limpiar spawn (active_battles ya fue limpiado en el guard al inicio)
             spawn_service.limpiar_spawn(battle.thread_id)
-            if user_id in self.active_battles:
-                del self.active_battles[user_id]
- 
+
             self._edit_battle_message(bot, user_id, battle.message_id, text)
- 
+
             logger.info(
                 f"[BATTLE] Victoria: Usuario {user_id} derrotó {wild.nombre} "
                 f"Nv.{wild.nivel} → +{exp_ganada} EXP, +{money_reward} cosmos"
@@ -3112,6 +3124,13 @@ class WildBattleManager:
             )
  
             if has_more:
+                # Guard: si ya estamos en faint switch no re-editar el mensaje
+                if getattr(battle, "awaiting_faint_switch", False):
+                    logger.debug(
+                        f"[BATTLE] _handle_defeat ignorado (ya en faint switch) "
+                        f"user={battle.user_id}"
+                    )
+                    return
                 # ── Mostrar selector de reemplazo ─────────────────────────────
                 # NO se arranca el timer aquí — el jugador elige sin presión.
                 p_name = player_pokemon.mote or player_pokemon.nombre
@@ -3144,18 +3163,25 @@ class WildBattleManager:
                 f"{wild.nombre} derrotó a todos tus Pokémon.\n\n"
                 "Ve al Centro Pokémon para curarlos."
             )
+            # Guard derrota total: igual que _handle_victory, atómico
+            _uid = battle.user_id
+            if self.active_battles.get(_uid) is not battle:
+                logger.debug(
+                    f"[BATTLE] _handle_defeat (derrota total) ignorado user={_uid}"
+                )
+                return
+            del self.active_battles[_uid]
+
             battle.state = BattleState.PLAYER_LOSE
- 
+
             # Restaurar posiciones del equipo
             try:
                 if battle.posiciones_originales:
                     pokemon_service.restaurar_posiciones(battle.posiciones_originales)
             except Exception as _rp_e:
                 logger.error(f"[POS] Error restaurando posiciones en derrota: {_rp_e}")
- 
+
             spawn_service.limpiar_spawn(battle.thread_id)
-            if user_id in self.active_battles:
-                del self.active_battles[user_id]
  
             self._edit_battle_message(bot, user_id, battle.message_id, text)
  

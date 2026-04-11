@@ -759,12 +759,14 @@ def apply_ailment(
 
     log.append(_MSG.get(ailment, f"  💫 {target_name} fue afectado.\n"))
 
-    # ── Primer tick inmediato de veneno / quemadura ───────────────────────────
-    # En los juegos principales el daño de status ocurre al FINAL del turno
-    # en que se aplica, no a partir del siguiente.  Lo calculamos aquí para
-    # respetar ese comportamiento.
-    if ailment in ("psn", "tox", "brn"):
-        _apply_status_first_tick(battle, ailment, target_is_wild, target_name, log)
+    # El daño de psn/tox/brn ocurre SOLO al final del turno (EOT),
+    # gestionado por calculate_residual_effects — incluyendo el turno
+    # en que se aplicó el status.
+    #
+    # No aplicar tick inmediato aquí: causaba doble daño en turno 1.
+    # Para tóxico: first_tick(contador=1→1/16) + EOT(contador=1→1/16)
+    # → turno 1 = 2/16, turno 2 = 2/16 → parecía que no escalaba.
+    # Sin el first_tick: EOT turno 1 = 1/16, turno 2 = 2/16, turno 3 = 3/16.
 
 def _apply_status_first_tick(
     battle,
