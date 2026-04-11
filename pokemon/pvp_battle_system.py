@@ -158,8 +158,8 @@ class PvPSide:
     sleep_turns:      int = 0
     yawn_counter:     int = 0
     crit_stage:       int = 0   # etapa de golpe crítico (Gen 6+: 0/1/2/3)
-    confusion_turns:  int = 0       # ← NUEVO
-    leechseeded:      bool = False   # ← NUEVO
+    confusion_turns:  int = 0
+    leechseeded:      bool = False
     # Mensajes de Telegram
     dm_message_id:        Optional[int] = None  # panel texto + botones (SIEMPRE texto)
     rival_sprite_msg_id:  Optional[int] = None  # foto del rival  (arriba en DM)
@@ -167,8 +167,8 @@ class PvPSide:
     # Acción elegida este turno (None = aún no eligió)
     pending_action:   Optional[dict] = None  # {"type":"move"|"switch","value":str|int}
     action_timer:     Optional[threading.Timer] = field(default=None, repr=False)
-    # True cuando el Pokémon activo se debilitó en combate y el jugador debe
-    # elegir un reemplazo de forma GRATUITA (el rival no ataca en ese instante).
+    # True cuando el Pokémon activo se debilitó y el jugador debe elegir reemplazo.
+    # El rival NO ataca mientras este flag esté activo.
     needs_faint_switch: bool = False
     # Status persistente indexado por slot (posición en pokemon_ids)
     slot_statuses: dict = field(default_factory=dict)
@@ -221,21 +221,15 @@ class PvPSide:
         Los estados PERSISTENTES (status, leechseed, toxic, sleep) NO se borran:
         se guardan/restauran a través de slot_statuses.
         """
-        # ── Volátiles (siempre se limpian al cambiar) ────────────────────────
         self.stat_stages     = {"atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0}
         self.yawn_counter    = 0
         self.crit_stage      = 0
-        self.confusion_turns = 0   # Confusión es volátil
+        self.confusion_turns = 0
         self.needs_faint_switch = False
-        # ── Acción pendiente: SIEMPRE limpiar al cambiar ──────────────────────
-        # El nuevo Pokémon NO hereda la acción (movimiento) que tenía registrada
-        # el anterior. Sin esta línea, el reemplazo ejecutaba el movimiento del
-        # Pokémon caído en el siguiente turno.
+        # CRÍTICO: limpiar pending_action al cambiar para que el nuevo Pokémon
+        # no herede ni ejecute la acción del anterior.
         self.pending_action  = None
-        # ── Persistentes (NO tocar aquí — manejados por slot_statuses) ───────
-        # self.status, self.toxic_counter, self.sleep_turns, self.leechseeded
-        # → se guardan en save_slot_status() y se restauran en restore_slot_status()
-
+        # Persistentes: NO tocar aquí — manejados por slot_statuses.
 
 
 @dataclass
@@ -264,10 +258,10 @@ class PvPBattle:
     group_msg_id:    Optional[int] = None
     # Historial de líneas para el broadcast
     broadcast_log:   List[str] = field(default_factory=list)
-    battle_log:      List[str] = field(default_factory=list)   # log mostrado en DM
+    battle_log:      List[str] = field(default_factory=list)
     winner_id:       Optional[int] = None
     created_at:      float = field(default_factory=time.time)
-    # ── Snapshot para restaurar HP/stats reales al finalizar ─────────────────
+    # Snapshot para restaurar HP/stats reales al finalizar
     _hp_snapshot:    Dict[int, int]  = field(default_factory=dict, repr=False)
     _stats_snapshot: Dict[int, dict] = field(default_factory=dict, repr=False)
 
@@ -312,7 +306,7 @@ class PvPManager:
         self._challenges:   Dict[int, PvPChallenge] = {}
         self._battles:      Dict[str, PvPBattle]    = {}
         self._user_battle:  Dict[int, str]          = {}
-        self._pending_vgc:  Dict[str, dict]         = {}  # battle_id → VGC selection state
+        self._pending_vgc:  Dict[str, dict]         = {}
         self._lock = threading.Lock()
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -341,7 +335,6 @@ class PvPManager:
             nivel  = p.nivel
             hp_max = p.stats.get("hp", 1) or 1
 
-            # Mostrar stats escalados a nivel 50 como referencia
             stats50 = pokedex_service.calcular_stats(
                 p.pokemonID, 50, p.ivs, p.evs, p.naturaleza
             )
@@ -357,7 +350,6 @@ class PvPManager:
                 callback_data=f"pvp_vgcsel_{battle_id}_{user_id}_{pid}",
             ))
 
-        # Botón confirmar (solo habilitado con exactamente 4)
         if len(seleccionados) == 4:
             markup.add(types.InlineKeyboardButton(
                 "✅ Confirmar equipo",
@@ -393,11 +385,9 @@ class PvPManager:
             seleccionados.remove(pokemon_id)
         elif len(seleccionados) < 4:
             seleccionados.append(pokemon_id)
-        # Si ya hay 4 y no está seleccionado → ignorar
 
         estado["selections"][user_id] = seleccionados
 
-        # Reconstruir UI con el estado actualizado
         ch     = estado["challenge"]
         eq_ids = (estado["equipo1"]
                 if user_id == ch.challenger_id else estado["equipo2"])
@@ -474,7 +464,6 @@ class PvPManager:
         except Exception:
             pass
 
-        # Verificar si ambos confirmaron
         ch = estado["challenge"]
         if all(estado["confirmed"].values()):
             self._iniciar_batalla_vgc(battle_id, estado, bot)
@@ -501,7 +490,6 @@ class PvPManager:
             self._user_battle[ch.challenged_id]     = battle_id
             self._pending_vgc.pop(battle_id, None)
 
-        # Escalar a nivel 50
         self._escalar_equipo_pvp(battle, pids1 + pids2)
 
         logger.info(f"[PVP] VGC batalla iniciada: {battle_id}")
@@ -546,7 +534,6 @@ class PvPManager:
         with self._lock:
             self._challenges[challenged_id] = ch
 
-        # Auto-expirar en 120 s
         threading.Timer(120, self._expire_challenge, args=(challenged_id,)).start()
         return True, "✅ Desafío enviado."
 
@@ -567,11 +554,9 @@ class PvPManager:
         eq2 = pokemon_service.obtener_equipo(challenged_id)
 
         if ch.fmt == PvPFormat.ONE_V_ONE:
-            # Incluir TODO el equipo (HP > 0) normalizado a nivel 50
             pids1 = [p.id_unico for p in eq1 if p.hp_actual > 0]
             pids2 = [p.id_unico for p in eq2 if p.hp_actual > 0]
 
-            # Fallback: si por alguna razón no hay Pokémon con HP, usar todos
             if not pids1:
                 pids1 = [p.id_unico for p in eq1]
             if not pids2:
@@ -590,18 +575,14 @@ class PvPManager:
                 self._user_battle[ch.challenger_id]   = battle_id
                 self._user_battle[challenged_id]      = battle_id
 
-            # Escalar a nivel 50 ANTES de enviar paneles
             self._escalar_equipo_pvp(battle, pids1 + pids2)
 
             logger.info(f"[PVP] Batalla 1v1 iniciada: {battle_id}")
 
-            # ── Disparar habilidades de entrada al inicio ──────────────────
-            # Se recolecta el log para mostrarlo junto al primer panel.
             _entry_log: List[str] = []
             _p1_init = side1.get_active_pokemon()
             _p2_init = side2.get_active_pokemon()
             if _p1_init and _p2_init:
-                # Orden de velocidad: el más rápido activa primero
                 _sp1 = _p1_init.stats.get("vel", 50)
                 _sp2 = _p2_init.stats.get("vel", 50)
                 _h1  = getattr(_p1_init, "habilidad", "") or ""
@@ -615,8 +596,6 @@ class PvPManager:
             if _entry_log:
                 battle.battle_log.append("".join(_entry_log).strip())
 
-            # _send_battle_panels retorna False y cancela la batalla si alguien
-            # no tiene DM abierto; en ese caso no hay que hacer nada más.
             panels_ok = self._send_battle_panels(battle, bot)
             if not panels_ok:
                 return False, "❌ Batalla cancelada: un jugador no tiene chat privado con el bot."
@@ -628,7 +607,6 @@ class PvPManager:
                 bot,
                 [f"⚔️ ¡Batalla 1v1 iniciada! ({n_p1} vs {n_p2} Pokémon — Nivel 50)\n"])
 
-            # Notificar al challenger que la batalla comenzó
             try:
                 p1 = side1.get_active_pokemon()
                 p2 = side2.get_active_pokemon()
@@ -647,10 +625,8 @@ class PvPManager:
 
             return True, "✅ ¡Batalla iniciada! Revisa tu DM."
         else:
-            # 2v2 VGC — cada jugador elige 4 de su equipo antes de empezar
             battle_id = f"pvp_{ch.challenger_id}_{challenged_id}_{int(time.time())}"
 
-            # Guardar el challenge con battle_id para la selección
             self._pending_vgc[battle_id] = {
                 "challenge":   ch,
                 "selections":  {ch.challenger_id: [], challenged_id: []},
@@ -671,25 +647,13 @@ class PvPManager:
         return True, "❌ Desafío rechazado."
 
     def _escalar_equipo_pvp(self, battle: PvPBattle, all_pokemon_ids: List[int]) -> None:
-        """
-        Escala todos los Pokémon participantes a nivel 50 en la BD.
-        Guarda un snapshot de HP y stats originales para restaurarlos
-        al finalizar la batalla.
-
-        La fórmula usada es la oficial Gen 3+:
-        HP:   floor((2*B + IV + EV//4) * 50 / 100) + 50 + 10
-        Otro: floor((floor((2*B + IV + EV//4) * 50 / 100) + 5) * nat)
-        Con 252 EVs, 31 IVs y naturaleza neutra el rendimiento es
-        aproximadamente la mitad que a nivel 100.
-        """
+        """Escala todos los Pokémon participantes a nivel 50 en la BD."""
         for pid in all_pokemon_ids:
-            # Cada Pokémon tiene su propio try/except: un fallo no aborta los demás.
             try:
                 p = pokemon_service.obtener_pokemon(pid)
                 if not p:
                     continue
 
-                # Guardar estado original (HP, stats, nivel Y objeto equipado)
                 battle._hp_snapshot[pid]    = p.hp_actual
                 battle._stats_snapshot[pid] = {
                     **p.stats,
@@ -697,9 +661,6 @@ class PvPManager:
                     "_objeto": getattr(p, "objeto", None),
                 }
 
-                # Calcular stats a nivel 50 con la fórmula oficial Gen 3+.
-                # Fallback: escala proporcional simple si el método no está disponible
-                # o la especie no está en el JSON del pokédex.
                 try:
                     stats50 = pokedex_service.calcular_stats(
                         p.pokemonID, 50, p.ivs, p.evs, p.naturaleza
@@ -709,18 +670,15 @@ class PvPManager:
                         f"[PVP] calcular_stats falló para #{p.pokemonID} (id={pid}): "
                         f"{_calc_e} — usando escala proporcional"
                     )
-                    # Fallback: nivel_actual → nivel 50 proporcional.
-                    # Para nivel 100: stats50 ≈ stats100 / 2 (aproximación válida).
                     _factor = 50 / max(1, p.nivel)
                     stats50 = {
                         k: max(1, round(v * _factor))
                         for k, v in p.stats.items()
                     }
-                    # HP usa fórmula diferente — aproximación aceptable para fallback
                     if "hp" not in stats50:
                         stats50["hp"] = max(1, round(p.stats.get("hp", 50) * _factor))
 
-                hp50 = min(stats50["hp"], stats50["hp"])  # HP inicial = HP máximo
+                hp50 = min(stats50["hp"], stats50["hp"])
 
                 db_manager.execute_update(
                     """UPDATE POKEMON_USUARIO SET
@@ -743,23 +701,18 @@ class PvPManager:
                 logger.error(f"[PVP] Error inesperado escalando Pokémon {pid}: {e}", exc_info=True)
 
     def _restaurar_equipo_pvp(self, battle: PvPBattle) -> None:
-        """
-        Restaura HP y stats originales de todos los Pokémon al finalizar.
-        Importante: el HP real no se toca — los Pokémon salen de PvP
-        con el HP que tenían ANTES de entrar (PvP no desgasta).
-        """
+        """Restaura HP y stats originales de todos los Pokémon al finalizar."""
         for pid, original_hp in battle._hp_snapshot.items():
             original_stats = battle._stats_snapshot.get(pid, {})
             if not original_stats:
                 continue
             try:
                 nivel_original  = original_stats.pop("_nivel",  None)
-                objeto_original = original_stats.pop("_objeto", None)   # ← NUEVO
+                objeto_original = original_stats.pop("_objeto", None)
 
                 nivel_sql      = "nivel = ?,"  if nivel_original is not None else ""
                 nivel_params   = (nivel_original,) if nivel_original is not None else ()
 
-                # objeto: restaurar siempre (None limpia, valor devuelve la baya)
                 db_manager.execute_update(
                     f"""UPDATE POKEMON_USUARIO SET
                         {nivel_sql}
@@ -776,7 +729,7 @@ class PvPManager:
                         original_stats.get("def_sp", 50),
                         original_stats.get("vel",    50),
                         original_hp,
-                        objeto_original,   # ← restaura la baya (o None si no tenía)
+                        objeto_original,
                         pid,
                     ),
                 )
@@ -809,116 +762,106 @@ class PvPManager:
     ) -> Tuple[bool, str]:
         """
         Registra la acción del jugador para este turno.
- 
-        CAMBIOS:
-        - Al recibir cualquier acción (move o switch normal), se cancela
-          el timer del bando que acaba de actuar de forma inmediata.
-        - En faint switch: se limpian charging_move / stat_stages correctamente
-          y NO se arranca ningún timer hasta que ambos bandos tengan su
-          Pokémon en campo.
+
+        CORRECCIÓN (faint-move bug):
+        - En el path de faint switch: se limpia pending_action del nuevo slot
+          EXPLÍCITAMENTE antes de cualquier otra operación, garantizando que
+          el Pokémon de reemplazo no hereda la acción del caído.
+        - reset_stages_on_switch() también limpia pending_action internamente
+          como doble seguridad.
         """
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:
             return False, "❌ No tienes batalla activa."
- 
+
         side = battle.get_side(user_id)
         if side is None:
             return False, "❌ Error interno."
- 
-        # ── Cancelar timer del bando que acaba de actuar ──────────────────────
+
+        # Cancelar timer del bando que acaba de actuar
         if side.action_timer:
             try:
                 side.action_timer.cancel()
             except Exception:
                 pass
             side.action_timer = None
- 
+
         # ── CASO ESPECIAL: faint switch (reemplazo limpio) ────────────────────
         if side.needs_faint_switch:
             if action.get("type") != "switch":
                 return False, "⚠️ Debes elegir un Pokémon de reemplazo."
- 
+
             new_idx = int(action["value"])
             if new_idx >= len(side.pokemon_ids):
                 return False, "❌ Índice fuera de rango."
- 
+
             new_p = pokemon_service.obtener_pokemon(side.pokemon_ids[new_idx])
             if not new_p or new_p.hp_actual <= 0:
                 return False, "❌ Ese Pokémon está debilitado."
- 
-            # Guardar status del caído y limpiar estados de 2-turno
+
+            # Guardar status del Pokémon caído
             side.save_slot_status()
- 
+
             old_index = side.active_index
             side.active_index = new_idx
+
+            # CRÍTICO: limpiar pending_action ANTES de reset_stages_on_switch
+            # para que el reemplazo no herede ninguna acción del caído.
+            side.pending_action = None  # ← FIX principal del faint-move bug
+
+            # reset_stages_on_switch limpia volátiles (también pending_action
+            # como doble seguridad) y establece needs_faint_switch = False.
             side.reset_stages_on_switch()
- 
-            # ── NUEVO: limpiar mecánicas de 2-turno del entrante ──────────────
-            # El nuevo Pokémon no hereda charging_move ni pending_action del
-            # anterior que acaba de caer.
-            # PvPSide no tiene charging_move como atributo directo; se maneja
-            # a través del pending_action que fue del Pokémon caído.
-            # Asegurar que no quede ninguna acción residual del turno anterior.
-            side.pending_action = None   # limpiar acción del Pokémon caído
- 
+
+            # Restaurar status persistente del Pokémon que entra
             side.restore_slot_status(new_idx)
-            side.needs_faint_switch = False
- 
+
             new_name   = new_p.mote or new_p.nombre
             faint_log  = [
                 f"  ✊ <b>{self._get_username(user_id)}</b> "
                 f"envió a <b>{new_name}</b> (reemplazo limpio — sin coste de turno).\n"
             ]
- 
+
             # Aplicar habilidades de entrada del nuevo Pokémon
             opponent = battle.get_opponent_side(user_id)
-            
-            # Validación de seguridad: solo procedemos si hay un oponente válido
+
             if opponent is not None:
                 opponent_p = opponent.get_active_pokemon()
                 hab = getattr(new_p, "habilidad", "") or ""
-                
+
                 if hab and opponent_p:
                     self._apply_pvp_entry_ability(
-                        battle, 
-                        side, 
-                        opponent,  # Ahora el linter sabe que no es None
-                        new_p, 
-                        opponent_p, 
-                        hab, 
+                        battle,
+                        side,
+                        opponent,
+                        new_p,
+                        opponent_p,
+                        hab,
                         faint_log,
                     )
 
- 
             # Si el rival también está en faint switch, esperar
             if opponent and opponent.needs_faint_switch:
                 self._update_panels(battle, bot, extra_log=faint_log)
                 self._update_group_broadcast(battle, bot, faint_log)
                 return True, "✅ Pokémon enviado al campo."
- 
-            # El rival ya tiene su Pokémon activo → iniciar siguiente turno
+
+            # El rival ya tiene su Pokémon activo → continuar
             self._update_panels(battle, bot, extra_log=faint_log)
             self._update_group_broadcast(battle, bot, faint_log)
-            # Timer solo si ninguno está en faint switch
             if not battle.side1.needs_faint_switch and not battle.side2.needs_faint_switch:
                 self._start_turn_timer(battle, side.user_id, bot)
                 if opponent:
                     self._start_turn_timer(battle, opponent.user_id, bot)
             return True, "✅ Pokémon enviado al campo."
- 
+
         # ── TURNO NORMAL ──────────────────────────────────────────────────────
-        # El lock garantiza que dos jugadores que envían su acción al mismo
-        # tiempo no llamen _resolve_turn dos veces (race condition).
-        # Sin el lock: A registra, B registra, ambos ven both_chose()=True
-        # y llaman _resolve_turn() simultáneamente → uno de los switches se
-        # procesa dos veces o el segundo call lo encuentra con pending=None.
         with self._lock:
             if side.pending_action is not None:
                 return False, "⏳ Ya elegiste una acción este turno."
 
             opponent = battle.get_opponent_side(user_id)
 
-            # Bloquear si el rival todavía está eligiendo reemplazo
             if opponent and opponent.needs_faint_switch:
                 return (
                     False,
@@ -928,7 +871,6 @@ class PvPManager:
             side.pending_action = action
             should_resolve = battle.both_chose()
 
-        # _resolve_turn fuera del lock para no bloquearlo durante la resolución
         if should_resolve:
             self._cancel_turn_timers(battle)
             self._resolve_turn(battle, bot)
@@ -941,22 +883,18 @@ class PvPManager:
     def _start_turn_timer(self, battle: PvPBattle, user_id: int, bot):
         """
         Arranca el timer de turno para un jugador.
- 
-        GUARD: si cualquiera de los dos bandos está en faint switch,
-        no se arranca el timer — nadie tiene límite mientras se elige reemplazo.
+        No se arranca si cualquier bando está en faint switch.
         """
-        # ── Guard: no timer durante faint switch ──────────────────────────────
         if battle.side1.needs_faint_switch or battle.side2.needs_faint_switch:
             return
- 
+
         side = battle.get_side(user_id)
         if not side:
             return
- 
+
         def _timeout():
             if battle.state != PvPState.ACTIVE:
                 return
-            # Si el bando está en faint switch al momento del timeout, ignorar
             if side.needs_faint_switch:
                 return
             if side.pending_action is not None:
@@ -976,7 +914,7 @@ class PvPManager:
             if battle.both_chose():
                 self._cancel_turn_timers(battle)
                 self._resolve_turn(battle, bot)
- 
+
         t = threading.Timer(self.TURN_TIMEOUT, _timeout)
         t.daemon = True
         t.start()
@@ -998,22 +936,24 @@ class PvPManager:
     def _resolve_turn(self, battle: PvPBattle, bot):
         """
         Resuelve el turno cuando ambos bandos eligieron acción.
- 
-        CAMBIOS:
-        - Cuando hay ganador, se muestra el panel actualizado CON el log
-          del turno ANTES de llamar _end_battle(), con un delay de 2.5s
-          para que ambos jugadores puedan leer qué pasó.
-        - Cuando hay faint switch pendiente, NO se arrancan timers.
-        - El log del turno se agrega a battle.battle_log antes del panel.
+
+        CORRECCIÓN (faint-move bug):
+        - _execute_action ya NO avanza active_index ni ejecuta habilidades de
+          entrada cuando el defensor cae. Eso ocurre en submit_action().
+        - pending_action se limpia en AMBOS bandos inmediatamente después de
+          ejecutar las acciones y los efectos residuales, ANTES de detectar
+          faint switches. Esto garantiza que el Pokémon de reemplazo no
+          hereda la acción del caído aunque se llegue a _resolve_turn antes
+          de que el jugador elija.
         """
         try:
             battle.turn_number += 1
             turn_log: List[str] = [f"<b>— Turno {battle.turn_number} —</b>\n"]
- 
+
             s1, s2 = battle.side1, battle.side2
             p1 = s1.get_active_pokemon()
             p2 = s2.get_active_pokemon()
- 
+
             # Determinar orden por velocidad (Trick Room lo invierte)
             spd1 = BattleUtils.effective_speed(
                 p1.stats.get("vel", 50) if p1 else 50,
@@ -1025,61 +965,60 @@ class PvPManager:
                 s2.stat_stages.get("vel", 0),
                 s2.status,
             ) if p2 else 0
- 
+
             trick_room = getattr(battle, "trick_room", False)
             if trick_room:
                 first, second = (s1, s2) if spd1 <= spd2 else (s2, s1)
             else:
                 first, second = (s1, s2) if spd1 >= spd2 else (s2, s1)
- 
-            # Ejecutar primer atacante
+
+            # Ejecutar acciones en orden de velocidad
             fainted = self._execute_action(battle, first, second, turn_log, bot)
             if not fainted:
                 self._execute_action(battle, second, first, turn_log, bot)
- 
-            # ── Efectos residuales ────────────────────────────────────────────
+
+            # Efectos residuales de fin de turno
             a_ctx = side_from_pvp(battle.side1)
             b_ctx = side_from_pvp(battle.side2)
             apply_end_of_turn(a_ctx, b_ctx, battle, turn_log)
             sync_pvp_side(a_ctx, battle.side1)
             sync_pvp_side(b_ctx, battle.side2)
- 
-            # ── Verificar fin de batalla ──────────────────────────────────────
+
+            # ── CORRECCIÓN: limpiar pending_action de AMBOS bandos AHORA ──────
+            # Debe ocurrir ANTES de detectar faint switches para que el Pokémon
+            # de reemplazo nunca herede la acción del caído.
+            s1.pending_action = None  # ← FIX faint-move bug
+            s2.pending_action = None  # ← FIX faint-move bug
+
+            # Verificar fin de batalla
             winner = None
             if s1.all_fainted():
                 winner = s2.user_id
             elif s2.all_fainted():
                 winner = s1.user_id
- 
+
             if winner:
-                # Mostrar panel actualizado con el log del turno ANTES de
-                # terminar — dar tiempo a leer qué pasó.
                 self._update_panels(battle, bot, extra_log=turn_log)
                 self._update_group_broadcast(battle, bot, turn_log)
                 import threading as _th
                 _th.Timer(2.5, lambda: self._end_battle(battle, winner, bot, [])).start()
                 return
- 
-            # ── Detectar faint switch necesario ──────────────────────────────
+
+            # Detectar faint switch necesario
             faint_switches: list = []
             for _side in (s1, s2):
                 _active = _side.get_active_pokemon()
                 if _active and _active.hp_actual <= 0 and not _side.all_fainted():
                     _side.needs_faint_switch = True
-                    # Limpiar pending_action del Pokémon caído
-                    _side.pending_action = None
+                    # pending_action ya fue limpiado arriba; esta línea es
+                    # redundante pero explícita para mayor claridad.
+                    _side.pending_action = None  # ← FIX (doble seguridad)
                     faint_switches.append(_side)
- 
-            # Limpiar acciones del turno en los bandos que NO tienen faint switch
-            for _side in (s1, s2):
-                if not _side.needs_faint_switch:
-                    _side.pending_action = None
- 
+
             self._update_panels(battle, bot, extra_log=turn_log)
             self._update_group_broadcast(battle, bot, turn_log)
- 
+
             if faint_switches:
-                # Avisar a cada jugador que debe elegir reemplazo
                 for _fside in faint_switches:
                     try:
                         bot.send_message(
@@ -1092,13 +1031,13 @@ class PvPManager:
                         )
                     except Exception:
                         pass
-                # NO iniciar timers mientras haya faint switches pendientes
+                # No iniciar timers mientras haya faint switches pendientes
                 return
- 
-            # ── Turno normal: arrancar timers ─────────────────────────────────
+
+            # Turno normal: arrancar timers
             self._start_turn_timer(battle, s1.user_id, bot)
             self._start_turn_timer(battle, s2.user_id, bot)
- 
+
         except Exception as e:
             logger.error(f"[PVP] Error en _resolve_turn: {e}", exc_info=True)
 
@@ -1113,6 +1052,14 @@ class PvPManager:
         """
         Ejecuta la acción de attacker_side contra defender_side.
         Retorna True si el defensor (y todo su equipo) quedó debilitado.
+
+        CORRECCIÓN (faint-move bug):
+        Cuando el defensor cae, este método YA NO avanza active_index,
+        YA NO llama reset_stages_on_switch() ni ejecuta habilidades de
+        entrada. Esas operaciones ocurren en submit_action() cuando el
+        jugador elige su Pokémon de reemplazo a través de la UI.
+        Esto garantiza que el reemplazo nunca hereda ni ejecuta el
+        movimiento del Pokémon caído.
         """
         action = attacker_side.pending_action
         if action is None:
@@ -1128,7 +1075,7 @@ class PvPManager:
         atk_name = atk_p.mote or atk_p.nombre
         def_name = def_p.mote or def_p.nombre
 
-        # ── Cambio de Pokémon ─────────────────────────────────────────────
+        # ── Cambio de Pokémon (hard switch voluntario) ────────────────────────
         if action["type"] == "switch":
             new_idx = action["value"]
             new_p   = (
@@ -1137,14 +1084,15 @@ class PvPManager:
                 else None
             )
             if new_p and new_p.hp_actual > 0:
+                attacker_side.save_slot_status()
                 attacker_side.active_index = new_idx
                 attacker_side.reset_stages_on_switch()
+                attacker_side.restore_slot_status(new_idx)
                 new_name = new_p.mote or new_p.nombre
                 turn_log.append(
                     f"  🔄 {self._get_username(attacker_side.user_id)} "
                     f"envió a <b>{new_name}</b>!\n"
                 )
-                # Habilidades de entrada
                 opponent_p = defender_side.get_active_pokemon()
                 hab        = getattr(new_p, "habilidad", "") or ""
                 if hab and opponent_p:
@@ -1154,22 +1102,19 @@ class PvPManager:
                     )
             return False
 
-        # ── Movimiento ────────────────────────────────────────────────────
+        # ── Movimiento ────────────────────────────────────────────────────────
         move_name = action["value"]
         move_key  = move_name.lower().replace(" ", "").replace("-", "")
         move_data = movimientos_service.obtener_movimiento(move_name) or {}
         move_es   = MOVE_NAMES_ES.get(move_key, move_name.title())
 
-        # Proxy para battle_engine (acepta "battle" con wild_* / player_*)
         proxy = _PvPFieldProxy(battle, attacker_side, defender_side)
 
         turn_log.append(f"\n⚔️ ¡<b>{atk_name}</b> usó <b>{move_es}</b>!\n")
 
-        # ── ¿Puede moverse? ───────────────────────────────────────────────
         if not check_can_move(proxy, is_player=True, actor_name=atk_name, log=turn_log):
             return False
 
-        # ── Confusión ─────────────────────────────────────────────────────
         if check_confusion(
             proxy, is_player=True,
             actor_name  = atk_name,
@@ -1177,28 +1122,22 @@ class PvPManager:
             actor_atq   = atk_p.stats.get("atq", 50),
             log         = turn_log,
         ):
-            # Sync confusion_turns de vuelta al side
             attacker_side.confusion_turns = proxy.player_confusion_turns
             return False
 
-        # ── Precisión ─────────────────────────────────────────────────────
-        # None, 0 o True = movimiento que nunca falla (Aura Esfera, Rotura Rompe,
-        # Danza Espada, Rotura Smash, etc.)
         _prec_raw = move_data.get("precision") or move_data.get("accuracy")
         if _prec_raw is None or _prec_raw is True or _prec_raw == 0:
-            precision = 999   # nunca falla
+            precision = 999
         else:
             precision = int(_prec_raw)
         if precision < 100 and random.randint(1, 100) > precision:
             turn_log.append(f"  💨 ¡Pero falló!\n")
             return False
 
-        # ── Datos del movimiento ──────────────────────────────────────────
         _CAT   = {"Physical": "Físico", "Special": "Especial", "Status": "Estado"}
         cat    = move_data.get("categoria") or _CAT.get(move_data.get("category", ""), "Estado")
         poder  = int(move_data.get("poder") or move_data.get("basePower") or 0)
 
-        # ── Movimiento de estado ──────────────────────────────────────────
         if cat == "Estado" or poder == 0:
             self._apply_status_move_pvp(
                 battle, attacker_side, defender_side,
@@ -1206,7 +1145,6 @@ class PvPManager:
             )
             return False
 
-        # ── Movimiento de daño ────────────────────────────────────────────
         tipo_mv = move_data.get("tipo") or move_data.get("type", "Normal")
 
         atk_tipos = []
@@ -1231,7 +1169,6 @@ class PvPManager:
         recoil = RECOIL_MOVES.get(move_key, 0.0)
         _crit  = attacker_side.crit_stage + (1 if move_key in _HIGH_CRIT_MOVES else 0)
 
-        # ── Poder variable por peso ───────────────────────────────────────
         from pokemon.battle_engine import (
             _LOWKICK_MOVES, _HEAVYSLAM_MOVES,
             get_peso_pokemon, calcular_poder_lowkick, calcular_poder_heavyslam,
@@ -1247,7 +1184,6 @@ class PvPManager:
 
         _atk_magic_guard = tiene_magic_guard(getattr(atk_p, "habilidad", "") or "")
 
-        # Multiplicador de habilidad del atacante
         from pokemon.battle_engine import calcular_mult_habilidad as _cmh
         _atk_hab = getattr(atk_p, "habilidad", "") or ""
         _atk_hab_mult, _ = _cmh(
@@ -1261,7 +1197,6 @@ class PvPManager:
         poder = max(1, int(poder * _atk_hab_mult * _atk_obj_mult)) if poder > 0 else poder
         _atk_lo_recoil = _atk_obj_recoil
 
-        # Loop multi-hit (para movimientos normales num_hits == 1)
         from pokemon.battle_engine import _roll_num_hits
         num_hits  = _roll_num_hits(move_key, getattr(atk_p, "habilidad", "") or "")
         total_dmg = 0
@@ -1301,7 +1236,6 @@ class PvPManager:
                     atk_max         = atk_p.stats.get("hp", atk_p.hp_actual) or atk_p.hp_actual
                     atk_p.hp_actual = min(atk_max, atk_p.hp_actual + result.drained_hp)
                     turn_log.append(f"  💚 ¡{atk_name} absorbió {result.drained_hp} HP!\n")
-                # Retroceso — bloqueado por Magic Guard
                 if recoil and not _atk_magic_guard:
                     recoil_dmg      = max(1, int(result.damage * recoil))
                     atk_p.hp_actual = max(0, atk_p.hp_actual - recoil_dmg)
@@ -1310,12 +1244,10 @@ class PvPManager:
         if num_hits > 1 and total_dmg > 0:
             turn_log.append(f"  🔢 ¡{num_hits} golpes! Daño total: <b>{total_dmg}</b>\n")
 
-        # Life Orb / objeto recoil — bloqueado por Magic Guard
         if _atk_lo_recoil > 0 and total_dmg > 0 and not _atk_magic_guard:
             _lo_pvp = max(1, int(atk_p.stats.get("hp", atk_p.hp_actual) * _atk_lo_recoil))
             atk_p.hp_actual = max(0, atk_p.hp_actual - _lo_pvp)
             turn_log.append(f"  🔴 ¡<b>{atk_name}</b> perdió {_lo_pvp} HP por la Vida Esfera!\n")
-            # Persistir HP del atacante (el defensor se persiste más abajo)
             try:
                 db_manager.execute_update(
                     "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
@@ -1327,12 +1259,11 @@ class PvPManager:
         if type_eff > 1.0:       turn_log.append("  💥 ¡Es muy eficaz!\n")
         elif 0 < type_eff < 1.0: turn_log.append("  😐 No es muy eficaz…\n")
 
-        # ── Self-KO: Explosión / Autodestrucción debilitan al atacante ──────────
         if move_key in SELF_KO_MOVES and total_dmg > 0:
             atk_p.hp_actual = 0
             turn_log.append(f"  💥 ¡<b>{atk_name}</b> se debilitó por el esfuerzo!\n")
 
-        # Persistir HPs al final del loop (una sola escritura cada uno)
+        # Persistir HPs
         try:
             db_manager.execute_update(
                 "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
@@ -1348,7 +1279,7 @@ class PvPManager:
         except Exception:
             pass
 
-        # Efecto secundario de ailment (usa el resultado del último golpe)
+        # Efecto secundario de ailment
         if result is not None and def_p.hp_actual > 0 and defender_side.status is None:
             _sec = SECONDARY_AILMENTS.get(move_key)
             if _sec:
@@ -1361,24 +1292,13 @@ class PvPManager:
         fainted = def_p.hp_actual <= 0
         if fainted:
             turn_log.append(f"  💀 ¡<b>{def_name}</b> se debilitó!\n")
-            next_idx = defender_side.next_alive()
-            if next_idx is not None:
-                defender_side.active_index = next_idx
-                defender_side.reset_stages_on_switch()
-                next_p = defender_side.get_active_pokemon()
-                if next_p:
-                    nname = next_p.mote or next_p.nombre
-                    turn_log.append(
-                        f"  🔄 {self._get_username(defender_side.user_id)} "
-                        f"envió a <b>{nname}</b>!\n"
-                    )
-                    # Habilidades de entrada del Pokémon nuevo
-                    hab2 = getattr(next_p, "habilidad", "") or ""
-                    if hab2 and atk_p:
-                        self._apply_pvp_entry_ability(
-                            battle, defender_side, attacker_side,
-                            next_p, atk_p, hab2, turn_log,
-                        )
+            # ── CORRECCIÓN (faint-move bug) ───────────────────────────────────
+            # NO avanzar active_index, NO llamar reset_stages_on_switch,
+            # NO ejecutar habilidades de entrada.
+            # _resolve_turn marcará needs_faint_switch y limpiará pending_action.
+            # El jugador elegirá su reemplazo a través de la UI (_build_battle_markup
+            # mostrará el selector cuando needs_faint_switch == True).
+            # ─────────────────────────────────────────────────────────────────
 
         return fainted and defender_side.all_fainted()
 
@@ -1402,11 +1322,9 @@ class PvPManager:
 
         proxy_atk = _PvPFieldProxy(battle, entering_side, opponent_side)
 
-        # ── Intimidación ──────────────────────────────────────────────────────
         if hab in ("intimidacion", "intimidation"):
             opp_name = opponent_poke.mote or opponent_poke.nombre
             ent_name = entering_poke.mote or entering_poke.nombre
-            # Verificar que el oponente no tenga Magic Guard ni Claridad Mental
             opp_hab = (getattr(opponent_poke, "habilidad", "") or "").lower().replace(" ", "").replace("-", "")
             if opp_hab not in ("claridadmental", "clearbody", "hiperesc", "hypercutter",
                                "propiopaso", "fullmetalbody"):
@@ -1419,7 +1337,6 @@ class PvPManager:
                     f"  😤 La Intimidación de {ent_name} no afectó a {opp_name}.\n"
                 )
 
-        # ── Climas ────────────────────────────────────────────────────────────
         _CLIMAS = {
             "sequia": ("sun", 5), "drought": ("sun", 5),
             "sequiaextrema": ("sun", 8), "desolateland": ("sun", 8),
@@ -1433,7 +1350,6 @@ class PvPManager:
             activate_weather(proxy_atk, w_key, w_turns,
                              entering_poke.mote or entering_poke.nombre, log)
 
-        # ── Terrenos ──────────────────────────────────────────────────────────
         _TERRENOS = {
             "electrogénesis": ("electric", 5), "electricsurge": ("electric", 5),
             "herbogénesis":   ("grassy",   5), "grassysurge":   ("grassy",   5),
@@ -1445,12 +1361,10 @@ class PvPManager:
             activate_terrain(proxy_atk, t_key, t_turns,
                              entering_poke.mote or entering_poke.nombre, log)
 
-        # ── Rastreo (Trace) — copia la habilidad del rival REAL y la persiste ─
         if hab in ("rastreo", "trace"):
             opp_hab_real = getattr(opponent_poke, "habilidad", "") or ""
             ent_name     = entering_poke.mote or entering_poke.nombre
             if opp_hab_real:
-                # Persistir la habilidad copiada en BD
                 try:
                     db_manager.execute_update(
                         "UPDATE POKEMON_USUARIO SET habilidad = ? WHERE id_unico = ?",
@@ -1463,7 +1377,6 @@ class PvPManager:
                     f"  🔍 ¡<b>Rastreo</b>! {ent_name} copió la habilidad "
                     f"<b>{opp_hab_real}</b> del rival.\n"
                 )
-                # Aplicar la habilidad copiada si tiene efecto de entrada
                 self._apply_pvp_entry_ability(
                     battle, entering_side, opponent_side,
                     entering_poke, opponent_poke, opp_hab_real, log,
@@ -1473,7 +1386,6 @@ class PvPManager:
                     f"  🔍 ¡Rastreo de {ent_name} no detectó ninguna habilidad!\n"
                 )
 
-        # ── Mimetismo — tipo según terreno activo ─────────────────────────────
         if hab in ("mimetismo", "mimicry"):
             _T = {"electric": "Eléctrico", "grassy": "Planta",
                   "misty": "Hada", "psychic": "Psíquico"}
@@ -1515,7 +1427,6 @@ class PvPManager:
             mk = move_key.lower().replace(" ", "").replace("-", "")
 
             if mk == "rest":
-                # Rest: cura HP completo y duerme al ATACANTE, no al defensor.
                 atk_p = attacker_side.get_active_pokemon()
                 if atk_p and atk_p.hp_actual > 0:
                     max_hp = atk_p.stats.get("hp", atk_p.hp_actual) or atk_p.hp_actual
@@ -1550,7 +1461,6 @@ class PvPManager:
             t_key, t_turns = effect["terrain"]
             activate_terrain(proxy, t_key, t_turns, atk_name, log)
 
-        # ── Golpe crítico (Focus Energy / Laser Focus) ─────────────────────
         if "crit_stage" in effect:
             crit_target, crit_delta = effect["crit_stage"]
             side = attacker_side if crit_target == "self" else defender_side
@@ -1577,23 +1487,18 @@ class PvPManager:
                     pass
                 log.append(f"  💚 {atk_name} recuperó {gained} HP.\n")
 
-        # ── Transformar (Ditto / Move Transformación) ──────────────────────
         if effect.get("transform"):
             def_p = defender_side.get_active_pokemon()
             if def_p:
                 atk_p = attacker_side.get_active_pokemon()
                 if atk_p:
-                    # Copiar stats ofensivas/defensivas (NO hp)
                     new_stats = {k: v for k, v in def_p.stats.items() if k != "hp"}
                     new_stats["hp"] = atk_p.stats.get("hp", atk_p.hp_actual)
                     atk_p.stats = new_stats
-                    # Copiar tipos, movimientos y habilidad
                     from pokemon.services.pokedex_service import pokedex_service as _pdx_t
                     atk_p_types = _pdx_t.obtener_tipos(def_p.pokemonID)
                     atk_p.movimientos = list(def_p.movimientos or [])
-                    # Copiar etapas de stat del rival
                     attacker_side.stat_stages = dict(defender_side.stat_stages)
-                    # Persistir los stats copiados en BD para que el motor los use
                     try:
                         db_manager.execute_update(
                             """UPDATE POKEMON_USUARIO SET
@@ -1689,13 +1594,12 @@ class PvPManager:
             if side.yawn_counter > 0:
                 side.yawn_counter -= 1
                 if side.yawn_counter == 0 and side.status is None:
-                    proxy = _PvPFieldProxy(battle, side, side)   # solo para apply_ailment
+                    proxy = _PvPFieldProxy(battle, side, side)
                     apply_ailment(proxy, "slp", target_is_wild=False,
                                   target_name=poke.mote or poke.nombre, log=log)
                     side.status      = proxy.player_status
                     side.sleep_turns = proxy.player_sleep_turns
 
-        # Tick de campo
         tick_field_turns(battle, log)
 
 
@@ -1711,14 +1615,8 @@ class PvPManager:
         except Exception:
             return f"User {user_id}"
 
-    # ── Sub-menú de ataques ───────────────────────────────────────────────────
-
     def handle_fight_action(self, user_id: int, bot) -> bool:
-        """
-        Muestra el selector de movimientos.
-
-        dm_message_id es siempre texto → edit_message_text nunca falla.
-        """
+        """Muestra el selector de movimientos."""
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:
             return False
@@ -1757,11 +1655,7 @@ class PvPManager:
         return True
 
     def handle_back_action(self, user_id: int, bot) -> bool:
-        """
-        Vuelve al menú principal desde el sub-menú de ataques o equipo.
-
-        dm_message_id es siempre texto → edit_message_text nunca falla.
-        """
+        """Vuelve al menú principal desde el sub-menú de ataques o equipo."""
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:
             return False
@@ -1786,12 +1680,7 @@ class PvPManager:
         return True
 
     def handle_team_pvp(self, user_id: int, bot) -> bool:
-        """
-        Muestra el equipo del jugador durante la batalla PvP.
-        • Pokémon activo marcado con ▶️
-        • Solo permite cambiar a Pokémon con vida distintos del activo
-          (hard switch → el rival PUEDE atacar ese turno)
-        """
+        """Muestra el equipo del jugador durante la batalla PvP."""
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:
             return False
@@ -1837,7 +1726,6 @@ class PvPManager:
             txt    += linea + "\n"
 
             if activo or p.hp_actual <= 0:
-                # Deshabilitado (activo o KO)
                 mk.add(types.InlineKeyboardButton(
                     linea, callback_data=f"pvp_noop_{user_id}",
                 ))
@@ -1865,9 +1753,7 @@ class PvPManager:
         return True
 
     def handle_forfeit_pvp(self, user_id: int, bot) -> bool:
-        """
-        Procesa la rendición de un jugador. El rival gana automáticamente.
-        """
+        """Procesa la rendición de un jugador."""
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:
             return False
@@ -1886,11 +1772,7 @@ class PvPManager:
     def _build_moves_markup(
         self, battle: "PvPBattle", viewer_side: "PvPSide"
     ) -> "types.InlineKeyboardMarkup":
-        """
-        Sub-menú de movimientos (idéntico al del combate salvaje):
-          Fila i: [Nombre (Poder)]  [🔥Tipo  ⚔️Cat  PP:x/y]
-          Última fila: [◀️ Volver]
-        """
+        """Sub-menú de movimientos."""
         from pokemon.services.pp_service import pp_service as _pp_svc
 
         uid  = viewer_side.user_id
@@ -1899,14 +1781,13 @@ class PvPManager:
 
         own_p = viewer_side.get_active_pokemon()
         if not own_p:
-            # Sin Pokémon activo: devolver teclado vacío con solo "Volver"
             mk.add(types.InlineKeyboardButton(
                 "◀️ Volver", callback_data=f"pvp_back_{uid}",
             ))
             return mk
 
         movs       = own_p.movimientos
-        pokemon_id = own_p.id_unico   # ahora es garantizado int
+        pokemon_id = own_p.id_unico
 
         for i in range(4):
             if i < len(movs):
@@ -1914,13 +1795,11 @@ class PvPManager:
                 mv_key     = mv.lower().replace(" ", "").replace("-", "")
                 move_data  = movimientos_service.obtener_movimiento(mv) or {}
 
-                # Nombre en español
                 nombre_es  = (
                     MOVE_NAMES_ES.get(mv_key)
                     or move_data.get("nombre", mv.title())
                 )
 
-                # Atributos con fallback bilingüe
                 _cat_map   = {"Physical": "Físico", "Special": "Especial", "Status": "Estado"}
                 poder      = int(move_data.get("poder") or move_data.get("basePower") or 0)
                 tipo       = move_data.get("tipo") or move_data.get("type", "Normal")
@@ -1932,7 +1811,6 @@ class PvPManager:
                 cat_emoji  = MOVE_CAT_EMOJI.get(categoria, "💫")
                 poder_txt  = str(poder) if poder else "—"
 
-                # PP
                 try:
                     _pp    = _pp_svc.obtener_pp(pokemon_id, mv)
                     pp_txt = f"{_pp['actual']}/{_pp['maximo']}"
@@ -1948,9 +1826,6 @@ class PvPManager:
                 if not tiene_pp:
                     label_nombre = f"❌ {label_nombre}"
 
-                # ⚠️ FIX BUTTON_DATA_INVALID: Telegram limita callback_data a 64 bytes.
-                # Usamos el índice del movimiento (0-3) en lugar del nombre completo.
-                # El nombre se resuelve en handle_callback al momento de procesar.
                 cb_move = f"pvp_move_{uid}_{i}" if tiene_pp else NOOP
                 mk.row(
                     types.InlineKeyboardButton(label_nombre, callback_data=cb_move),
@@ -1967,7 +1842,6 @@ class PvPManager:
         ))
         return mk
 
-    # ── Helpers de visualización del panel PvP ────────────────────────────────
     _TIPO_EMO_PVP = {
         "Normal":"⭐","Fuego":"🔥","Agua":"💧","Planta":"🌿",
         "Eléctrico":"⚡","Hielo":"❄️","Lucha":"🥊","Veneno":"☠️",
@@ -2008,29 +1882,7 @@ class PvPManager:
         return f"{base}/shiny/{pokemon_id}.png" if shiny else f"{base}/{pokemon_id}.png"
 
     def _build_battle_panel(self, battle: "PvPBattle", viewer_side: "PvPSide") -> str:
-        """
-        Construye el texto del panel de batalla.
-
-        Formato (los sprites ya están en las fotos de arriba y abajo):
-
-          ⚔️ BATALLA PvP 1v1  —  Turno N
-          👤 Rival: NombreRival
-          [clima / terreno / salas si hay]
-
-          🔴 NombreRival ─ PokémonRival  ⚙️ Acero  🌸 Hada  Nv.25
-             HP: 🟩🟩🟩🟩🟩🟨🟨⬛⬛⬛  45/60
-             💊 En pie: 3
-             ⚡PAR  +2Atk
-
-          🔵 TuNombre ─ TuPokémon  🔥 Fuego  Nv.30
-             HP: 🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩  80/80
-             💊 En pie: 2
-
-          📋 Últimos N turnos:
-          ...log...
-
-          💡 Tu turno — ¿Qué harás?
-        """
+        """Construye el texto del panel de batalla."""
         from pokemon.battle_ui import build_field_status_line
         from pokemon.services.pokedex_service import pokedex_service as _pdx_svc
         from pokemon.services import pokemon_service as _pksvc
@@ -2050,11 +1902,9 @@ class PvPManager:
         rival_username = self._get_username(rival.user_id) if rival else "?"
         own_username   = self._get_username(own.user_id)
 
-        # ── Estado del campo ──────────────────────────────────────────────
         _fl_txt    = build_field_status_line(battle)
         field_line = (f"{_fl_txt}\n") if _fl_txt else ""
 
-        # ── Contar Pokémon en pie ─────────────────────────────────────────
         rival_vivos = 0
         if rival:
             for pid in rival.pokemon_ids:
@@ -2067,7 +1917,6 @@ class PvPManager:
             if (p := _pksvc.obtener_pokemon(pid)) and p.hp_actual > 0
         )
 
-        # ── Helpers locales ───────────────────────────────────────────────
         def _bar(hp: int, mx: int, length: int = 10) -> str:
             pct    = int(hp / max(1, mx) * 100)
             filled = max(0, min(length, int(pct / 100 * length)))
@@ -2102,7 +1951,6 @@ class PvPManager:
                     parts.append(f"{'+'if v > 0 else ''}{v}{lbl}")
             return "  ".join(parts)
 
-        # ── Bloque RIVAL ──────────────────────────────────────────────────
         if rival_p:
             r_hp   = max(0, rival_p.hp_actual)
             r_info = _info_str(
@@ -2120,7 +1968,6 @@ class PvPManager:
         else:
             rival_block = f"🔴 <b>{rival_username}</b>  (sin Pokémon)"
 
-        # ── Bloque PROPIO ─────────────────────────────────────────────────
         if own_p:
             o_hp   = max(0, own_p.hp_actual)
             o_info = _info_str(own.status, own.stat_stages)
@@ -2135,7 +1982,6 @@ class PvPManager:
         else:
             own_block = f"🔵 <b>{own_username}</b>  (sin Pokémon)"
 
-        # ── Log de turnos recientes ───────────────────────────────────────
         log_txt = ""
         if battle.battle_log:
             entradas   = battle.battle_log[-3:]
@@ -2146,7 +1992,6 @@ class PvPManager:
             )
             log_txt = f"\n\n{encabezado}\n" + "\n─\n".join(entradas)
 
-        # ── Composición final ─────────────────────────────────────────────
         return (
             f"⚔️ <b>BATALLA PvP {battle.fmt.value}</b>  —  Turno {battle.turn_number}\n"
             f"👤 Rival: <b>{rival_username}</b>\n"
@@ -2164,14 +2009,14 @@ class PvPManager:
         """
         Teclado del panel principal de batalla PvP.
 
-        • needs_faint_switch → selector de reemplazo (switch gratuito).
-        • Normal → menú principal: ⚔️ Atacar | 👥 Equipo | 🏳️ Rendirse
-          (idéntico al menú del combate salvaje)
+        Cuando needs_faint_switch == True, muestra ÚNICAMENTE los Pokémon
+        disponibles como reemplazo. El jugador NO puede atacar ni rendirse
+        hasta elegir su reemplazo.
         """
         uid = viewer_side.user_id
         mk  = types.InlineKeyboardMarkup(row_width=2)
 
-        # ── Faint switch: solo reemplazos ─────────────────────────────────────
+        # Faint switch: solo mostrar reemplazos disponibles
         if viewer_side.needs_faint_switch:
             mk.add(types.InlineKeyboardButton(
                 "💀 Elige tu Pokémon de reemplazo:",
@@ -2208,18 +2053,7 @@ class PvPManager:
         return mk
 
     def _send_battle_panels(self, battle: "PvPBattle", bot) -> bool:
-        """
-        Envía el panel inicial de batalla a ambos jugadores por DM.
-
-        Arquitectura de 3 mensajes por jugador:
-          Mensaje 1 ── foto sprite RIVAL          → rival_sprite_msg_id
-          Mensaje 2 ── foto sprite PROPIO          → own_sprite_msg_id
-          Mensaje 3 ── texto panel + botones       → dm_message_id
-
-        dm_message_id apunta SIEMPRE a un mensaje de texto, por lo que
-        edit_message_text en handle_fight_action/handle_back_action nunca
-        producirá "there is no text in the message to edit".
-        """
+        """Envía el panel inicial de batalla a ambos jugadores por DM."""
         _FORBIDDEN_KEYWORDS = (
             "forbidden", "chat not found", "bot was blocked",
             "user is deactivated", "have no rights",
@@ -2234,7 +2068,6 @@ class PvPManager:
                 rival_name = self._get_username(rival_side.user_id) if rival_side else "Rival"
                 own_name   = self._get_username(side.user_id)
 
-                # ── Mensaje 1: foto del RIVAL (arriba) ───────────────────────
                 if rival_p:
                     try:
                         rmsg = bot.send_photo(
@@ -2254,7 +2087,6 @@ class PvPManager:
                             f"[PVP] No se pudo enviar sprite rival a {side.user_id}: {_re}"
                         )
 
-                # ── Mensaje 2: foto PROPIA (abajo) ───────────────────────────
                 if own_p:
                     try:
                         omsg = bot.send_photo(
@@ -2274,7 +2106,6 @@ class PvPManager:
                             f"[PVP] No se pudo enviar sprite propio a {side.user_id}: {_oe}"
                         )
 
-                # ── Mensaje 3: panel de TEXTO + botones ──────────────────────
                 txt = self._build_battle_panel(battle, side)
                 mk  = self._build_battle_markup(battle, side)
                 msg = bot.send_message(
@@ -2303,7 +2134,6 @@ class PvPManager:
         if not failed_users:
             return True
 
-        # ── Notificar fallos en el grupo (igual que antes) ──────────────────
         aviso_lines = ["⚠️ <b>No se pudo iniciar la batalla:</b>"]
         for uid, err, is_dm in failed_users:
             name = self._get_username(uid)
@@ -2330,20 +2160,13 @@ class PvPManager:
         return False
 
     def _update_sprites(self, battle: "PvPBattle", side: "PvPSide", bot) -> None:
-        """
-        Actualiza las fotos de sprites cuando el Pokémon activo cambia.
-
-        Usa edit_message_media para sobreescribir las fotos existentes
-        sin enviar mensajes nuevos. Si la imagen no cambió, Telegram
-        lo ignora silenciosamente.
-        """
+        """Actualiza las fotos de sprites cuando el Pokémon activo cambia."""
         from telebot.types import InputMediaPhoto
 
         rival_side = battle.get_opponent_side(side.user_id)
         rival_p    = rival_side.get_active_pokemon() if rival_side else None
         own_p      = side.get_active_pokemon()
 
-        # Sprite del RIVAL
         if side.rival_sprite_msg_id and rival_p:
             try:
                 rival_name = self._get_username(rival_side.user_id) if rival_side else "Rival"
@@ -2367,7 +2190,6 @@ class PvPManager:
                         f"[PVP] No se pudo actualizar sprite rival de {side.user_id}: {exc}"
                     )
 
-        # Sprite PROPIO
         if side.own_sprite_msg_id and own_p:
             try:
                 own_name = self._get_username(side.user_id)
@@ -2392,14 +2214,7 @@ class PvPManager:
                     )
 
     def _update_panels(self, battle: "PvPBattle", bot, extra_log: Optional[List[str]] = None):
-        """
-        Edita el panel de texto de ambos jugadores y actualiza sus sprites.
-
-        - extra_log se acumula en battle.battle_log (máximo 5 entradas).
-        - Los sprites se actualizan con _update_sprites para reflejar
-          cambios de Pokémon activo sin enviar mensajes nuevos.
-        - dm_message_id es siempre texto → edit_message_text nunca falla.
-        """
+        """Edita el panel de texto de ambos jugadores y actualiza sus sprites."""
         if extra_log:
             combined = "".join(extra_log).strip()
             if combined:
@@ -2408,13 +2223,11 @@ class PvPManager:
                     battle.battle_log = battle.battle_log[-5:]
 
         for side in (battle.side1, battle.side2):
-            # ── Actualizar sprites ────────────────────────────────────────────
             try:
                 self._update_sprites(battle, side, bot)
             except Exception as _se:
                 logger.warning(f"[PVP] Error actualizando sprites de {side.user_id}: {_se}")
 
-            # ── Editar panel de texto ─────────────────────────────────────────
             txt = self._build_battle_panel(battle, side)
             mk  = self._build_battle_markup(battle, side)
 
@@ -2430,12 +2243,11 @@ class PvPManager:
                 except Exception as exc:
                     exc_str = str(exc)
                     if "message is not modified" in exc_str:
-                        pass  # inofensivo: el contenido no cambió
+                        pass
                     else:
                         logger.warning(
                             f"[PVP] No se pudo editar panel {side.user_id}: {exc}"
                         )
-                        # Fallback: enviar nuevo mensaje de texto
                         try:
                             msg = bot.send_message(
                                 side.user_id, txt,
@@ -2448,7 +2260,6 @@ class PvPManager:
                                 f"[PVP] No se pudo re-enviar panel {side.user_id}: {e3}"
                             )
             else:
-                # Sin mensaje previo (no debería ocurrir en flujo normal)
                 try:
                     msg = bot.send_message(
                         side.user_id, txt,
@@ -2487,7 +2298,7 @@ class PvPManager:
         )
 
         if extra_log:
-            txt += "".join(extra_log)[-1500:]  # limitar longitud
+            txt += "".join(extra_log)[-1500:]
 
         return txt
 
@@ -2511,7 +2322,6 @@ class PvPManager:
             return
         try:
             txt = self._build_broadcast_text(battle, turn_log)
-            # edit_message_text NO acepta message_thread_id
             bot.edit_message_text(
                 txt,
                 chat_id    = CANAL_ID,
@@ -2526,41 +2336,30 @@ class PvPManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     def _end_battle(self, battle: PvPBattle, winner_id: int, bot, turn_log: list):
-        """
-        Cierra la batalla, actualiza MMR y notifica.
- 
-        CAMBIOS:
-        - El panel ya fue actualizado con el log del turno antes de llamar
-          aquí (desde _resolve_turn con delay). turn_log puede estar vacío.
-        - Se cancela los timers al inicio para evitar race conditions.
-        """
-        # ── Cancelar timers SIEMPRE al entrar ─────────────────────────────────
+        """Cierra la batalla, actualiza MMR y notifica."""
         self._cancel_turn_timers(battle)
- 
-        # Restaurar HP y stats originales
+
         self._restaurar_equipo_pvp(battle)
         battle.state     = PvPState.FINISHED
         battle.winner_id = winner_id
- 
+
         loser_id = (
             battle.side2.user_id if winner_id == battle.side1.user_id
             else battle.side1.user_id
         )
- 
+
         w_name = self._get_username(winner_id)
         l_name = self._get_username(loser_id)
- 
+
         result_log = [f"\n🏆 ¡<b>{w_name}</b> ganó la batalla!\n"]
         if turn_log:
             result_log = turn_log + result_log
- 
-        # Actualizar MMR
+
         try:
             self._actualizar_mmr(winner_id, loser_id, battle.fmt.value)
         except Exception as _e:
             logger.warning(f"[PVP] No se pudo actualizar MMR: {_e}")
- 
-        # Notificar a ambos jugadores
+
         result_txt = f"{'🏆' if winner_id == battle.side1.user_id else '💀'} ¡{w_name} ganó!\n"
         for side in (battle.side1, battle.side2):
             try:
@@ -2578,18 +2377,16 @@ class PvPManager:
                     bot.send_message(side.user_id, txt, parse_mode="HTML")
             except Exception:
                 pass
- 
-        # Actualizar broadcast
+
         self._update_group_broadcast(battle, bot, result_log)
- 
-        # Limpiar estado
+
         with self._lock:
             self._user_battle.pop(battle.side1.user_id, None)
             self._user_battle.pop(battle.side2.user_id, None)
             self._battles.pop(battle.battle_id, None)
 
     # ──────────────────────────────────────────────────────────────────────────
-    # MMR  (ELO simplificado — no depende de pvp_system.py)
+    # MMR
     # ──────────────────────────────────────────────────────────────────────────
 
     def _obtener_mmr(self, user_id: int, fmt: str) -> int:
@@ -2603,7 +2400,6 @@ class PvPManager:
                 return int(val) if val is not None else 1000
         except Exception:
             pass
-        # Crear fila si no existe
         try:
             db_manager.execute_update(
                 "INSERT OR IGNORE INTO LADDER_STATS (userID) VALUES (?)", (user_id,)
@@ -2613,7 +2409,7 @@ class PvPManager:
         return 1000
 
     def _actualizar_mmr(self, winner_id: int, loser_id: int, fmt: str):
-        """Sistema ELO simplificado. Actualiza LADDER_STATS y registra en HISTORIAL_BATALLAS."""
+        """Sistema ELO simplificado."""
         campo   = f"mmr_{fmt}"
         mmr_w   = self._obtener_mmr(winner_id, fmt)
         mmr_l   = self._obtener_mmr(loser_id,  fmt)
@@ -2634,7 +2430,6 @@ class PvPManager:
             logger.error(f"[PVP] Error actualizando MMR en BD: {e}")
             return
 
-        # Registrar historial (tabla puede no existir en BD antigua — ignorar)
         try:
             db_manager.execute_update(
                 """INSERT INTO HISTORIAL_BATALLAS
@@ -2645,7 +2440,7 @@ class PvPManager:
                 (winner_id, loser_id, fmt, mmr_w, nuevo_w, mmr_l, nuevo_l, cambio),
             )
         except Exception:
-            pass  # tabla HISTORIAL_BATALLAS opcional
+            pass
 
         logger.info(
             f"[PVP] MMR {fmt}: ganador {winner_id} {mmr_w}→{nuevo_w} | "
@@ -2653,18 +2448,14 @@ class PvPManager:
         )
 
     # ──────────────────────────────────────────────────────────────────────────
-    # CALLBACK HANDLERS (llamados desde el handler de callbacks de Telegram)
+    # CALLBACK HANDLERS
     # ──────────────────────────────────────────────────────────────────────────
 
     def handle_callback(self, call, bot) -> bool:
-        """
-        Maneja callbacks con prefix pvp_.
-        Retorna True si fue procesado.
-        """
+        """Maneja callbacks con prefix pvp_. Retorna True si fue procesado."""
         data = call.data
         uid  = call.from_user.id
 
-        # pvp_accept / pvp_reject
         if data == "pvp_accept":
             ok, result = self.accept_challenge(uid, bot)
             bot.answer_callback_query(call.id, result)
@@ -2683,12 +2474,8 @@ class PvPManager:
                 pass
             return True
 
-        # pvp_move_{uid}_{idx}
-        # idx es el índice (0-3) del movimiento en la lista del Pokémon activo.
-        # Resolvemos la clave real aquí para evitar superar el límite de 64 bytes.
         if data.startswith("pvp_move_"):
             suffix = data[len("pvp_move_"):]
-            # Último segmento = índice; todo lo anterior = uid (puede tener guiones bajos)
             sep  = suffix.rindex("_")
             cuid = int(suffix[:sep])
             idx  = int(suffix[sep + 1:])
@@ -2697,7 +2484,6 @@ class PvPManager:
                 bot.answer_callback_query(call.id, "❌ Acción no válida.")
                 return True
 
-            # Resolver clave del movimiento desde el Pokémon activo del jugador
             battle = self.get_battle_for(uid)
             if not battle:
                 bot.answer_callback_query(call.id, "❌ Sin batalla activa.")
@@ -2713,7 +2499,6 @@ class PvPManager:
             bot.answer_callback_query(call.id, "✅ Movimiento registrado." if ok else msg)
             return True
 
-        # pvp_switch_{uid}_{idx}
         if data.startswith("pvp_switch_"):
             suffix = data[len("pvp_switch_"):]
             cuid_str, idx_str = suffix.rsplit("_", 1)
@@ -2725,25 +2510,18 @@ class PvPManager:
             ok, msg = self.submit_action(uid, {"type": "switch", "value": idx}, bot)
             bot.answer_callback_query(call.id, "🔄 Cambio registrado." if ok else msg)
             return True
-        
+
         return False
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-# PROXY DE CAMPO  (adapta PvPBattle a la interfaz que espera battle_engine)
+# PROXY DE CAMPO
 # ══════════════════════════════════════════════════════════════════════════════
 
 class _PvPFieldProxy:
     """
     Proxy liviano que expone la interfaz de 'battle' que usan las funciones
     de battle_engine (activate_weather, check_can_move, apply_ailment, etc.).
-
-    Las funciones de battle_engine leen/escriben atributos como:
-      battle.weather, battle.weather_turns, battle.terrain, battle.terrain_turns
-      battle.wild_status, battle.player_status
-      battle.wild_sleep_turns, battle.player_sleep_turns
-      battle.wild_yawn_counter, battle.player_yawn_counter
-      battle.wild_toxic_counter, battle.player_toxic_counter
-      battle.gravity, battle.trick_room, ...
     """
 
     def __init__(self, battle: PvPBattle, attacker: PvPSide, defender: PvPSide):
@@ -2751,7 +2529,6 @@ class _PvPFieldProxy:
         self._attacker = attacker
         self._defender = defender
 
-    # Campo compartido — redirigir a battle
     @property
     def weather(self): return self._battle.weather
     @weather.setter
@@ -2812,7 +2589,6 @@ class _PvPFieldProxy:
     @wonder_room_turns.setter
     def wonder_room_turns(self, v): self._battle.wonder_room_turns = v
 
-    # Status del "wild" → defensor (opponent)
     @property
     def wild_status(self): return self._defender.status
     @wild_status.setter
@@ -2833,7 +2609,6 @@ class _PvPFieldProxy:
     @wild_yawn_counter.setter
     def wild_yawn_counter(self, v): self._defender.yawn_counter = v
 
-    # Status del "player" → atacante
     @property
     def player_status(self): return self._attacker.status
     @player_status.setter
@@ -2854,7 +2629,6 @@ class _PvPFieldProxy:
     @player_yawn_counter.setter
     def player_yawn_counter(self, v): self._attacker.yawn_counter = v
 
-    # ── Confusión ─────────────────────────────────────────────────────────────
     @property
     def player_confusion_turns(self):
         return self._attacker.confusion_turns
@@ -2869,7 +2643,6 @@ class _PvPFieldProxy:
     def wild_confusion_turns(self, v):
         self._defender.confusion_turns = v
 
-    # ── Drenadoras (Leech Seed) ────────────────────────────────────────────────
     @property
     def player_leechseeded(self):
         return self._attacker.leechseeded
@@ -2884,7 +2657,6 @@ class _PvPFieldProxy:
     def wild_leechseeded(self, v):
         self._defender.leechseeded = v
 
-    # ── Etapas de stats ────────────────────────────────────────────────────────
     @property
     def wild_stat_stages(self): return self._defender.stat_stages
     @property
@@ -2901,7 +2673,7 @@ def _hp_bar(pct: int, length: int = 10) -> str:
     return color * filled + "⬛" * (length - filled)
 
 def _format_stages(stages: dict) -> str:
-    """Muestra los stat stages activos. Ej: '📊 Def▼▼ Vel▲'  Vacío si todos son 0."""
+    """Muestra los stat stages activos."""
     _LABELS = {"atq": "Atq", "def": "Def", "atq_sp": "AtqE", "def_sp": "DefE", "vel": "Vel"}
     parts = []
     for key, label in _LABELS.items():
@@ -2912,37 +2684,35 @@ def _format_stages(stages: dict) -> str:
             parts.append(f"{label}{'▼' * min(abs(v), 6)}")
     return ("📊 " + " ".join(parts)) if parts else ""
 
+
 # ══════════════════════════════════════════════════════════════════════════════
-# COMANDO /retar  — handler para registrar en el bot
+# COMANDO /retar
 # ══════════════════════════════════════════════════════════════════════════════
 
 class PvPCommandHandler:
     """
     Handler del comando /retar.
     Registrar en UniverseBot.py:
- 
+
         from pokemon.pvp_battle_system import pvp_cmd, pvp_manager
         pvp_cmd.register(bot)
     """
- 
+
     def register(self, bot):
         """Registra los handlers del comando /retar y los callbacks."""
- 
+
         @bot.message_handler(commands=["retar"])
         def cmd_retar(message):
             self.handle_retar(message, bot)
- 
-        # ── Selección de formato ──────────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_fmt_"))
         def cb_pvp_fmt(call):
             self.handle_format_selection(call, bot)
- 
-        # ── Aceptar / Rechazar desafío ────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data in ("pvp_accept", "pvp_reject"))
         def cb_pvp_accept(call):
             pvp_manager.handle_callback(call, bot)
- 
-        # ── Acciones de batalla: movimiento y switch ──────────────────────────
+
         @bot.callback_query_handler(
             func=lambda c: (
                 c.data.startswith("pvp_move_")
@@ -2951,8 +2721,7 @@ class PvPCommandHandler:
         )
         def cb_pvp_action(call):
             pvp_manager.handle_callback(call, bot)
- 
-        # ── Panel principal: Atacar ───────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_fight_"))
         def cb_pvp_fight(call):
             try:
@@ -2961,8 +2730,7 @@ class PvPCommandHandler:
                 pass
             uid = call.from_user.id
             pvp_manager.handle_fight_action(uid, bot)
- 
-        # ── Panel principal: Volver ───────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_back_"))
         def cb_pvp_back(call):
             try:
@@ -2971,8 +2739,7 @@ class PvPCommandHandler:
                 pass
             uid = call.from_user.id
             pvp_manager.handle_back_action(uid, bot)
- 
-        # ── Panel principal: Equipo ───────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_team_"))
         def cb_pvp_team(call):
             try:
@@ -2981,15 +2748,12 @@ class PvPCommandHandler:
                 pass
             uid = call.from_user.id
             pvp_manager.handle_team_pvp(uid, bot)
- 
-        # ── Panel principal: Rendirse ─────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_forfeit_"))
         def cb_pvp_forfeit(call):
             uid = call.from_user.id
-            # Pedir confirmación si aún no se confirmó
-            parts = call.data.split("_")   # pvp_forfeit_{uid}  o  pvp_forfeit_confirm_{uid}
+            parts = call.data.split("_")
             if len(parts) == 3:
-                # Primera pulsación: mostrar confirmación
                 try:
                     bot.answer_callback_query(call.id)
                 except Exception:
@@ -3019,29 +2783,25 @@ class PvPCommandHandler:
                         except Exception:
                             pass
             elif len(parts) == 4 and parts[2] == "confirm":
-                # Segunda pulsación: ejecutar rendición
                 try:
                     bot.answer_callback_query(call.id, "🏳️ Te rendiste.")
                 except Exception:
                     pass
                 pvp_manager.handle_forfeit_pvp(uid, bot)
- 
-        # ── Botones deshabilitados (noop) ─────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_noop_"))
         def cb_pvp_noop(call):
             try:
                 bot.answer_callback_query(call.id)
             except Exception:
                 pass
- 
-        # ── Selección VGC ─────────────────────────────────────────────────────
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_vgcsel_"))
         def cb_pvp_vgcsel(call):
             try:
                 bot.answer_callback_query(call.id)
             except Exception:
                 pass
-            # pvp_vgcsel_{battle_id}_{user_id}_{pokemon_id}
             parts = call.data.split("_", 4)
             if len(parts) < 5:
                 return
@@ -3053,14 +2813,13 @@ class PvPCommandHandler:
             pvp_manager.handle_vgc_selection_toggle(
                 battle_id, user_id, pokemon_id, bot, call.message
             )
- 
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_vgcconfirm_"))
         def cb_pvp_vgcconfirm(call):
             try:
                 bot.answer_callback_query(call.id)
             except Exception:
                 pass
-            # pvp_vgcconfirm_{battle_id}_{user_id}
             parts = call.data.split("_", 3)
             if len(parts) < 4:
                 return
@@ -3069,26 +2828,24 @@ class PvPCommandHandler:
             if call.from_user.id != user_id:
                 return
             pvp_manager.handle_vgc_confirm_selection(battle_id, user_id, bot, call.message)
- 
+
         @bot.callback_query_handler(func=lambda c: c.data.startswith("pvp_vgcnoop_"))
         def cb_pvp_vgcnoop(call):
             try:
                 bot.answer_callback_query(call.id, "Selecciona exactamente 4 Pokémon.")
             except Exception:
                 pass
- 
+
         import logging as _logging
         _logging.getLogger(__name__).info(
             "[PVP] Registrado: /retar + todos los callbacks pvp_*"
         )
- 
-    # ── Comandos ──────────────────────────────────────────────────────────────
- 
+
     def handle_retar(self, message, bot):
         uid = message.from_user.id
         cid = message.chat.id
         tid = getattr(message, "message_thread_id", None)
- 
+
         eq = pokemon_service.obtener_equipo(uid)
         if not eq:
             bot.send_message(
@@ -3098,7 +2855,7 @@ class PvPCommandHandler:
                 message_thread_id=tid,
             )
             return
- 
+
         if pvp_manager.has_active_battle(uid):
             bot.send_message(
                 cid,
@@ -3107,13 +2864,13 @@ class PvPCommandHandler:
                 message_thread_id=tid,
             )
             return
- 
+
         mk = types.InlineKeyboardMarkup(row_width=2)
         mk.add(
             types.InlineKeyboardButton("⚔️ 1v1", callback_data="pvp_fmt_1v1"),
             types.InlineKeyboardButton("🌀 2v2 (VGC)", callback_data="pvp_fmt_2v2"),
         )
- 
+
         bot.send_message(
             cid,
             "🏟️ <b>¡Modo Desafío!</b>\n\n¿Qué formato quieres jugar?",
@@ -3121,25 +2878,20 @@ class PvPCommandHandler:
             reply_markup      = mk,
             message_thread_id = tid,
         )
- 
+
     def handle_format_selection(self, call, bot):
-        """
-        Callback para elegir el formato. Tras elegir, usa
-        register_next_step_handler para capturar el mensaje con el rival
-        con máxima prioridad (no compite con otros handlers).
-        """
+        """Callback para elegir el formato."""
         uid     = call.from_user.id
         fmt_str = call.data.replace("pvp_fmt_", "")
- 
+
         try:
             fmt = PvPFormat(fmt_str)
         except ValueError:
             bot.answer_callback_query(call.id, "❌ Formato inválido.")
             return
- 
+
         bot.answer_callback_query(call.id, f"Formato {fmt.value} seleccionado ✅")
- 
-        # Editar el mensaje para pedir el rival
+
         instrucciones = (
             f"🏟️ <b>Formato elegido: {fmt.value}</b>\n\n"
             f"Ahora dime quién es tu rival.\n"
@@ -3159,49 +2911,35 @@ class PvPCommandHandler:
             )
         except Exception:
             pass
- 
-        # ── FIX Bug 1: usar next_step_handler en lugar de message_handler ──────
-        # register_next_step_handler tiene MAYOR prioridad que los handlers
-        # normales y sólo se dispara UNA vez para el chat_id correcto.
-        # Esto garantiza que el mensaje de respuesta llegue aquí y no sea
-        # interceptado por _handle_texto_grupo u otros handlers registrados
-        # anteriormente.
+
         def _esperar_objetivo(response_message):
-            # Auto-expirar: si tardó demasiado el next_step ya no está activo
             self._procesar_objetivo(response_message, fmt, bot)
- 
+
         bot.register_next_step_handler(call.message, _esperar_objetivo)
- 
+
     def _procesar_objetivo(self, message, fmt: "PvPFormat", bot):
-        """
-        Resuelve el usuario objetivo desde el mensaje de respuesta y crea
-        el desafío. Llamado por register_next_step_handler — prioridad máxima.
-        """
+        """Resuelve el usuario objetivo y crea el desafío."""
         uid = message.from_user.id
         cid = message.chat.id
         tid = getattr(message, "message_thread_id", None)
- 
+
         target_id:    int | None = None
         target_debug: str        = ""
- 
-        # ── 1. Forward ────────────────────────────────────────────────────────
+
         if message.forward_from:
             target_id    = message.forward_from.id
             target_debug = f"forward:{target_id}"
- 
-        # ── 2. text_mention (usuario sin @username — entidad Telegram) ────────
+
         if target_id is None and message.entities:
             for entity in message.entities:
                 if entity.type == "text_mention" and entity.user:
                     target_id    = entity.user.id
                     target_debug = f"text_mention:{target_id}"
                     break
- 
-        # ── 3. @mention clásico → resolver por BD ─────────────────────────────
+
         if target_id is None and message.entities:
             for entity in message.entities:
                 if entity.type == "mention":
-                    # Extraer username SIN la '@'
                     username_raw = message.text[
                         entity.offset + 1: entity.offset + entity.length
                     ]
@@ -3212,8 +2950,7 @@ class PvPCommandHandler:
                             target_id    = resolved
                             target_debug = f"mention_entity:{username_raw}"
                         break
- 
-        # ── 4. Texto libre con @ al inicio (fallback) ─────────────────────────
+
         if target_id is None:
             text = (message.text or "").strip().lstrip("@")
             if text:
@@ -3222,7 +2959,7 @@ class PvPCommandHandler:
                 if resolved:
                     target_id    = resolved
                     target_debug = f"text_fallback:{text}"
- 
+
         if not target_id:
             bot.send_message(
                 cid,
@@ -3235,28 +2972,27 @@ class PvPCommandHandler:
                 message_thread_id = tid,
             )
             return
- 
+
         import logging as _log
         _log.getLogger(__name__).debug(f"[PVP] Rival resuelto: {target_debug}")
- 
+
         if target_id == uid:
             bot.send_message(cid, "❌ No puedes retarte a ti mismo.",
                              message_thread_id=tid)
             return
- 
+
         ok, msg = pvp_manager.create_challenge(uid, target_id, fmt)
         if not ok:
             bot.send_message(cid, msg, parse_mode="HTML", message_thread_id=tid)
             return
- 
-        # Notificar al retado
+
         challenger_name = self._get_username(uid)
         mk = types.InlineKeyboardMarkup(row_width=2)
         mk.add(
             types.InlineKeyboardButton("✅ Aceptar", callback_data="pvp_accept"),
             types.InlineKeyboardButton("❌ Rechazar", callback_data="pvp_reject"),
         )
- 
+
         try:
             sent = bot.send_message(
                 target_id,
@@ -3281,7 +3017,7 @@ class PvPCommandHandler:
                 message_thread_id=tid,
             )
             return
- 
+
         target_name = self._get_username(target_id)
         bot.send_message(
             cid,
@@ -3290,7 +3026,7 @@ class PvPCommandHandler:
             parse_mode        = "HTML",
             message_thread_id = tid,
         )
- 
+
     def _get_username(self, user_id: int) -> str:
         try:
             from funciones import user_service
@@ -3298,7 +3034,6 @@ class PvPCommandHandler:
             return info["nombre"] if info else f"User {user_id}"
         except Exception:
             return f"User {user_id}"
- 
 
 
 # ══════════════════════════════════════════════════════════════════════════════
