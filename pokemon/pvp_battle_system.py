@@ -227,6 +227,11 @@ class PvPSide:
         self.crit_stage      = 0
         self.confusion_turns = 0   # Confusión es volátil
         self.needs_faint_switch = False
+        # ── Acción pendiente: SIEMPRE limpiar al cambiar ──────────────────────
+        # El nuevo Pokémon NO hereda la acción (movimiento) que tenía registrada
+        # el anterior. Sin esta línea, el reemplazo ejecutaba el movimiento del
+        # Pokémon caído en el siguiente turno.
+        self.pending_action  = None
         # ── Persistentes (NO tocar aquí — manejados por slot_statuses) ───────
         # self.status, self.toxic_counter, self.sleep_turns, self.leechseeded
         # → se guardan en save_slot_status() y se restauran en restore_slot_status()
@@ -678,25 +683,45 @@ class PvPManager:
         aproximadamente la mitad que a nivel 100.
         """
         for pid in all_pokemon_ids:
-            p = pokemon_service.obtener_pokemon(pid)
-            if not p:
-                continue
-
-            # Guardar estado original (HP, stats, nivel Y objeto equipado)
-            battle._hp_snapshot[pid]    = p.hp_actual
-            battle._stats_snapshot[pid] = {
-                **p.stats,
-                "_nivel":  p.nivel,
-                "_objeto": getattr(p, "objeto", None),   # ← NUEVO: preservar objeto
-            }
-
-            # Calcular stats a nivel 50 con IVs/EVs/naturaleza reales del Pokémon
-            stats50 = pokedex_service.calcular_stats(
-                p.pokemonID, 50, p.ivs, p.evs, p.naturaleza
-            )
-            hp50 = stats50["hp"]
-
+            # Cada Pokémon tiene su propio try/except: un fallo no aborta los demás.
             try:
+                p = pokemon_service.obtener_pokemon(pid)
+                if not p:
+                    continue
+
+                # Guardar estado original (HP, stats, nivel Y objeto equipado)
+                battle._hp_snapshot[pid]    = p.hp_actual
+                battle._stats_snapshot[pid] = {
+                    **p.stats,
+                    "_nivel":  p.nivel,
+                    "_objeto": getattr(p, "objeto", None),
+                }
+
+                # Calcular stats a nivel 50 con la fórmula oficial Gen 3+.
+                # Fallback: escala proporcional simple si el método no está disponible
+                # o la especie no está en el JSON del pokédex.
+                try:
+                    stats50 = pokedex_service.calcular_stats(
+                        p.pokemonID, 50, p.ivs, p.evs, p.naturaleza
+                    )
+                except Exception as _calc_e:
+                    logger.warning(
+                        f"[PVP] calcular_stats falló para #{p.pokemonID} (id={pid}): "
+                        f"{_calc_e} — usando escala proporcional"
+                    )
+                    # Fallback: nivel_actual → nivel 50 proporcional.
+                    # Para nivel 100: stats50 ≈ stats100 / 2 (aproximación válida).
+                    _factor = 50 / max(1, p.nivel)
+                    stats50 = {
+                        k: max(1, round(v * _factor))
+                        for k, v in p.stats.items()
+                    }
+                    # HP usa fórmula diferente — aproximación aceptable para fallback
+                    if "hp" not in stats50:
+                        stats50["hp"] = max(1, round(p.stats.get("hp", 50) * _factor))
+
+                hp50 = min(stats50["hp"], stats50["hp"])  # HP inicial = HP máximo
+
                 db_manager.execute_update(
                     """UPDATE POKEMON_USUARIO SET
                         nivel = 50,
@@ -710,8 +735,12 @@ class PvPManager:
                         pid,
                     ),
                 )
+                logger.debug(
+                    f"[PVP] Escalado #{p.pokemonID} '{p.nombre}' id={pid}: "
+                    f"Nv{p.nivel}→Nv50 atq {p.stats.get('atq','?')}→{stats50['atq']}"
+                )
             except Exception as e:
-                logger.error(f"[PVP] Error escalando Pokémon {pid} a nivel 50: {e}")
+                logger.error(f"[PVP] Error inesperado escalando Pokémon {pid}: {e}", exc_info=True)
 
     def _restaurar_equipo_pvp(self, battle: PvPBattle) -> None:
         """
@@ -878,28 +907,35 @@ class PvPManager:
             return True, "✅ Pokémon enviado al campo."
  
         # ── TURNO NORMAL ──────────────────────────────────────────────────────
-        if side.pending_action is not None:
-            return False, "⏳ Ya elegiste una acción este turno."
- 
-        opponent = battle.get_opponent_side(user_id)
- 
-        # Bloquear si el rival todavía está eligiendo reemplazo
-        if opponent and opponent.needs_faint_switch:
-            return (
-                False,
-                "⏳ Espera a que tu rival elija su Pokémon de reemplazo."
-            )
- 
-        side.pending_action = action
- 
-        if battle.both_chose():
+        # El lock garantiza que dos jugadores que envían su acción al mismo
+        # tiempo no llamen _resolve_turn dos veces (race condition).
+        # Sin el lock: A registra, B registra, ambos ven both_chose()=True
+        # y llaman _resolve_turn() simultáneamente → uno de los switches se
+        # procesa dos veces o el segundo call lo encuentra con pending=None.
+        with self._lock:
+            if side.pending_action is not None:
+                return False, "⏳ Ya elegiste una acción este turno."
+
+            opponent = battle.get_opponent_side(user_id)
+
+            # Bloquear si el rival todavía está eligiendo reemplazo
+            if opponent and opponent.needs_faint_switch:
+                return (
+                    False,
+                    "⏳ Espera a que tu rival elija su Pokémon de reemplazo."
+                )
+
+            side.pending_action = action
+            should_resolve = battle.both_chose()
+
+        # _resolve_turn fuera del lock para no bloquearlo durante la resolución
+        if should_resolve:
             self._cancel_turn_timers(battle)
             self._resolve_turn(battle, bot)
         else:
-            # El rival aún no eligió — arrancar su timer si no está activo
             if opponent and opponent.pending_action is None:
                 self._start_turn_timer(battle, opponent.user_id, bot)
- 
+
         return True, "✅ Acción registrada."
 
     def _start_turn_timer(self, battle: PvPBattle, user_id: int, bot):

@@ -1065,9 +1065,24 @@ class WildBattleManager:
         Esto evita el límite de 1024 chars de Telegram en captions de fotos.
         """
         try:
-            player_pokemon = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-            if not player_pokemon:
+            # ── Guards: no mostrar menú si la batalla ya está terminando ─────────
+            # Cuando _refresh_battle_ui programa este método 2 segundos antes
+            # de _handle_victory/_handle_defeat, los HP ya reflejan el KO.
+            # Estos checks evitan mostrar un panel interactivo brevemente antes
+            # del mensaje de victoria/derrota.
+            if battle.state != BattleState.ACTIVE:
                 return
+            if not self.get_battle(battle.user_id):
+                return  # Batalla ya eliminada de active_battles
+            wild = battle.wild_pokemon
+            if wild and wild.hp_actual <= 0:
+                return  # Victoria en camino
+            _player_check = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
+            if _player_check and _player_check.hp_actual <= 0:
+                return  # Derrota en camino
+            # ─────────────────────────────────────────────────────────────────────
+
+            player_pokemon = _player_check
 
             wild       = battle.wild_pokemon
             shiny_text = " ✨" if wild.shiny else ""
@@ -2299,6 +2314,12 @@ class WildBattleManager:
             # _handle_defeat se llamaran dos veces (doble Timer), duplicando
             # mensajes al usuario y logs en consola del servidor.
 
+            # Restaurar el panel interactivo con botones después del resultado.
+            # _send_battle_menu verifica que la batalla siga activa y que
+            # ningún Pokémon esté KO antes de mostrar el menú, por lo que
+            # es seguro programarlo siempre aquí sin importar el flujo.
+            threading.Timer(2.0, lambda: self._send_battle_menu(battle, bot)).start()
+
         except Exception as e:
             logger.error(f"Error en _refresh_battle_ui: {e}", exc_info=True)
 
@@ -2636,7 +2657,8 @@ class WildBattleManager:
                 return True
  
             self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
-            self._start_turn_timer(battle, user_id, bot)
+            # _send_battle_menu (programado dentro de _refresh_battle_ui con 2s de delay)
+            # se encarga de mostrar el panel con botones y arrancar el timer del turno.
             return True
  
         except Exception as e:
