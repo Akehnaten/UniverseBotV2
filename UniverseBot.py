@@ -382,5 +382,25 @@ except Exception as e:
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logger.info("[START] Bot corriendo con polling...")
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    from config import (
+        WEBHOOK_URL,
+        WEBHOOK_HOST,
+        WEBHOOK_PORT,
+        WEBHOOK_SECRET_TOKEN,
+    )
+ 
+    if WEBHOOK_URL:
+        logger.info("[START] Modo: WEBHOOK")
+        logger.info("[START] URL pública: %s", WEBHOOK_URL)
+        from webhook_server import start_webhook
+        start_webhook(
+            bot=bot,
+            webhook_url=WEBHOOK_URL,
+            host=WEBHOOK_HOST,
+            port=WEBHOOK_PORT,
+            secret_token=WEBHOOK_SECRET_TOKEN,
+        )
+    else:
+        # Fallback: polling para desarrollo local sin ngrok
+        logger.warning("[START] WEBHOOK_URL no configurado — usando polling (fallback).")
+        bot.infinity_polling(timeout=60, long_polling_timeout=60)

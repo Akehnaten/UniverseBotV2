@@ -11,12 +11,18 @@ DATABASE_PATH = str(BASE_DIR / "database" / "universebot.db")
 LOG_FILE = str(BASE_DIR / "universebot.log")
 
 # ============== TELEGRAM ==============
-TELEGRAM_TOKEN = "7075385886:AAHRz6Q5UMv6O2Ja2SKxa2GpHRQukGjtnlc" #Pruebas
-CANAL_ID = -1002069915034 #Pruebas
-#TELEGRAM_TOKEN = "7199716836:AAFjgZuL5EuIzHgLRKJUJ_zcXgzMei2ZD3w"
-#CANAL_ID = -1003159895833
+#TELEGRAM_TOKEN = "7075385886:AAHRz6Q5UMv6O2Ja2SKxa2GpHRQukGjtnlc" #Pruebas
+#CANAL_ID = -1002069915034 #Pruebas
+TELEGRAM_TOKEN = "7199716836:AAFjgZuL5EuIzHgLRKJUJ_zcXgzMei2ZD3w"
+CANAL_ID = -1003159895833
 TOKEN = TELEGRAM_TOKEN  # Alias para compatibilidad
 LOG_GROUP_ID = -1002002779047
+
+# ============== WEBHOOK ==============
+WEBHOOK_URL          = "https://corene-studentless-woodenly.ngrok-free.dev"        # ← pegar URL de ngrok acá
+WEBHOOK_HOST         = "0.0.0.0"
+WEBHOOK_PORT         = 8443
+WEBHOOK_SECRET_TOKEN = "3C3KrMe5Sd6gjdNBQDwggHebgmh_7tYiXGQFHE58Z9VxN22MZ"
 
 # ============== BASE DE DATOS ==============
 DB_TIMEOUT = 30.0
@@ -30,8 +36,8 @@ ROLES = 735
 ENTREVISTAS = 2856
 EVENTOS = 2655
 DEPORTES = 3056
-#POKECLUB = 406145
-POKECLUB = 884 #TEST
+POKECLUB = 406145
+#POKECLUB = 884 #TEST
 
 # ============== ENTREVISTAS ==============
 CANAL_ENTREVISTAS = ENTREVISTAS
@@ -48,7 +54,7 @@ POKEMON_THREAD = POKECLUB
 POKEMON_REGION_SERVIDOR = "KANTO"  # ✅ Agregado para batalla_vgc_service
 # Multiplicador de EXP respecto a los juegos oficiales.
 # 1.0 = idéntico a los juegos. 2.0 = la mitad de batallas necesarias para subir de nivel.
-POKEMON_EXP_MULTIPLIER = 1.0
+POKEMON_EXP_MULTIPLIER = 10.0
 
 POKEMON_SPAWN_CONFIG = {
     "habilitado": True,
