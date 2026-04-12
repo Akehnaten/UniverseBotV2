@@ -127,7 +127,7 @@ UNKNOWN_SPRITE = BASE_DIR / "src" / "unknow.png"
 
 # ============== PITU BOT (Pitufo Enrique) ==============
 
-GROQ_API_KEY = ""
+GROQ_API_KEY = "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"
 
 # Username del bot en Telegram (sin arroba), para detectar menciones
 BOT_USERNAME = "universeMaster_bot"
