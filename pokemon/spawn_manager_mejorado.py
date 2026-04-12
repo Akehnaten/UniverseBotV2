@@ -316,7 +316,34 @@ class SpawnManager:
             )
 
             if not success:
-                bot.send_message(user_id, message, parse_mode="HTML")
+                # ── Enviar mensaje de inicio al jugador (DM) ─────────────────────────────
+                try:
+                    bot.send_message(user_id, message, parse_mode="HTML")
+                except Exception as e:
+                    _err_code = getattr(getattr(e, 'result_json', {}), 'get', lambda k, d=None: d)('error_code') \
+                                or getattr(e, 'error_code', None)
+                    if _err_code == 403 or '403' in str(e):
+                        # El usuario nunca habló con el bot — no se puede abrir DM
+                        logger.warning(
+                            f"[SPAWN] No se pudo enviar DM a {user_id} (403). "
+                            f"El usuario debe iniciar conversación con el bot primero."
+                        )
+                        # Avisar en el grupo para que el jugador lo sepa
+                        try:
+                            bot.send_message(
+                                chat_id,
+                                f"⚠️ <b>¡Atención!</b> No pude enviarte el panel de batalla por privado.\n"
+                                f"Por favor escríbele primero a @{bot.get_me().username} o pulsa /start en su chat.\n"
+                                f"<i>El Pokémon salvaje seguirá ahí un momento más.</i>",
+                                parse_mode="HTML",
+                                message_thread_id=thread_id if thread_id else None,
+                            )
+                        except Exception:
+                            pass
+                        return  # Abortar el combate para este usuario
+                    else:
+                        # Otro error inesperado — re-lanzar para que el logger superior lo capture
+                        raise
                 return
 
             battle = wild_battle_manager.get_battle(user_id)
