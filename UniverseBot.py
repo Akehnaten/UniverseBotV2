@@ -334,9 +334,29 @@ logger.info("[OK] Middleware configurado")
 # SETUP DE HANDLERS Y SISTEMAS
 # ─────────────────────────────────────────────────────────────────────────────
 
-from handlers import setup_all_handlers
-setup_all_handlers(bot)
-logger.info("[OK] Handlers configurados")
+try:
+    from handlers import setup_all_handlers
+    setup_all_handlers(bot)
+    logger.info("[OK] Handlers configurados")
+except Exception as _handlers_err:
+    logger.error(
+        "[ERROR CRÍTICO] setup_all_handlers falló — los comandos no funcionarán.\n"
+        f"  Causa: {_handlers_err}",
+        exc_info=True,
+    )
+    # Re-intentar importar módulo a módulo para identificar el culpable
+    import importlib, traceback
+    for _mod in [
+        "pokemon.battle_engine",
+        "pokemon.wild_battle_system",
+        "pokemon.gym_battle_system",
+        "pokemon.pvp_battle_system",
+    ]:
+        try:
+            importlib.import_module(_mod)
+            logger.info(f"  ✅ {_mod} OK")
+        except Exception as _mod_err:
+            logger.error(f"  ❌ {_mod} FALLÓ: {_mod_err}")
 
 # Spawns automáticos
 try:
