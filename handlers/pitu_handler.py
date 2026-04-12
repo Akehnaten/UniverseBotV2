@@ -37,17 +37,18 @@ def _get_history(chat_id: int) -> list:
 def _pedir_respuesta(chat_id: int, prompt: str) -> str:
     """Manda el prompt a Groq y devuelve el texto de respuesta."""
     history = _get_history(chat_id)
-    
+
     # Agregar mensaje del usuario al historial
     history.append({"role": "user", "content": prompt})
-    
+
     # Mantener historial acotado
+    # FIX: antes se reasignaba a una variable local y nunca se guardaba en el dict
     if len(history) > MAX_HISTORY:
-        history = history[-MAX_HISTORY:]
-        _chat_histories[chat_id] = history
+        _chat_histories[chat_id] = history[-MAX_HISTORY:]
+        history = _chat_histories[chat_id]
 
     max_intentos = 3
-    espera = 10
+    espera = 15  # segundos entre reintentos por rate-limit
 
     for intento in range(max_intentos):
         try:
@@ -61,22 +62,30 @@ def _pedir_respuesta(chat_id: int, prompt: str) -> str:
                 temperature=0.85,
             )
             respuesta = response.choices[0].message.content.strip()
-            
+
             # Guardar respuesta en historial
             history.append({"role": "assistant", "content": respuesta})
-            
+
             return respuesta
 
         except Exception as e:
             error_str = str(e)
+            logger.error(f"[PITU] Error Groq (intento {intento + 1}/{max_intentos}): {e}")
+
             if "429" in error_str and intento < max_intentos - 1:
                 logger.warning(f"[PITU] Rate limit Groq, esperando {espera}s...")
                 time.sleep(espera)
-            else:
-                logger.error(f"[PITU] Error Groq: {e}")
-                return "Che, me trabé un momento. Probá de nuevo, boludo 😅"
+                espera *= 2  # back-off exponencial
+                continue
 
-    return "Che, me trabé un momento. Probá de nuevo, boludo 😅"
+            break  # Cualquier otro error → salir del loop
+
+    # FIX: si no se pudo responder, sacar el mensaje del usuario del historial
+    # para no dejar un turno sin respuesta que rompa el formato user/assistant
+    if history and history[-1]["role"] == "user":
+        history.pop()
+
+    return "Che, me trabé un momento. Probá de nuevo 😅"
 
 
 # ── Helpers de detección ───────────────────────────────────────────────────────
@@ -96,6 +105,7 @@ def _menciona_a_pitu(message) -> bool:
                 return True
     return False
 
+
 def _es_reply_a_pitu(message) -> bool:
     return (
         message.reply_to_message is not None
@@ -104,10 +114,12 @@ def _es_reply_a_pitu(message) -> bool:
         == BOT_USERNAME.lower()
     )
 
+
 def _tiene_palabra_clave_random(message) -> bool:
     texto = (message.text or message.caption or "").lower()
     tiene_kw = any(kw in texto for kw in PITU_PALABRAS_CLAVE)
     return tiene_kw and random.random() < PITU_PROBABILIDAD_RANDOM
+
 
 def _deberia_responder_pitu(message) -> bool:
     try:
