@@ -142,20 +142,7 @@ def _eliminar_mensaje_seguro(bot, chat_id, message_id):
 
 @bot.middleware_handler(update_types=['message'])
 def check_user_and_channel(bot_instance, message):
-    """
-    Middleware principal.
-
-    Responsabilidades (en orden de ejecución):
-    1. Sincronizar nombre y nombre_usuario en USUARIOS para cada mensaje
-       de un usuario ya registrado.
-    2. Filtrar el canal ROLES: solo idols (clase='idol') y admins del grupo
-       pueden escribir; el resto tiene su mensaje eliminado silenciosamente.
-    3. Filtrar el canal ENTREVISTAS: igual que ROLES.
-    4. Exigir registro para cualquier otro mensaje en grupo/supergrupo.
-    5. Generar caja misteriosa con probabilidad configurada.
-    6. Entregar recompensa diaria.
-    """
-    # ── Guardia: ignorar mensajes sin usuario (canales, mensajes de sistema) ──
+    # Ignorar mensajes de canales/sistema sin usuario real
     if message.from_user is None:
         return
 
@@ -190,9 +177,6 @@ def check_user_and_channel(bot_instance, message):
         if chat_type not in ("group", "supergroup"):
             return  # Mensajes privados: no aplicar ningún filtro
 
-        # FIX: usar _get_thread_id() en lugar de getattr directo para cubrir
-        # el caso donde pyTelegramBotAPI no deserializa message_thread_id
-        # correctamente en grupos con Topics siempre activos.
         thread_id = _get_thread_id(message)
 
         # ── 2. Filtro ROLES: solo idols y admins ──────────────────────────────────
@@ -229,7 +213,6 @@ def check_user_and_channel(bot_instance, message):
         if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
             return
 
-        # Los bots son administradores sin registro — sus mensajes nunca se borran
         if getattr(message.from_user, "is_bot", False):
             return
 
@@ -291,10 +274,11 @@ def check_user_and_channel(bot_instance, message):
                 logger.warning(f"[MIDDLEWARE] Error en recompensa diaria: {_daily_err}")
 
     except Exception as _mw_err:
-        # Loguear el error pero NUNCA bloquear el mensaje — el handler debe ejecutarse
-        logger.error(f"[MIDDLEWARE] Error inesperado procesando mensaje de "
-                     f"user={getattr(message.from_user, 'id', '?')}: {_mw_err}",
-                     exc_info=True)
+        logger.error(
+            f"[MIDDLEWARE] Error inesperado user="
+            f"{getattr(message.from_user, 'id', '?')}: {_mw_err}",
+            exc_info=True,
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -342,31 +326,34 @@ def cmd_remover_invitado(message):
 logger.info("[OK] Middleware configurado")
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DIAGNÓSTICO — registrado ANTES de setup_all_handlers
+# ─────────────────────────────────────────────────────────────────────────────
+
+@bot.message_handler(commands=['ping'])
+def _debug_ping(message):
+    uid = message.from_user.id if message.from_user else 0
+    logger.info(f"[DEBUG] /ping recibido de user={uid}")
+    try:
+        bot.reply_to(message, "🏓 pong")
+    except Exception as e:
+        logger.error(f"[DEBUG] No pude responder /ping: {e}")
+
+@bot.message_handler(func=lambda m: True,
+                     content_types=['text', 'photo', 'sticker', 'document'])
+def _debug_catch_all(message):
+    uid  = message.from_user.id if message.from_user else "None"
+    text = (message.text or "")[:60]
+    logger.info(
+        f"[DEBUG] user={uid} type={message.content_type} text={repr(text)}"
+    )
+
+# ─────────────────────────────────────────────────────────────────────────────
 # SETUP DE HANDLERS Y SISTEMAS
 # ─────────────────────────────────────────────────────────────────────────────
 
-try:
-    from handlers import setup_all_handlers
-    setup_all_handlers(bot)
-    logger.info("[OK] Handlers configurados")
-except Exception as _handlers_err:
-    logger.error(
-        "[ERROR CRÍTICO] setup_all_handlers falló — los comandos no funcionarán.\n"
-        f"  Causa: {_handlers_err}",
-        exc_info=True,
-    )
-    import importlib, traceback
-    for _mod in [
-        "pokemon.battle_engine",
-        "pokemon.wild_battle_system",
-        "pokemon.gym_battle_system",
-        "pokemon.pvp_battle_system",
-    ]:
-        try:
-            importlib.import_module(_mod)
-            logger.info(f"  ✅ {_mod} OK")
-        except Exception as _mod_err:
-            logger.error(f"  ❌ {_mod} FALLÓ: {_mod_err}")
+from handlers import setup_all_handlers
+setup_all_handlers(bot)
+logger.info("[OK] Handlers configurados")
 
 # Spawns automáticos
 try:
@@ -414,17 +401,7 @@ except Exception as e:
 # ─────────────────────────────────────────────────────────────────────────────
 # ARRANQUE
 # ─────────────────────────────────────────────────────────────────────────────
-# ── DIAGNÓSTICO TEMPORAL ─────────────────────────────────────────────────────
-@bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'sticker'])
-def _debug_catch_all(message):
-    uid  = message.from_user.id if message.from_user else "None"
-    text = (message.text or "")[:40]
-    logger.info(f"[DEBUG] Mensaje: user={uid} text={repr(text)} type={message.content_type}")
-    # Responder directamente para confirmar que se recibe
-    try:
-        bot.reply_to(message, f"[DEBUG] Recibido: {repr(text)}")
-    except Exception as e:
-        logger.error(f"[DEBUG] No pude responder: {e}")
+
 if __name__ == "__main__":
     from config import (
         WEBHOOK_URL,
@@ -432,41 +409,10 @@ if __name__ == "__main__":
         WEBHOOK_PORT,
         WEBHOOK_SECRET_TOKEN,
     )
-
-    # ── Resetear webhook siempre al iniciar ───────────────────────────────────
-    # Esto limpia cualquier webhook caído o con allowed_updates incompleto.
-    try:
-        bot.remove_webhook()
-        logger.info("[WEBHOOK] Webhook anterior eliminado")
-        import time; time.sleep(1)
-    except Exception as _wh_err:
-        logger.warning(f"[WEBHOOK] No se pudo eliminar webhook previo: {_wh_err}")
-
+ 
     if WEBHOOK_URL:
         logger.info("[START] Modo: WEBHOOK")
         logger.info("[START] URL pública: %s", WEBHOOK_URL)
-
-        # Configurar webhook con todos los update types necesarios
-        try:
-            bot.set_webhook(
-                url           = WEBHOOK_URL,
-                allowed_updates = [
-                    "message",
-                    "callback_query",
-                    "inline_query",
-                    "my_chat_member",
-                    "chat_member",
-                ],
-                drop_pending_updates = True,   # Descarta updates acumulados mientras estuvo caído
-            )
-            info = bot.get_webhook_info()
-            logger.info(f"[WEBHOOK] Activo en: {info.url}")
-            logger.info(f"[WEBHOOK] Pending updates: {info.pending_update_count}")
-            if info.last_error_message:
-                logger.warning(f"[WEBHOOK] Último error: {info.last_error_message}")
-        except Exception as _set_wh_err:
-            logger.error(f"[WEBHOOK] Error configurando webhook: {_set_wh_err}")
-
         from webhook_server import start_webhook
         start_webhook(
             bot=bot,
