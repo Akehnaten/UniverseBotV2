@@ -18,12 +18,12 @@ def setup_all_handlers(bot):
     """
     handlers_initialized = []
 
-    #try:
-    #    from handlers.pitu_handler import setup_pitu_handler
-    #    setup_pitu_handler(bot)
-    #    logger.info("✅ Pitu Sistem cargado")
-    #except Exception as e:
-    #    logger.error(f"❌ Pitu Sistem: {e}", exc_info=True)
+    try:
+        from handlers.pitu_handler import setup_pitu_handler
+        setup_pitu_handler(bot)
+        logger.info("✅ Pitu Sistem cargado")
+    except Exception as e:
+        logger.error(f"❌ Pitu Sistem: {e}", exc_info=True)
         
     try:
         from handlers.basic_handlers import BasicUserHandlers
