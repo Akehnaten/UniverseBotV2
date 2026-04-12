@@ -224,6 +224,10 @@ def check_user_and_channel(bot_instance, message):
     if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
         return
 
+    # Los bots son administradores sin registro — sus mensajes nunca se borran
+    if getattr(message.from_user, "is_bot", False):
+        return
+
     if not db_manager.user_exists(user_id):
         try:
             bot_instance.delete_message(chat_id, message.message_id)

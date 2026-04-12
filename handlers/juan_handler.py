@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-handlers/pitu_handler.py
-Usando Groq (gratuito) en lugar de Gemini
+handlers/juan_handler.py
+Juan, el caballo de los memes. Usando Groq (gratuito).
 """
 
 import random
@@ -11,9 +11,9 @@ from groq import Groq
 from config import (
     GROQ_API_KEY,
     BOT_USERNAME,
-    PITU_PROBABILIDAD_RANDOM,
-    PITU_PALABRAS_CLAVE,
-    PITU_SYSTEM_INSTRUCTION,
+    JUAN_PROBABILIDAD_RANDOM,
+    JUAN_PALABRAS_CLAVE,
+    JUAN_SYSTEM_INSTRUCTION,
 )
 from utils.thread_utils import get_thread_id
 
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # ── Inicialización de Groq ─────────────────────────────────────────────────────
 client = Groq(api_key=GROQ_API_KEY)
-MODEL_ID = "llama-3.3-70b-versatile"  # El más capaz en tier gratuito
+MODEL_ID = "llama-3.3-70b-versatile"
 
 # Historial de conversación por chat_id (Groq es stateless, lo manejamos nosotros)
 _chat_histories: dict[int, list] = {}
@@ -38,63 +38,54 @@ def _pedir_respuesta(chat_id: int, prompt: str) -> str:
     """Manda el prompt a Groq y devuelve el texto de respuesta."""
     history = _get_history(chat_id)
 
-    # Agregar mensaje del usuario al historial
     history.append({"role": "user", "content": prompt})
 
-    # Mantener historial acotado
-    # FIX: antes se reasignaba a una variable local y nunca se guardaba en el dict
     if len(history) > MAX_HISTORY:
         _chat_histories[chat_id] = history[-MAX_HISTORY:]
         history = _chat_histories[chat_id]
 
     max_intentos = 3
-    espera = 15  # segundos entre reintentos por rate-limit
+    espera = 15
 
     for intento in range(max_intentos):
         try:
             response = client.chat.completions.create(
                 model=MODEL_ID,
                 messages=[
-                    {"role": "system", "content": PITU_SYSTEM_INSTRUCTION},
+                    {"role": "system", "content": JUAN_SYSTEM_INSTRUCTION},
                     *history,
                 ],
                 max_tokens=300,
                 temperature=0.85,
             )
             respuesta = response.choices[0].message.content.strip()
-
-            # Guardar respuesta en historial
             history.append({"role": "assistant", "content": respuesta})
-
             return respuesta
 
         except Exception as e:
             error_str = str(e)
-            logger.error(f"[PITU] Error Groq (intento {intento + 1}/{max_intentos}): {e}")
+            logger.error(f"[JUAN] Error Groq (intento {intento + 1}/{max_intentos}): {e}")
 
             if "429" in error_str and intento < max_intentos - 1:
-                logger.warning(f"[PITU] Rate limit Groq, esperando {espera}s...")
+                logger.warning(f"[JUAN] Rate limit Groq, esperando {espera}s...")
                 time.sleep(espera)
-                espera *= 2  # back-off exponencial
+                espera *= 2
                 continue
 
-            break  # Cualquier otro error → salir del loop
+            break
 
-    # FIX: si no se pudo responder, sacar el mensaje del usuario del historial
-    # para no dejar un turno sin respuesta que rompa el formato user/assistant
     if history and history[-1]["role"] == "user":
         history.pop()
 
-    return "Che, me trabé un momento. Probá de nuevo 😅"
+    return "Neeeeigh... me trabé. Probá de nuevo 🐴"
 
 
 # ── Helpers de detección ───────────────────────────────────────────────────────
 
-def _menciona_a_pitu(message) -> bool:
+def _menciona_a_juan(message) -> bool:
     texto = (message.text or message.caption or "").lower()
-    if any(kw in texto for kw in ["pitu", "pitufo", "enrique"]):
+    if any(kw in texto for kw in ["juan", "juancito", "el caballo"]):
         return True
-    # Detección por entities (forma correcta para @menciones)
     entities = message.entities or message.caption_entities or []
     for entity in entities:
         if entity.type == "mention":
@@ -106,7 +97,7 @@ def _menciona_a_pitu(message) -> bool:
     return False
 
 
-def _es_reply_a_pitu(message) -> bool:
+def _es_reply_a_juan(message) -> bool:
     return (
         message.reply_to_message is not None
         and message.reply_to_message.from_user is not None
@@ -117,55 +108,55 @@ def _es_reply_a_pitu(message) -> bool:
 
 def _tiene_palabra_clave_random(message) -> bool:
     texto = (message.text or message.caption or "").lower()
-    tiene_kw = any(kw in texto for kw in PITU_PALABRAS_CLAVE)
-    return tiene_kw and random.random() < PITU_PROBABILIDAD_RANDOM
+    tiene_kw = any(kw in texto for kw in JUAN_PALABRAS_CLAVE)
+    return tiene_kw and random.random() < JUAN_PROBABILIDAD_RANDOM
 
 
-def _deberia_responder_pitu(message) -> bool:
+def _deberia_responder_juan(message) -> bool:
     try:
-        if _es_reply_a_pitu(message):
+        if _es_reply_a_juan(message):
             return True
         if message.text is None and message.caption is None:
             return False
-        return _menciona_a_pitu(message) or _tiene_palabra_clave_random(message)
+        return _menciona_a_juan(message) or _tiene_palabra_clave_random(message)
     except Exception as e:
-        logger.debug(f"[PITU] Error en predicado: {e}")
+        logger.debug(f"[JUAN] Error en predicado: {e}")
         return False
 
 
 # ── Setup principal ────────────────────────────────────────────────────────────
 
-def setup_pitu_handler(bot) -> None:
+def setup_juan_handler(bot) -> None:
     @bot.message_handler(
         content_types=["text", "photo", "video", "document", "sticker", "audio", "voice"],
-        func=_deberia_responder_pitu,
+        func=_deberia_responder_juan,
     )
-    def pitu_responder(message):
+    def juan_responder(message):
         chat_id   = message.chat.id
         thread_id = get_thread_id(message)
         user_name = message.from_user.first_name or "alguien"
 
         texto = message.text or message.caption or "[sin texto]"
         prompt = f"{user_name} dice: {texto}"
-        logger.info(f"[PITU] chat={chat_id} | {prompt[:80]}")
+        logger.info(f"[JUAN] chat={chat_id} | {prompt[:80]}")
 
         respuesta = _pedir_respuesta(chat_id, prompt)
 
         try:
             bot.reply_to(message, respuesta)
         except Exception as e:
-            logger.warning(f"[PITU] reply_to falló: {e}")
+            logger.warning(f"[JUAN] reply_to falló: {e}")
             try:
                 bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
             except Exception as e2:
-                logger.error(f"[PITU] send_message también falló: {e2}")
+                logger.error(f"[JUAN] send_message también falló: {e2}")
 
-    @bot.message_handler(commands=["resetpitu"])
-    def pitu_reset(message):
+    @bot.message_handler(commands=["resetjuan"])
+    def juan_reset(message):
         chat_id = message.chat.id
         if chat_id in _chat_histories:
             del _chat_histories[chat_id]
-            logger.info(f"[PITU] Historial reseteado para chat_id={chat_id}")
-        bot.reply_to(message, "Borrón y cuenta nueva, che. ¿De qué estábamos hablando? 🤷")
+            logger.info(f"[JUAN] Historial reseteado para chat_id={chat_id}")
+        bot.reply_to(message, "Borrón y cuenta nueva 🐴 ¿De qué estábamos hablando?")
 
-    logger.info("[OK] Pitu handler registrado con Groq")
+    logger.info("[OK] Juan handler registrado con Groq")

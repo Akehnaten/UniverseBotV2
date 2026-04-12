@@ -19,11 +19,11 @@ def setup_all_handlers(bot):
     handlers_initialized = []
 
     try:
-        from handlers.pitu_handler import setup_pitu_handler
-        setup_pitu_handler(bot)
-        logger.info("✅ Pitu Sistem cargado")
+        from handlers.juan_handler import setup_juan_handler
+        setup_juan_handler(bot)
+        logger.info("✅ Juan (el caballo) cargado")
     except Exception as e:
-        logger.error(f"❌ Pitu Sistem: {e}", exc_info=True)
+        logger.error(f"❌ Juan handler: {e}", exc_info=True)
         
     try:
         from handlers.basic_handlers import BasicUserHandlers
@@ -137,7 +137,6 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Gym handlers: {e}", exc_info=True)
 
-    # ── Callbacks de uso de ítems desde la mochila ────────────────────────────
     try:
         from pokemon.item_use_system import register_item_use_callbacks
         register_item_use_callbacks(bot)

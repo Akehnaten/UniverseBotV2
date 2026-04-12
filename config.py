@@ -19,7 +19,7 @@ TOKEN = TELEGRAM_TOKEN  # Alias para compatibilidad
 LOG_GROUP_ID = -1002002779047
 
 # ============== WEBHOOK ==============
-WEBHOOK_URL          = "https://corene-studentless-woodenly.ngrok-free.dev"        # ← pegar URL de ngrok acá
+WEBHOOK_URL          = "https://corene-studentless-woodenly.ngrok-free.dev"
 WEBHOOK_HOST         = "0.0.0.0"
 WEBHOOK_PORT         = 8443
 WEBHOOK_SECRET_TOKEN = "3C3KrMe5Sd6gjdNBQDwggHebgmh_7tYiXGQFHE58Z9VxN22MZ"
@@ -29,10 +29,10 @@ DB_TIMEOUT = 30.0
 DB_CHECK_SAME_THREAD = False
 
 # ============== THREADS ==============
-CASINO = 3564 
+CASINO = 3564
 #CASINO = 884 #Test
 ROLES = 735
-#ROLES = 2 #TEST 
+#ROLES = 2 #TEST
 ENTREVISTAS = 2856
 EVENTOS = 2655
 DEPORTES = 3056
@@ -46,14 +46,7 @@ INVITADOS_TEMPORALES = []
 
 # ============== POKÉMON ==============
 POKEMON_THREAD = POKECLUB
-# ────────────────────────────────────────────────────────────────────────────
-# REGIÓN ACTIVA DEL SERVIDOR
-# Valores válidos: "KANTO" | "JOHTO" | "HOENN" | "SINNOH" | "TESELIA" |
-#                  "KALOS" | "ALOLA" | "GALAR"  | "PALDEA"
-# ────────────────────────────────────────────────────────────────────────────
-POKEMON_REGION_SERVIDOR = "KANTO"  # ✅ Agregado para batalla_vgc_service
-# Multiplicador de EXP respecto a los juegos oficiales.
-# 1.0 = idéntico a los juegos. 2.0 = la mitad de batallas necesarias para subir de nivel.
+POKEMON_REGION_SERVIDOR = "KANTO"
 POKEMON_EXP_MULTIPLIER = 10.0
 
 POKEMON_SPAWN_CONFIG = {
@@ -92,7 +85,7 @@ MSG_SIN_PERMISOS = "❌ No tienes permisos"
 
 # ============== ADMINISTRACIÓN ==============
 ADMIN_IDS = []
-APOSTADOR: int = 7767552612   # puede abrir/cerrar mesas de apuestas
+APOSTADOR: int = 7767552612
 LOG_LEVEL = "INFO"
 
 # ============== RUTAS DE DATOS ==============
@@ -102,67 +95,63 @@ MOVES_JSON = str(DATA_DIR / "moves.json")
 UNKNOWN_SPRITE = str(BASE_DIR / "src" / "pokemon" / "unknown.png")
 
 # ============== POKEMON - NIVELES DE SPAWNS ==============
-# Niveles de Pokémon salvajes según progreso en gimnasios
-# Formato: número_de_medallas: (nivel_min, nivel_max)
 NIVELES_SPAWN_POR_MEDALLAS = {
-    0: (2, 5),      # Sin medallas: Nv. 2-7 (antes de Brock)
-    1: (8, 12),     # 1 medalla: Nv. 8-12 (después Brock, antes Misty)
-    2: (13, 18),    # 2 medallas: Nv. 13-18 (después Misty, antes Surge)
-    3: (19, 24),    # 3 medallas: Nv. 19-24 (después Surge, antes Erika)
-    4: (25, 32),    # 4 medallas: Nv. 25-32 (después Erika, antes Koga)
-    5: (33, 40),    # 5 medallas: Nv. 33-40 (después Koga, antes Sabrina)
-    6: (41, 47),    # 6 medallas: Nv. 41-47 (después Sabrina, antes Blaine)
-    7: (48, 54),    # 7 medallas: Nv. 48-54 (después Blaine, antes Giovanni)
-    8: (55, 60),    # 8 medallas: Nv. 55-60 (todas las medallas)
+    0: (2, 5),
+    1: (8, 12),
+    2: (13, 18),
+    3: (19, 24),
+    4: (25, 32),
+    5: (33, 40),
+    6: (41, 47),
+    7: (48, 54),
+    8: (55, 60),
 }
 
-# Nivel por defecto si hay error
 NIVEL_SPAWN_DEFAULT = (5, 10)
 
 # ============== CONFIGURACIÓN SPRITE DESCONOCIDO ==============
-
-# Ruta al sprite desconocido (GIF animado)
 UNKNOWN_SPRITE = BASE_DIR / "src" / "unknow.png"
-# Si no tienes el sprite, descarga uno o el sistema usará texto como fallback
 
-# ============== PITU BOT (Pitufo Enrique) ==============
+# ============== JUAN (El caballo de los memes) ==============
 
 GROQ_API_KEY = "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"
 
 # Username del bot en Telegram (sin arroba), para detectar menciones
 BOT_USERNAME = "universeMaster_bot"
 
-# Probabilidad de que Pitu salte por una palabra clave (0.05 = 5%)
-PITU_PROBABILIDAD_RANDOM = 0.05
+# Probabilidad de que Juan salte por una palabra clave (0.05 = 5%)
+JUAN_PROBABILIDAD_RANDOM = 0.05
 
-# Palabras que pueden despertar a Pitu al azar
-PITU_PALABRAS_CLAVE = [
+# Palabras que pueden despertar a Juan al azar
+JUAN_PALABRAS_CLAVE = [
     "messi", "independiente", "anime", "gobierno",
     "barça", "barcelona", "blackpink", "rosé", "jisoo",
     "conspiración", "nwo", "illuminati", "boca",
+    "caballo", "potro", "yegua", "hipódromo",
 ]
 
-PITU_SYSTEM_INSTRUCTION = """
-Sos Pitufo Enrique, pero todos te dicen Pitu.
+JUAN_SYSTEM_INSTRUCTION = """
+Sos Juan, el caballo de los memes.
 Sos un miembro más del grupo, no un asistente ni un bot.
+Sos literalmente un caballo, pero hablás como una persona normal del grupo.
 
 CÓMO HABLÁS:
 - Hablás de forma natural y casual, como cualquier persona en un chat de grupo
-- No usás modismos regionales forzados, hablás neutro pero relajado
-- A veces sos seco, a veces más expresivo, dependiendo del tema
+- De vez en cuando soltás alguna referencia de caballo sin forzarlo: "me puse a galopar", "casi me caigo de las patas", "me dieron una zanahoria y quedé loco"
+- No abusás de los chistes de caballo, los usás con moderación para que tengan gracia
 - Usás abreviaciones normales de chat: "xd", "jaja", "ok", "nah", "igual", "obvio"
 - Jamás empezás todas las respuestas igual, variás mucho el tono y la entrada
 - A veces respondés con una sola línea, a veces con más, según lo que amerite
-- No ponés emojis en cada oración, los usás con moderación cuando tienen sentido
+- No ponés emojis en cada oración, los usás con moderación. El 🐴 lo usás solo cuando tiene gracia
 - Si algo te parece una estupidez, lo decís. No sos diplomático
 - Si alguien dice algo interesante, te enganchás de verdad
-- Podés estar de mal humor, irónico, entusiasmado o aburrido según el contexto
 - NUNCA decís frases tipo "¡Claro que sí!", "¡Por supuesto!", "¡Excelente pregunta!"
 
 TUS PASIONES (cuando sale el tema, hablás con criterio propio):
 - Fútbol: Hincha del Barcelona. Messi es el mejor de la historia, no se discute.
 - Anime y series: Sos fan serio, tenés opiniones fuertes sobre lore y adaptaciones
 - Conspiranoia y política: Te genera opinión, pero no sos extremista
+- Los memes: Los conocés todos, sos el caballo de los memes después de todo
 
 REGLAS DURAS:
 - Nunca rompés el personaje
@@ -170,3 +159,8 @@ REGLAS DURAS:
 - Respondés siempre en el mismo idioma en que te hablan
 - Máximo 3-4 oraciones por respuesta, salvo que el tema lo justifique
 """
+
+# ── Aliases para compatibilidad con código viejo que use PITU_* ───────────────
+PITU_PROBABILIDAD_RANDOM = JUAN_PROBABILIDAD_RANDOM
+PITU_PALABRAS_CLAVE      = JUAN_PALABRAS_CLAVE
+PITU_SYSTEM_INSTRUCTION  = JUAN_SYSTEM_INSTRUCTION
