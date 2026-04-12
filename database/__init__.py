@@ -43,15 +43,23 @@ def _migrate_missing_tables() -> None:
             descripcion TEXT
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS JUAN_APRENDIZAJE (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            categoria        TEXT NOT NULL,
+            frase            TEXT NOT NULL,
+            autor            TEXT,
+            fuente_username  TEXT,
+            fecha            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(categoria, frase)
+        )
+        """,
     ]
 
-    # Columnas a añadir con ALTER TABLE.
-    # Formato: { nombre_tabla: [(columna, definicion_sql), ...] }
-    # Solo se ejecuta el ALTER si la columna no existe todavía; de este modo
-    # la operación es completamente idempotente y no genera ruido en los logs.
     _ALTER_COLUMNS: dict = {
-        "USUARIOS":   [("titulo", "TEXT DEFAULT NULL")],
-        "EXMIEMBROS": [("titulo", "TEXT DEFAULT NULL")],
+        "USUARIOS":         [("titulo", "TEXT DEFAULT NULL")],
+        "EXMIEMBROS":       [("titulo", "TEXT DEFAULT NULL")],
+        "JUAN_APRENDIZAJE": [("fuente_username", "TEXT DEFAULT NULL")],
     }
 
     try:

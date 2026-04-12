@@ -77,6 +77,10 @@ from pokemon.battle_engine import (
     MOVE_NAMES_ES,
     _HIGH_CRIT_MOVES,
     SELF_KO_MOVES,
+    # ── Hazards de entrada ───────────────────────────────────────────────────
+    apply_hazard_effects,
+    apply_hazard_move_effect,
+    HAZARD_MOVE_EFFECTS_PATCH,
 )
 from pokemon.services import pokemon_service, movimientos_service, pokedex_service
 from pokemon.battle_adapter import (side_from_pvp, sync_pvp_side)
@@ -254,6 +258,15 @@ class PvPBattle:
     magic_room_turns: int = 0
     wonder_room:     bool = False
     wonder_room_turns: int = 0
+    # Hazards por bando (side1 = retador, side2 = retado)
+    side1_stealth_rock: bool = False
+    side1_spikes:       int  = 0
+    side1_toxic_spikes: int  = 0
+    side1_sticky_web:   bool = False
+    side2_stealth_rock: bool = False
+    side2_spikes:       int  = 0
+    side2_toxic_spikes: int  = 0
+    side2_sticky_web:   bool = False
     # Broadcast en el grupo
     group_msg_id:    Optional[int] = None
     # Historial de líneas para el broadcast
@@ -822,6 +835,11 @@ class PvPManager:
                 f"envió a <b>{new_name}</b> (reemplazo limpio — sin coste de turno).\n"
             ]
 
+            # Aplicar hazards al Pokémon de reemplazo que entra
+            _new_p_haz = pokemon_service.obtener_pokemon(side.pokemon_ids[new_idx])
+            if _new_p_haz and _new_p_haz.hp_actual > 0:
+                _pvp_apply_entry_hazards(battle, side, _new_p_haz, faint_log)
+
             # Aplicar habilidades de entrada del nuevo Pokémon
             opponent = battle.get_opponent_side(user_id)
 
@@ -1065,18 +1083,14 @@ class PvPManager:
         if action is None:
             return False
 
-        atk_p = attacker_side.get_active_pokemon()
-        def_p = defender_side.get_active_pokemon()
-
-        # No actuar si el atacante ya está K.O. (ej: usó Explosión antes)
-        if not atk_p or not def_p or atk_p.hp_actual <= 0 or def_p.hp_actual <= 0:
-            return False
-
-        atk_name = atk_p.mote or atk_p.nombre
-        def_name = def_p.mote or def_p.nombre
-
         # ── Cambio de Pokémon (hard switch voluntario) ────────────────────────
+        # Los switches se ejecutan SIEMPRE que el slot destino sea válido,
+        # independientemente del estado del Pokémon rival. Si ambos jugadores
+        # eligen switch en el mismo turno, los dos cambios se procesan.
         if action["type"] == "switch":
+            atk_p_chk = attacker_side.get_active_pokemon()
+            if not atk_p_chk:
+                return False
             new_idx = action["value"]
             new_p   = (
                 pokemon_service.obtener_pokemon(attacker_side.pokemon_ids[new_idx])
@@ -1088,6 +1102,12 @@ class PvPManager:
                 attacker_side.active_index = new_idx
                 attacker_side.reset_stages_on_switch()
                 attacker_side.restore_slot_status(new_idx)
+                # Aplicar hazards al Pokémon que entra (hard switch)
+                _new_p_haz_e = pokemon_service.obtener_pokemon(
+                    attacker_side.pokemon_ids[new_idx]
+                )
+                if _new_p_haz_e and _new_p_haz_e.hp_actual > 0:
+                    _pvp_apply_entry_hazards(battle, attacker_side, _new_p_haz_e, turn_log)
                 new_name = new_p.mote or new_p.nombre
                 turn_log.append(
                     f"  🔄 {self._get_username(attacker_side.user_id)} "
@@ -1101,6 +1121,16 @@ class PvPManager:
                         new_p, opponent_p, hab, turn_log,
                     )
             return False
+
+        atk_p = attacker_side.get_active_pokemon()
+        def_p = defender_side.get_active_pokemon()
+
+        # No actuar si el atacante ya está K.O. (ej: usó Explosión antes)
+        if not atk_p or not def_p or atk_p.hp_actual <= 0 or def_p.hp_actual <= 0:
+            return False
+
+        atk_name = atk_p.mote or atk_p.nombre
+        def_name = def_p.mote or def_p.nombre
 
         # ── Movimiento ────────────────────────────────────────────────────────
         move_name = action["value"]
@@ -1405,11 +1435,21 @@ class PvPManager:
         def_name: str,
         log: list,
     ):
-        """Aplica un movimiento de estado usando MOVE_EFFECTS."""
-        effect = MOVE_EFFECTS.get(move_key)
-        if not effect:
+        """Aplica un movimiento de estado usando MOVE_EFFECTS y HAZARD_MOVE_EFFECTS_PATCH."""
+        effect        = MOVE_EFFECTS.get(move_key, {})
+        hazard_effect = HAZARD_MOVE_EFFECTS_PATCH.get(move_key, {})
+
+        if not effect and not hazard_effect:
             log.append(f"  💫 ¡{atk_name} usó {move_key.title()}! (Sin efecto conocido)\n")
             return
+
+        # ── Hazards ───────────────────────────────────────────────────────────
+        if hazard_effect:
+            _haz_a = _pvp_get_hazards(battle, attacker_side)
+            _haz_d = _pvp_get_hazards(battle, defender_side)
+            apply_hazard_move_effect(hazard_effect, _haz_a, _haz_d, atk_name, log)
+            _pvp_set_hazards(battle, attacker_side, _haz_a)
+            _pvp_set_hazards(battle, defender_side, _haz_d)
 
         proxy = _PvPFieldProxy(battle, attacker_side, defender_side)
 
@@ -1903,7 +1943,9 @@ class PvPManager:
         own_username   = self._get_username(own.user_id)
 
         _fl_txt    = build_field_status_line(battle)
-        field_line = (f"{_fl_txt}\n") if _fl_txt else ""
+        _hz_txt    = build_hazard_status_line_pvp(battle)
+        _fl_parts  = [p for p in [_fl_txt, _hz_txt] if p]
+        field_line = ("".join(f"{p}\n" for p in _fl_parts)) if _fl_parts else ""
 
         rival_vivos = 0
         if rival:
@@ -2297,6 +2339,10 @@ class PvPManager:
             f"━━━━━━━━━━━━━━━\n"
         )
 
+        _hz_pvp = build_hazard_status_line_pvp(battle)
+        if _hz_pvp:
+            txt += _hz_pvp + "\n"
+
         if extra_log:
             txt += "".join(extra_log)[-1500:]
 
@@ -2664,8 +2710,112 @@ class _PvPFieldProxy:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UTILS UI
+# HELPERS DE HAZARDS PvP
 # ══════════════════════════════════════════════════════════════════════════════
+
+def _pvp_get_hazards(battle: "PvPBattle", side: "PvPSide") -> dict:
+    """Devuelve el dict de hazards del bando indicado."""
+    prefix = "side1" if side is battle.side1 else "side2"
+    return {
+        "stealth_rock": getattr(battle, f"{prefix}_stealth_rock", False),
+        "spikes":       getattr(battle, f"{prefix}_spikes",       0),
+        "toxic_spikes": getattr(battle, f"{prefix}_toxic_spikes", 0),
+        "sticky_web":   getattr(battle, f"{prefix}_sticky_web",   False),
+    }
+
+
+def _pvp_set_hazards(battle: "PvPBattle", side: "PvPSide", h: dict) -> None:
+    """Escribe el dict de hazards de vuelta al PvPBattle para el bando indicado."""
+    prefix = "side1" if side is battle.side1 else "side2"
+    setattr(battle, f"{prefix}_stealth_rock", h.get("stealth_rock", False))
+    setattr(battle, f"{prefix}_spikes",       h.get("spikes",       0))
+    setattr(battle, f"{prefix}_toxic_spikes", h.get("toxic_spikes", 0))
+    setattr(battle, f"{prefix}_sticky_web",   h.get("sticky_web",   False))
+
+
+def _pvp_apply_entry_hazards(
+    battle: "PvPBattle",
+    entering_side: "PvPSide",
+    entering_poke,
+    log: list,
+) -> None:
+    """
+    Aplica los hazards que el rival colocó en el lado del entrante.
+    Modifica entering_poke.hp_actual y entering_side (status, stat_stages).
+    Persiste HP en BD.
+    """
+    entering_hazards = _pvp_get_hazards(battle, entering_side)
+    if not any([
+        entering_hazards.get("stealth_rock"),
+        entering_hazards.get("spikes", 0) > 0,
+        entering_hazards.get("toxic_spikes", 0) > 0,
+        entering_hazards.get("sticky_web"),
+    ]):
+        return
+
+    from pokemon.services.pokedex_service import pokedex_service as _pdx_pvp
+    tipos = _pdx_pvp.obtener_tipos(entering_poke.pokemonID)
+
+    class _Adapter:
+        def __init__(self, poke, tipos_list):
+            self.tipos     = tipos_list
+            self.habilidad = getattr(poke, "habilidad", "") or ""
+            self.objeto    = getattr(poke, "objeto", "")    or ""
+            self.hp_max    = poke.stats.get("hp", poke.hp_actual) or poke.hp_actual
+            self.nombre    = poke.mote or poke.nombre
+
+    adapter  = _Adapter(entering_poke, tipos)
+    hp_delta, nuevo_status, stages_mod = apply_hazard_effects(
+        side_hazards     = entering_hazards,
+        entering_pokemon = adapter,
+        entering_stages  = entering_side.stat_stages,
+        entering_status  = entering_side.status,
+        log              = log,
+    )
+
+    # Tipo Veneno puede haber absorbido las Púas Tóxicas
+    _pvp_set_hazards(battle, entering_side, entering_hazards)
+
+    if hp_delta != 0:
+        hp_max  = entering_poke.stats.get("hp", entering_poke.hp_actual) or entering_poke.hp_actual
+        new_hp  = max(0, min(hp_max, entering_poke.hp_actual + hp_delta))
+        entering_poke.hp_actual = new_hp
+        try:
+            db_manager.execute_update(
+                "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                (new_hp, entering_poke.id_unico),
+            )
+        except Exception as _e:
+            logger.error(f"[PVP HAZARD] Error persistiendo HP entrada: {_e}")
+
+    if nuevo_status != entering_side.status:
+        entering_side.status = nuevo_status
+        if nuevo_status == "tox":
+            entering_side.toxic_counter = 1
+
+    entering_side.stat_stages = stages_mod
+
+
+def build_hazard_status_line_pvp(battle: "PvPBattle") -> str:
+    """Construye la línea de hazards activos para el broadcast PvP."""
+    def _fmt(prefix: str) -> str:
+        p = []
+        if getattr(battle, f"{prefix}_stealth_rock", False):
+            p.append("🪨TR")
+        c = getattr(battle, f"{prefix}_spikes", 0)
+        if c:
+            p.append(f"📍×{c}")
+        t = getattr(battle, f"{prefix}_toxic_spikes", 0)
+        if t:
+            p.append(f"☠️×{t}")
+        if getattr(battle, f"{prefix}_sticky_web", False):
+            p.append("🕸️")
+        return " ".join(p)
+
+    s1, s2 = _fmt("side1"), _fmt("side2")
+    if not s1 and not s2:
+        return ""
+    return f"🛡️ <i>{s1 or '—'} ← Trampas → {s2 or '—'}</i>"
 
 def _hp_bar(pct: int, length: int = 10) -> str:
     filled = max(0, min(length, int(pct / 100 * length)))

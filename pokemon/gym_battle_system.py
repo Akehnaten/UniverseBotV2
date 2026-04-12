@@ -65,6 +65,10 @@ from pokemon.battle_engine import (
     MOVE_NAMES_ES,
     STATUS_ICONS,
     _HIGH_CRIT_MOVES,
+    # ── Hazards de entrada ───────────────────────────────────────────────────
+    apply_hazard_effects,
+    apply_hazard_move_effect,
+    HAZARD_MOVE_EFFECTS_PATCH,
 )
 from pokemon.services import (
     pokemon_service,
@@ -179,6 +183,18 @@ class GymBattleData:
     wonder_room:      bool = False
     wonder_room_turns: int = 0
 
+    # ── Hazards por bando ─────────────────────────────────────────────────
+    # "player_*" = trampas en el lado del jugador (le dañan al entrar)
+    # "wild_*"   = trampas en el lado del NPC     (le dañan al entrar)
+    player_stealth_rock: bool = False
+    player_spikes:       int  = 0
+    player_toxic_spikes: int  = 0
+    player_sticky_web:   bool = False
+    wild_stealth_rock:   bool = False
+    wild_spikes:         int  = 0
+    wild_toxic_spikes:   int  = 0
+    wild_sticky_web:     bool = False
+
     # ── Control ───────────────────────────────────────────────────────────
     state:       GymBattleState = GymBattleState.ACTIVE
     message_id:  Optional[int] = None
@@ -206,6 +222,134 @@ def _hp_bar(hp: int, hp_max: int, length: int = 10) -> str:
     filled = max(0, min(length, round(pct / 100 * length)))
     color  = "🟢" if pct > 50 else ("🟡" if pct > 20 else "🔴")
     return color * filled + "⬛" * (length - filled)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS DE HAZARDS (gym)
+# Usan la misma nomenclatura player_*/wild_* que wild_battle_system para
+# poder reutilizar apply_hazard_effects sin adaptadores adicionales.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_gym_player_hazards(battle: "GymBattleData") -> dict:
+    return {
+        "stealth_rock": getattr(battle, "player_stealth_rock", False),
+        "spikes":       getattr(battle, "player_spikes",       0),
+        "toxic_spikes": getattr(battle, "player_toxic_spikes", 0),
+        "sticky_web":   getattr(battle, "player_sticky_web",   False),
+    }
+
+
+def _get_gym_npc_hazards(battle: "GymBattleData") -> dict:
+    return {
+        "stealth_rock": getattr(battle, "wild_stealth_rock", False),
+        "spikes":       getattr(battle, "wild_spikes",       0),
+        "toxic_spikes": getattr(battle, "wild_toxic_spikes", 0),
+        "sticky_web":   getattr(battle, "wild_sticky_web",   False),
+    }
+
+
+def _set_gym_player_hazards(battle: "GymBattleData", h: dict) -> None:
+    battle.player_stealth_rock = h.get("stealth_rock", False)
+    battle.player_spikes       = h.get("spikes",       0)
+    battle.player_toxic_spikes = h.get("toxic_spikes", 0)
+    battle.player_sticky_web   = h.get("sticky_web",   False)
+
+
+def _set_gym_npc_hazards(battle: "GymBattleData", h: dict) -> None:
+    battle.wild_stealth_rock = h.get("stealth_rock", False)
+    battle.wild_spikes       = h.get("spikes",       0)
+    battle.wild_toxic_spikes = h.get("toxic_spikes", 0)
+    battle.wild_sticky_web   = h.get("sticky_web",   False)
+
+
+def _apply_gym_entry_hazards(
+    battle: "GymBattleData",
+    entering_poke,
+    entering_hazards: dict,
+    entering_status_attr: str,
+    entering_toxic_attr: str,
+    entering_stages_attr: str,
+    log: list,
+) -> None:
+    """
+    Aplica hazards del lado contrario al Pokémon que acaba de entrar.
+    Funciona tanto para el jugador como para el NPC.
+    Persiste HP en BD.
+    """
+    from database import db_manager as _db
+
+    if not any([
+        entering_hazards.get("stealth_rock"),
+        entering_hazards.get("spikes", 0) > 0,
+        entering_hazards.get("toxic_spikes", 0) > 0,
+        entering_hazards.get("sticky_web"),
+    ]):
+        return
+
+    current_stages = getattr(battle, entering_stages_attr,
+                             {"atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0})
+    current_status = getattr(battle, entering_status_attr, None)
+
+    hp_delta, nuevo_status, stages_mod = apply_hazard_effects(
+        side_hazards     = entering_hazards,
+        entering_pokemon = entering_poke,
+        entering_stages  = current_stages,
+        entering_status  = current_status,
+        log              = log,
+    )
+
+    if hp_delta != 0:
+        hp_max = entering_poke.stats.get("hp", entering_poke.hp_actual) or entering_poke.hp_actual
+        new_hp = max(0, min(hp_max, entering_poke.hp_actual + hp_delta))
+        entering_poke.hp_actual = new_hp
+        try:
+            _db.execute_update(
+                "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                (new_hp, entering_poke.id_unico),
+            )
+        except Exception as _e:
+            logging.getLogger(__name__).error(f"[GYM HAZARD] Error persistiendo HP: {_e}")
+
+    if nuevo_status != current_status:
+        setattr(battle, entering_status_attr, nuevo_status)
+        if nuevo_status == "tox":
+            setattr(battle, entering_toxic_attr, 1)
+
+    setattr(battle, entering_stages_attr, stages_mod)
+
+
+def build_hazard_status_line_gym(battle: "GymBattleData") -> str:
+    """Línea de hazards activos para la UI de batalla de gimnasio."""
+    partes_jugador, partes_npc = [], []
+
+    if getattr(battle, "player_stealth_rock", False):
+        partes_jugador.append("🪨TR")
+    c = getattr(battle, "player_spikes", 0)
+    if c:
+        partes_jugador.append(f"📍×{c}")
+    t = getattr(battle, "player_toxic_spikes", 0)
+    if t:
+        partes_jugador.append(f"☠️×{t}")
+    if getattr(battle, "player_sticky_web", False):
+        partes_jugador.append("🕸️")
+
+    if getattr(battle, "wild_stealth_rock", False):
+        partes_npc.append("🪨TR")
+    c = getattr(battle, "wild_spikes", 0)
+    if c:
+        partes_npc.append(f"📍×{c}")
+    t = getattr(battle, "wild_toxic_spikes", 0)
+    if t:
+        partes_npc.append(f"☠️×{t}")
+    if getattr(battle, "wild_sticky_web", False):
+        partes_npc.append("🕸️")
+
+    if not partes_jugador and not partes_npc:
+        return ""
+
+    lado_j = " ".join(partes_jugador) if partes_jugador else "—"
+    lado_n = " ".join(partes_npc)     if partes_npc     else "—"
+    return f"🛡️ <i>{lado_j} ← Trampas → {lado_n}</i>"
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -366,13 +510,16 @@ class GymBattleManager:
         medalla_lider = lider.get("medalla", "")
         subtitulo     = "🏆 Alto Mando" if battle.is_e4 else f"🏅 {medalla_lider} en juego"
 
+        _hz_txt = build_hazard_status_line_gym(battle)
+
         text = (
             f"{titulo}\n"
             f"{subtitulo}\n\n"
             f"{npc_line}\n"
             f"💊 Pokémon restantes rival: {npc_restantes}\n\n"
             f"{p_line}"
-            f"{log_txt}\n\n"
+            + (f"\n{_hz_txt}" if _hz_txt else "")
+            + f"{log_txt}\n\n"
             f"💡 <b>Tu turno</b> — ¿Qué harás?"
         )
 
@@ -425,7 +572,12 @@ class GymBattleManager:
         if battle.battle_log:
             log_txt = "\n\n📋 " + "\n".join(battle.battle_log[-1:])
 
-        text = f"{npc_line}\n\n{p_line}{log_txt}\n\n⚔️ <b>Elige un movimiento:</b>"
+        _hz_fight = build_hazard_status_line_gym(battle)
+        text = (
+            f"{npc_line}\n\n{p_line}"
+            + (f"\n{_hz_fight}" if _hz_fight else "")
+            + f"{log_txt}\n\n⚔️ <b>Elige un movimiento:</b>"
+        )
 
         uid      = battle.user_id
         NOOP     = f"gym_noop_{uid}"
@@ -881,6 +1033,15 @@ class GymBattleManager:
                 _exec_player()
  
         # ── Fin de turno ──────────────────────────────────────────────────────
+        # ── Movimientos de daño que también limpian hazards (Giro Rápido…) ──
+        _p_move_clean = move_key.lower().replace(" ", "").replace("-", "")
+        _haz_dmg_eff  = HAZARD_MOVE_EFFECTS_PATCH.get(_p_move_clean, {})
+        if _haz_dmg_eff:
+            _atk_h = _get_gym_player_hazards(battle)
+            _def_h = _get_gym_npc_hazards(battle)
+            apply_hazard_move_effect(_haz_dmg_eff, _atk_h, _def_h, p_name, log)
+            _set_gym_player_hazards(battle, _atk_h)
+            _set_gym_npc_hazards(battle, _def_h)
         battle.turn_number += 1
         tick_field_turns(battle, log)
         _apply_eot_status(battle, log)
@@ -982,6 +1143,17 @@ class GymBattleManager:
         if old_name and not es_faint_switch:
             log.append(f"↩️ ¡{old_name} volvió!\n")
         log.append(f"✅ ¡Adelante, <b>{new_p.mote or new_p.nombre}</b>!\n")
+
+        # ── Hazards del NPC que golpean al jugador que entra ─────────────────
+        _npc_hazards = _get_gym_npc_hazards(battle)
+        _apply_gym_entry_hazards(
+            battle, new_p, _npc_hazards,
+            entering_status_attr = "player_status",
+            entering_toxic_attr  = "player_toxic_counter",
+            entering_stages_attr = "player_stat_stages",
+            log                  = log,
+        )
+        _set_gym_npc_hazards(battle, _npc_hazards)
  
         # Habilidades de entrada del nuevo Pokémon
         npc_pid = battle.npc_pokemon_id
@@ -1277,6 +1449,19 @@ class GymBattleManager:
                 f"⚔️ <b>{lider.get('nombre','El rival')}</b> "
                 f"envía a <b>{np_name}</b>!\n"
             )
+
+            # ── Hazards del jugador que golpean al NPC que entra ─────────────
+            if next_p:
+                _player_hazards = _get_gym_player_hazards(battle)
+                _apply_gym_entry_hazards(
+                    battle, next_p, _player_hazards,
+                    entering_status_attr = "wild_status",
+                    entering_toxic_attr  = "wild_toxic_counter",
+                    entering_stages_attr = "wild_stat_stages",
+                    log                  = log,
+                )
+                _set_gym_player_hazards(battle, _player_hazards)
+
             self._refresh_ui(battle, bot, extra_log=log)
             self._start_timer(battle, bot)
 
@@ -1584,15 +1769,37 @@ def _apply_status_move(
     is_player:       bool,
 ) -> bool:
     """
-    Aplica el efecto de un movimiento de estado usando MOVE_EFFECTS.
+    Aplica el efecto de un movimiento de estado usando MOVE_EFFECTS
+    y HAZARD_MOVE_EFFECTS_PATCH.
     Retorna True si tuvo algún efecto.
     """
-    mk     = move_key.lower().replace(" ", "").replace("-", "")
-    effect = MOVE_EFFECTS.get(mk)
-    if not effect:
+    mk           = move_key.lower().replace(" ", "").replace("-", "")
+    effect       = MOVE_EFFECTS.get(mk, {})
+    hazard_effect = HAZARD_MOVE_EFFECTS_PATCH.get(mk, {})
+
+    if not effect and not hazard_effect:
         return False
 
     applied = False
+
+    # ── Hazards ───────────────────────────────────────────────────────────────
+    if hazard_effect:
+        if is_player:
+            atk_haz = _get_gym_player_hazards(battle)
+            def_haz = _get_gym_npc_hazards(battle)
+        else:
+            atk_haz = _get_gym_npc_hazards(battle)
+            def_haz = _get_gym_player_hazards(battle)
+
+        if apply_hazard_move_effect(hazard_effect, atk_haz, def_haz, attacker_name, log):
+            applied = True
+
+        if is_player:
+            _set_gym_player_hazards(battle, atk_haz)
+            _set_gym_npc_hazards(battle, def_haz)
+        else:
+            _set_gym_npc_hazards(battle, atk_haz)
+            _set_gym_player_hazards(battle, def_haz)
 
     # Cambios de etapas
     for (target, stat, delta) in effect.get("stages", []):

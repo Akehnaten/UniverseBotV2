@@ -77,6 +77,10 @@ from pokemon.battle_engine import (
     apply_end_of_turn, 
     apply_entry_ability,
     check_confusion,
+    # ── Hazards de entrada ───────────────────────────────────────────────────
+    apply_hazard_effects,
+    apply_hazard_move_effect,
+    HAZARD_MOVE_EFFECTS_PATCH,
 )
 from pokemon.battle_adapter import (
           side_from_wild, side_from_player, sync_wild_side, sync_player_side,)
@@ -815,6 +819,121 @@ def _apply_residual_effects(battle, log: list) -> None:
     # ── Tick del campo (clima y terreno) — ya lo hace tick_field_turns ────────
     tick_field_turns(battle, log)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPERS DE HAZARDS (wild_battle_system)
+# ─────────────────────────────────────────────────────────────────────────────
+
+import threading as _threading_haz
+
+
+def _send_transient_message(
+    bot,
+    chat_id: int,
+    text: str,
+    delay: float = 3.0,
+    *,
+    parse_mode: str = "HTML",
+    thread_id: int | None = None,
+) -> None:
+    """
+    Envía un mensaje y lo elimina automáticamente después de `delay` segundos.
+    Ideal para notificaciones de aparición de Pokémon, inicio de batalla, etc.
+    Nunca lanza excepción si la eliminación falla.
+    """
+    try:
+        kwargs: dict = {"parse_mode": parse_mode}
+        if thread_id is not None:
+            kwargs["message_thread_id"] = thread_id
+        msg    = bot.send_message(chat_id, text, **kwargs)
+        msg_id = msg.message_id
+
+        def _delete():
+            try:
+                bot.delete_message(chat_id, msg_id)
+            except Exception:
+                pass
+
+        t = _threading_haz.Timer(delay, _delete)
+        t.daemon = True
+        t.start()
+    except Exception:
+        pass
+
+
+def _get_player_hazards(battle) -> dict:
+    """Devuelve un dict con los hazards del lado del jugador."""
+    return {
+        "stealth_rock": getattr(battle, "player_stealth_rock", False),
+        "spikes":       getattr(battle, "player_spikes",       0),
+        "toxic_spikes": getattr(battle, "player_toxic_spikes", 0),
+        "sticky_web":   getattr(battle, "player_sticky_web",   False),
+    }
+
+
+def _get_wild_hazards(battle) -> dict:
+    """Devuelve un dict con los hazards del lado del salvaje."""
+    return {
+        "stealth_rock": getattr(battle, "wild_stealth_rock", False),
+        "spikes":       getattr(battle, "wild_spikes",       0),
+        "toxic_spikes": getattr(battle, "wild_toxic_spikes", 0),
+        "sticky_web":   getattr(battle, "wild_sticky_web",   False),
+    }
+
+
+def _set_player_hazards(battle, h: dict) -> None:
+    """Escribe el dict de hazards de vuelta al BattleData (lado jugador)."""
+    battle.player_stealth_rock = h.get("stealth_rock", False)
+    battle.player_spikes       = h.get("spikes",       0)
+    battle.player_toxic_spikes = h.get("toxic_spikes", 0)
+    battle.player_sticky_web   = h.get("sticky_web",   False)
+
+
+def _set_wild_hazards(battle, h: dict) -> None:
+    """Escribe el dict de hazards de vuelta al BattleData (lado wild)."""
+    battle.wild_stealth_rock = h.get("stealth_rock", False)
+    battle.wild_spikes       = h.get("spikes",       0)
+    battle.wild_toxic_spikes = h.get("toxic_spikes", 0)
+    battle.wild_sticky_web   = h.get("sticky_web",   False)
+
+
+def build_hazard_status_line(battle) -> str:
+    """
+    Construye una línea con los hazards activos de ambos lados.
+    Retorna '' si no hay ningún hazard activo.
+    """
+    partes_jugador = []
+    partes_wild    = []
+
+    if getattr(battle, "player_stealth_rock", False):
+        partes_jugador.append("🪨TR")
+    capas_p = getattr(battle, "player_spikes", 0)
+    if capas_p:
+        partes_jugador.append(f"📍Púas×{capas_p}")
+    tcapas_p = getattr(battle, "player_toxic_spikes", 0)
+    if tcapas_p:
+        partes_jugador.append(f"☠️PúasT×{tcapas_p}")
+    if getattr(battle, "player_sticky_web", False):
+        partes_jugador.append("🕸️Red")
+
+    if getattr(battle, "wild_stealth_rock", False):
+        partes_wild.append("🪨TR")
+    capas_w = getattr(battle, "wild_spikes", 0)
+    if capas_w:
+        partes_wild.append(f"📍Púas×{capas_w}")
+    tcapas_w = getattr(battle, "wild_toxic_spikes", 0)
+    if tcapas_w:
+        partes_wild.append(f"☠️PúasT×{tcapas_w}")
+    if getattr(battle, "wild_sticky_web", False):
+        partes_wild.append("🕸️Red")
+
+    if not partes_jugador and not partes_wild:
+        return ""
+
+    lado_p = " ".join(partes_jugador) if partes_jugador else "—"
+    lado_w = " ".join(partes_wild)    if partes_wild    else "—"
+    return f"🛡️ <i>{lado_p} ← Trampas → {lado_w}</i>"
+
+
 # ============================================================================
 # GESTOR DE BATALLAS
 # ============================================================================
@@ -1078,8 +1197,10 @@ class WildBattleManager:
             if wild and wild.hp_actual <= 0:
                 return  # Victoria en camino
             _player_check = pokemon_service.obtener_pokemon(battle.player_pokemon_id)
-            if _player_check and _player_check.hp_actual <= 0:
-                return  # Derrota en camino
+            
+            # Si el Pokémon no existe (None) O si su vida es 0, salimos de la función
+            if not _player_check or _player_check.hp_actual <= 0:
+                return
             # ─────────────────────────────────────────────────────────────────────
 
             player_pokemon = _player_check
@@ -1089,7 +1210,7 @@ class WildBattleManager:
 
             hp_w_max = wild.hp_max
             hp_w_act = wild.hp_actual
-            hp_p_max = player_pokemon.stats.get('hp', 1)
+            hp_p_max = getattr(player_pokemon, 'stats', {}).get('hp', 1)
             hp_p_act = player_pokemon.hp_actual
 
             bar_w = self._hp_bar(int(hp_w_act / hp_w_max * 100) if hp_w_max else 0)
@@ -1098,7 +1219,9 @@ class WildBattleManager:
             # ── Línea de campo (clima + terreno + salas + hazards) ────────────
             from pokemon.battle_ui import build_field_status_line
             _fl_txt    = build_field_status_line(battle)
-            field_line = (_fl_txt + "\n") if _fl_txt else ""
+            _hz_txt    = build_hazard_status_line(battle)
+            _fl_parts  = [p for p in [_fl_txt, _hz_txt] if p]
+            field_line = ("\n".join(_fl_parts) + "\n") if _fl_parts else ""
 
             # ── Status del wild y del jugador ─────────────────────────────────
             wild_status_str   = (f" [{STATUS_ICONS[battle.wild_status]}]"
@@ -2039,6 +2162,14 @@ class WildBattleManager:
                     battle=battle,
                     is_player_attacker=False,
                 )
+                # ── Hazard del salvaje (movimientos de estado puros) ──────
+                _w_haz_eff = HAZARD_MOVE_EFFECTS_PATCH.get(move_key_wild, {})
+                if _w_haz_eff:
+                    _wh_atk = _get_wild_hazards(battle)
+                    _wh_def = _get_player_hazards(battle)
+                    apply_hazard_move_effect(_w_haz_eff, _wh_atk, _wh_def, wild.nombre, log)
+                    _set_wild_hazards(battle, _wh_atk)
+                    _set_player_hazards(battle, _wh_def)
                 battle.turn_number += 1
                 battle._last_enemy_entry = f"{wild.nombre} usó {move_es}"
                 return log
@@ -2619,6 +2750,16 @@ class WildBattleManager:
                     log.extend(enemy_log)
  
             # ── Consolidar log del turno ──────────────────────────────────────
+            # ── Movimientos con efecto de hazard + daño (Giro Rápido, Defog) ─
+            _haz_eff_player = HAZARD_MOVE_EFFECTS_PATCH.get(
+                move_name.lower().replace(" ", "").replace("-", ""), {}
+            )
+            if _haz_eff_player:
+                _atk_haz = _get_player_hazards(battle)
+                _def_haz = _get_wild_hazards(battle)
+                apply_hazard_move_effect(_haz_eff_player, _atk_haz, _def_haz, p_name, log)
+                _set_player_hazards(battle, _atk_haz)
+                _set_wild_hazards(battle, _def_haz)
             battle.turn_number += 1
             self._append_turn_log(battle, p_name, nombre_es, player_damage, getattr(battle, "_last_enemy_entry", ""))
  
@@ -2693,16 +2834,40 @@ class WildBattleManager:
     ) -> "bool | str":
         """
         Aplica el efecto completo de un movimiento de estado o sin daño.
-        Cubre: cambios de etapa, ailments reales, curación y Bostezo.
+        Cubre: hazards, cambios de etapa, ailments, curación y Bostezo.
         Retorna True si se aplicó algún efecto.
         """
         key    = move_name.lower().replace(" ", "").replace("-", "")
-        effect = MOVE_EFFECTS.get(key)
+        effect = MOVE_EFFECTS.get(key, {})
 
-        if not effect:
+        # ── Hazards ───────────────────────────────────────────────────────────
+        hazard_effect = HAZARD_MOVE_EFFECTS_PATCH.get(key, {})
+
+        if not effect and not hazard_effect:
             return False
 
         applied = False
+
+        if hazard_effect and battle is not None:
+            if is_player_attacker:
+                atk_haz = _get_player_hazards(battle)
+                def_haz = _get_wild_hazards(battle)
+            else:
+                atk_haz = _get_wild_hazards(battle)
+                def_haz = _get_player_hazards(battle)
+
+            _applied_haz = apply_hazard_move_effect(
+                hazard_effect, atk_haz, def_haz, attacker_name, log
+            )
+            if _applied_haz:
+                applied = True
+
+            if is_player_attacker:
+                _set_player_hazards(battle, atk_haz)
+                _set_wild_hazards(battle, def_haz)
+            else:
+                _set_wild_hazards(battle, atk_haz)
+                _set_player_hazards(battle, def_haz)
 
         # ── Cambios de etapa ──────────────────────────────────────────────────
         for (target, stat, delta) in effect.get("stages", []):
@@ -3212,35 +3377,65 @@ class WildBattleManager:
     
     def _on_pokemon_enter(self, battle, nuevo_pokemon_id: int, log: list) -> None:
         """
-        Aplica efectos de entrada cuando un Pokémon nuevo sale a combatir.
- 
-        CAMBIOS:
-        - Limpia charging_move y recharge_pending del Pokémon entrante
-          (no hereda estados de 2-turno del anterior).
-        - Limpia cualquier pending_action residual del turno anterior.
+        Aplica efectos de entrada cuando un Pokémon nuevo sale a combatir:
+          1. Resetea etapas de stat volátiles.
+          2. Limpia mecánicas de 2-turno del anterior.
+          3. Aplica hazards del lado del wild (que dañan al jugador que entra).
+          4. Aplica habilidades de entrada (Intimidación, climas, etc.).
         """
-        # Resetear etapas del jugador (volátiles: no se transfieren)
+        # ── 1. Resetear etapas volátiles ──────────────────────────────────────
         battle.player_stat_stages = {
             "atq": 0, "def": 0, "atq_sp": 0, "def_sp": 0, "vel": 0
         }
-        # Resetear estados volátiles
         battle.player_yawn_counter    = 0
         battle.player_crit_stage      = 0
         battle.player_confusion_turns = 0
- 
-        # ── NUEVO: limpiar mecánicas de 2-turno ───────────────────────────────
-        # El Pokémon entrante no hereda una carga o recarga del anterior.
+
+        # ── 2. Limpiar mecánicas de 2-turno ───────────────────────────────────
         battle.player_charging_move    = None
         battle.player_recharge_pending = False
- 
-        # ── NUEVO: limpiar pending action residual ────────────────────────────
-        # Si el turno anterior quedó con algún movimiento "elegido" pero
-        # no ejecutado (edge case de race condition), lo limpiamos aquí.
-        # (En wild battles no hay pending_action explícito; el equivalente
-        #  es el flag awaiting_faint_switch que ya se limpia en switch_pokemon)
- 
-        # Log de ingreso
+
+        # ── 3. Aplicar hazards del wild (golpean al jugador que entra) ────────
         nuevo_p = pokemon_service.obtener_pokemon(nuevo_pokemon_id)
+        if nuevo_p:
+            wild_hazards = _get_wild_hazards(battle)
+            _cualquier_hazard = (
+                wild_hazards.get("stealth_rock")
+                or wild_hazards.get("spikes", 0) > 0
+                or wild_hazards.get("toxic_spikes", 0) > 0
+                or wild_hazards.get("sticky_web")
+            )
+            if _cualquier_hazard:
+                hp_delta, nuevo_status, stages_mod = apply_hazard_effects(
+                    side_hazards     = wild_hazards,
+                    entering_pokemon = nuevo_p,
+                    entering_stages  = battle.player_stat_stages,
+                    entering_status  = battle.player_status,
+                    log              = log,
+                )
+                # Tipo Veneno puede haber limpiado Púas Tóxicas
+                _set_wild_hazards(battle, wild_hazards)
+
+                if hp_delta != 0:
+                    hp_max = nuevo_p.stats.get("hp", nuevo_p.hp_actual) or nuevo_p.hp_actual
+                    new_hp = max(0, min(hp_max, nuevo_p.hp_actual + hp_delta))
+                    nuevo_p.hp_actual = new_hp
+                    try:
+                        db_manager.execute_update(
+                            "UPDATE POKEMON_USUARIO SET hp_actual = ? WHERE id_unico = ?",
+                            (new_hp, nuevo_pokemon_id),
+                        )
+                    except Exception as _e:
+                        logger.error(f"[HAZARD] Error persistiendo HP de entrada: {_e}")
+
+                if nuevo_status != battle.player_status:
+                    battle.player_status = nuevo_status
+                    if nuevo_status == "tox":
+                        battle.player_toxic_counter = 1
+
+                battle.player_stat_stages = stages_mod
+
+        # ── 4. Log de ingreso y habilidades de entrada ────────────────────────
         if nuevo_p:
             nombre = nuevo_p.mote or nuevo_p.nombre
             hp_max = nuevo_p.stats.get("hp", 1) or 1
@@ -3252,13 +3447,13 @@ class WildBattleManager:
             hab_str = (getattr(nuevo_p, "habilidad", "") or "").lower().replace(" ", "").replace("-", "")
             from pokemon.battle_engine import apply_entry_abilities_ordered
             from pokemon.battle_adapter import side_from_player, side_from_wild, sync_player_side, sync_wild_side
- 
+
             p_side = side_from_player(nuevo_p, battle)
             w_side = side_from_wild(battle.wild_pokemon, battle)
             apply_entry_abilities_ordered(p_side, w_side, battle, log)
             sync_player_side(p_side, battle, persist=False)
             sync_wild_side(w_side, battle.wild_pokemon, battle)
- 
+
             # Intimidación explícita (compatibilidad)
             if hab_str in ("intimidacion", "intimidation"):
                 wild_p = getattr(battle, "wild_pokemon", None)
@@ -3270,22 +3465,29 @@ class WildBattleManager:
                             f"  😤 ¡<b>Intimidación</b> de {nombre} bajó el "
                             f"Ataque de {wild_p.nombre}!\n"
                         )
- 
+
             # Impostor
             if hab_str == "impostor":
                 wild_imp    = battle.wild_pokemon
                 hp_orig     = nuevo_p.hp_actual
                 hp_max_orig = nuevo_p.stats.get("hp", hp_orig)
-                new_stats   = {k: v for k, v in wild_imp.stats.items() if k != "hp"}
-                new_stats["hp"]     = hp_max_orig
-                nuevo_p.stats       = new_stats
+                # Stats transformadas (sin HP — se conserva el HP de Ditto)
+                transform_stats = {k: v for k, v in wild_imp.stats.items() if k != "hp"}
+                transform_stats["hp"] = hp_max_orig
+                # Actualizar el objeto en memoria para el turno actual
+                nuevo_p.stats       = dict(transform_stats)
                 nuevo_p.movimientos = list(wild_imp.moves)
                 nuevo_p.hp_actual   = hp_orig
                 battle.player_stat_stages = dict(battle.wild_stat_stages)
-                battle.player_transformed     = False
-                battle.player_transform_stats = None
-                battle.player_transform_moves = None
-                battle.player_transform_types = None
+                # Persisitir estado de transformación en battle para turnos futuros
+                battle.player_transformed          = True
+                battle.player_transform_stats      = transform_stats
+                battle.player_transform_moves      = list(wild_imp.moves)
+                battle.player_transform_types      = list(getattr(wild_imp, "tipos", ["Normal"]))
+                battle.player_transform_species_id = getattr(
+                    wild_imp, "pokemon_id", getattr(wild_imp, "pokemonID", None)
+                )
+                battle.player_transform_nombre     = wild_imp.nombre
                 log.append(
                     f"  🔄 ¡<b>{nombre}</b> se transformó en "
                     f"<b>{wild_imp.nombre}</b> (Impostor)!\n"
@@ -3362,6 +3564,16 @@ class WildBattleManager:
  
             # Guardar status del Pokémon que sale
             self._save_player_status(battle, old_pokemon.id_unico)
+
+            # ── Resetear estado de transformación (Ditto / Impostor) ─────────
+            # Al salir del campo, Ditto siempre vuelve a ser Ditto.
+            if getattr(battle, "player_transformed", False):
+                battle.player_transformed          = False
+                battle.player_transform_stats      = None
+                battle.player_transform_moves      = None
+                battle.player_transform_types      = None
+                battle.player_transform_species_id = None
+                battle.player_transform_nombre     = None
  
             battle.player_pokemon_id = new_pokemon_id
             battle.participant_ids.add(new_pokemon_id)

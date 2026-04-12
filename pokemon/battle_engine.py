@@ -2633,6 +2633,13 @@ __all__ = [
     # ── Magic Guard ──────────────────────────────────────────────────────
     "tiene_magic_guard",
     "_MAGIC_GUARD_ALIASES",
+    # ── Hazards de entrada ───────────────────────────────────────────────
+    "apply_hazard_effects",
+    "apply_hazard_move_effect",
+    "HAZARD_MOVE_EFFECTS_PATCH",
+    "_STEALTH_ROCK_TYPE_EFF",
+    "STEALTH_ROCK_BASE_RATIO",
+    "SPIKES_DMG_RATIOS",
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2691,6 +2698,8 @@ class UniversalSide:
     # Campo interno: baya consumida en este turno (para que el adapter la detecte)
     baya_consumida:  Optional[str] = field(default=None, init=False, repr=False)
     berry_eaten:     bool = False   # True si ya consumió alguna baya en esta batalla
+    # Flash Fire / Colector: True tras absorber un movimiento de Fuego
+    flash_fire_active: bool = False
 # ─────────────────────────────────────────────────────────────────────────────
 # _BattleShim — adapta dos UniversalSide al protocolo "wild/player" del motor
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2941,6 +2950,70 @@ def apply_move(
 
     # ── 5. Cálculo de Daño y Bayas de Mitigación ─────────────────────────────
     type_eff = type_effectiveness_fn(tipo_mov, defender.types)
+
+    # ── 5a. Habilidades de inmunidad y absorción del DEFENSOR ─────────────────
+    # Se comprueban después del "usó X" para que aparezca en el log,
+    # pero antes de calcular daño.
+    _def_hab = (getattr(defender, "ability", "") or "").lower().replace(" ", "").replace("-", "")
+
+    # Wonder Guard — solo golpes supereficaces pasan
+    if _def_hab in ("escudomagico", "wonderguard") and type_eff < 2.0:
+        log.append(f"  🔮 ¡<b>Escudo Mágico</b> lo protegió!\n")
+        return False
+
+    # Tabla de inmunidades por tipo: (tipo_inmune, efecto)
+    _INMUNIDADES: dict[str, tuple[str, str]] = {
+        # Eléctrico
+        "absorbervoltios": ("Eléctrico", "heal"),    "voltabsorb":   ("Eléctrico", "heal"),
+        "pararayos":       ("Eléctrico", "spatk"),   "lightningrod": ("Eléctrico", "spatk"),
+        "dinamotriz":      ("Eléctrico", "spd"),     "motordrive":   ("Eléctrico", "spd"),
+        # Agua
+        "absorberagua":    ("Agua",      "heal"),    "waterabsorb":  ("Agua",      "heal"),
+        "desague":         ("Agua",      "spatk"),   "stormdrain":   ("Agua",      "spatk"),
+        # Fuego
+        "colector":        ("Fuego",     "flashfire"), "flashfire":  ("Fuego",     "flashfire"),
+        # Planta
+        "herbivoro":       ("Planta",    "atk"),     "sapsipper":    ("Planta",    "atk"),
+        # Tierra
+        "tierrafuerte":    ("Tierra",    "heal"),    "eartheater":   ("Tierra",    "heal"),
+    }
+    if _def_hab in _INMUNIDADES:
+        _inmune_tipo, _efecto = _INMUNIDADES[_def_hab]
+        if tipo_mov == _inmune_tipo:
+            _abi_display = getattr(defender, "ability", _def_hab).title()
+            if _efecto == "heal":
+                healed = max(1, defender.hp_max // 4)
+                defender.hp_actual = min(defender.hp_max, defender.hp_actual + healed)
+                log.append(
+                    f"  💚 ¡<b>{_abi_display}</b> absorbió el ataque! "
+                    f"<b>{defender.name}</b> recuperó {healed} HP.\n"
+                )
+            elif _efecto == "flashfire":
+                defender.flash_fire_active = True
+                log.append(
+                    f"  🔥 ¡<b>Colector</b> se activó! Los movimientos de Fuego "
+                    f"de <b>{defender.name}</b> serán más potentes.\n"
+                )
+            elif _efecto == "spatk":
+                apply_stage_change("atq_sp", 1, defender.stat_stages, defender.name, log)
+                log.append(f"  ✨ ¡<b>{_abi_display}</b> anuló el movimiento!\n")
+            elif _efecto == "atk":
+                apply_stage_change("atq", 1, defender.stat_stages, defender.name, log)
+                log.append(f"  🌿 ¡<b>{_abi_display}</b> anuló el movimiento!\n")
+            elif _efecto == "spd":
+                apply_stage_change("vel", 1, defender.stat_stages, defender.name, log)
+                log.append(f"  ⚡ ¡<b>{_abi_display}</b> anuló el movimiento!\n")
+            return False
+
+    # Flash Fire boost cuando el ATACANTE lo tiene activo
+    _atk_ff_boost = (
+        1.5 if (
+            (getattr(attacker, "ability", "") or "").lower().replace(" ", "").replace("-", "")
+            in ("colector", "flashfire")
+            and getattr(attacker, "flash_fire_active", False)
+            and tipo_mov == "Fuego"
+        ) else 1.0
+    )
     
     _BAYA_REDUCCION = {
         "baya yatay": "Fuego", "baya anjiro": "Agua", "baya magua": "Eléctrico",
@@ -2988,14 +3061,38 @@ def apply_move(
     _obj_mult, _obj_recoil = calcular_mult_objeto(
         attacker.objeto or "", tipo_mov, categoria, _type_eff_pre
     )
-    _poder_base_con_hab = max(1, int(poder * _hab_mult * _obj_mult))
+    # Flash Fire multiplica el poder base final
+    _poder_base_con_hab = max(1, int(poder * _hab_mult * _obj_mult * _atk_ff_boost))
     _obj_recoil_ratio   = _obj_recoil
     _atk_magic_guard    = tiene_magic_guard(attacker.ability)
 
     if _hab_mult > 1.0 and attacker.ability:
         log.append(f"  ✨ ¡La habilidad <b>{attacker.ability}</b> potenció el ataque!\n")
+    if _atk_ff_boost > 1.0:
+        log.append(f"  🔥 ¡<b>Colector</b> potenció el movimiento de Fuego!\n")
     if _obj_mult > 1.0 and attacker.objeto:
         log.append(f"  🎒 ¡<b>{attacker.objeto.title()}</b> potenció el ataque!\n")
+
+    # ── Marvel Scale / Escamas Marvel: Def ×1.5 cuando el defensor tiene status ─
+    _def_stats_combat = dict(defender.stats)
+    _def_hab_ms = _def_hab  # ya calculado arriba
+    if (
+        _def_hab_ms in ("marvelscale", "escamasmarvel", "escamasmaravilla")
+        and getattr(defender, "status", None) is not None
+        and categoria == "Físico"
+    ):
+        _def_stats_combat["def"] = int(_def_stats_combat.get("def", 50) * 1.5)
+        log.append(f"  🐉 ¡<b>Escamas Marvel</b> fortaleció la Defensa de <b>{defender.name}</b>!\n")
+
+    # ── Sturdy / Robustez: OHKO immunity ─────────────────────────────────────
+    _OHKO_MOVES = {"guillotina", "fisura", "cornada", "cizallazo",
+                   "guillotine", "fissure", "horndrilling", "sheercold"}
+    if _def_hab_ms in ("robustez", "sturdy") and mk in _OHKO_MOVES:
+        log.append(f"  🛡️ ¡<b>Robustez</b> protegió a <b>{defender.name}</b> del KO instantáneo!\n")
+        return False
+
+    # Rastrear HP antes del primer golpe para Sturdy
+    _hp_antes_ataque = defender.hp_actual
 
     for hit_idx in range(num_hits):
         if defender.hp_actual <= 0: break
@@ -3010,7 +3107,7 @@ def apply_move(
             attacker_types        = attacker.types,
             attacker_stages       = attacker.stat_stages,
             defender_hp           = defender.hp_actual,
-            defender_stats        = defender.stats,
+            defender_stats        = _def_stats_combat,
             defender_types        = defender.types,
             defender_stages       = defender.stat_stages,
             move_name             = move_es if hit_idx == 0 else f"{move_es} (golpe {hit_idx + 1})",
@@ -3038,6 +3135,16 @@ def apply_move(
             rdmg = max(1, int(res.damage * RECOIL_MOVES[mk]))
             attacker.hp_actual = max(0, attacker.hp_actual - rdmg)
             log.append(f"  💢 ¡{attacker.name} sufrió {rdmg} de retroceso!\n")
+
+    # ── Sturdy / Robustez: sobrevivir un OHKO desde HP lleno ──────────────────
+    if (
+        _def_hab_ms in ("robustez", "sturdy")
+        and defender.hp_actual <= 0
+        and _hp_antes_ataque >= defender.hp_max  # estaba a HP completo
+        and total_dmg > 0
+    ):
+        defender.hp_actual = 1
+        log.append(f"  🛡️ ¡<b>Robustez</b>! <b>{defender.name}</b> sobrevivió con 1 HP.\n")
 
     if num_hits > 1 and total_dmg > 0:
         log.append(f"  🔢 ¡{num_hits} golpes! Daño total: <b>{total_dmg}</b>\n")
@@ -3677,3 +3784,267 @@ def register_recharge(attacker, mk: str) -> None:
     """
     if mk in RECHARGE_MOVES:
         attacker.recharge_pending = True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HAZARDS DE ENTRADA (Parche 2026-04)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Efectividad de tipo Roca para Trampa Rocas (Gen 6+)
+_STEALTH_ROCK_TYPE_EFF: dict[str, float] = {
+    "Normal":    1.0,
+    "Fuego":     2.0,
+    "Agua":      0.5,
+    "Planta":    1.0,
+    "Eléctrico": 1.0,
+    "Hielo":     2.0,
+    "Lucha":     0.5,
+    "Veneno":    1.0,
+    "Tierra":    0.5,
+    "Volador":   2.0,
+    "Psíquico":  1.0,
+    "Bicho":     2.0,
+    "Roca":      1.0,
+    "Fantasma":  1.0,
+    "Dragón":    1.0,
+    "Siniestro": 1.0,
+    "Acero":     0.5,
+    "Hada":      1.0,
+}
+
+STEALTH_ROCK_BASE_RATIO: float = 1 / 8
+
+SPIKES_DMG_RATIOS: dict[int, float] = {
+    1: 1 / 8,
+    2: 1 / 6,
+    3: 1 / 4,
+}
+
+# Movimientos que manipulan hazards
+HAZARD_MOVE_EFFECTS_PATCH: dict = {
+    "stealthrock":   {"hazard_set": "stealth_rock", "target_side": "foe"},
+    "spikes":        {"hazard_set": "spikes",        "target_side": "foe"},
+    "toxicspikes":   {"hazard_set": "toxic_spikes",  "target_side": "foe"},
+    "stickyweb":     {"hazard_set": "sticky_web",    "target_side": "foe"},
+    "rapidspin":     {"hazard_clear": "self"},
+    "defog":         {"hazard_clear": "both"},
+    "mortalspin":    {"hazard_clear": "self"},
+    "tidyup":        {"hazard_clear": "self"},
+    "courtchange":   {"hazard_swap": True},
+    "ceaselessedge": {"hazard_set": "spikes",        "target_side": "foe"},
+    "stoneaxe":      {"hazard_set": "stealth_rock",  "target_side": "foe"},
+}
+
+
+def apply_hazard_effects(
+    *,
+    side_hazards: dict,
+    entering_pokemon,
+    entering_stages: dict,
+    entering_status,
+    log: list,
+) -> tuple:
+    """
+    Aplica hazards de entrada al Pokémon que acaba de salir a combatir.
+
+    Exenciones (Gen 6+):
+      - Botas Pesadas      → inmune a todos los hazards.
+      - Volador / Levitar  → inmune a Púas, Púas Tóxicas, Red Viscosa.
+      - Tipo Veneno        → absorbe Púas Tóxicas (las elimina del campo).
+
+    Returns:
+        (hp_delta: int, nuevo_status: str|None, stages: dict)
+        hp_delta < 0 → daño.
+    """
+    hp_delta     = 0
+    nuevo_status = entering_status
+    stages       = dict(entering_stages)
+
+    tipos = list(
+        getattr(entering_pokemon, "tipos",
+        getattr(entering_pokemon, "types", ["Normal"]))
+    )
+
+    hab_raw  = (getattr(entering_pokemon, "habilidad",
+                getattr(entering_pokemon, "ability", "")) or "")
+    hab_norm = hab_raw.lower().replace(" ", "").replace("-", "")
+    tiene_levitar = hab_norm in ("levitacion", "levitar", "levitate")
+    es_volador    = "Volador" in tipos
+    en_el_suelo   = not es_volador and not tiene_levitar
+
+    obj_raw  = (getattr(entering_pokemon, "objeto",
+                getattr(entering_pokemon, "item", "")) or "")
+    obj_norm = obj_raw.lower().replace(" ", "").replace("-", "").replace("_", "")
+    if obj_norm in ("bootasheavy", "heavydutyboots", "botaspesadas",
+                    "heavydutyboots", "heavy-dutyboots"):
+        log.append("  👟 <b>Botas Pesadas</b>: las trampas no afectan.\n")
+        return 0, nuevo_status, stages
+
+    hp_max = max(1, getattr(entering_pokemon, "hp_max",
+                 getattr(getattr(entering_pokemon, "stats", {}), "get",
+                         lambda k, d=1: 1)("hp", 1)))
+    if hasattr(getattr(entering_pokemon, "stats", None), "get"):
+        hp_max = max(1, entering_pokemon.stats.get("hp", hp_max))
+
+    nombre = getattr(entering_pokemon, "nombre",
+             getattr(entering_pokemon, "name", "Pokémon"))
+
+    # ── Trampa Rocas ─────────────────────────────────────────────────────────
+    if side_hazards.get("stealth_rock", False):
+        mult = 1.0
+        for t in tipos:
+            mult *= _STEALTH_ROCK_TYPE_EFF.get(t, 1.0)
+        dmg = max(1, int(hp_max * STEALTH_ROCK_BASE_RATIO * mult))
+        hp_delta -= dmg
+        log.append(
+            f"  🪨 ¡<b>Trampa Rocas</b>! "
+            f"<b>{nombre}</b> recibió {dmg} HP de daño.\n"
+        )
+
+    # ── Púas ─────────────────────────────────────────────────────────────────
+    capas_spikes = int(side_hazards.get("spikes", 0))
+    if capas_spikes > 0 and en_el_suelo:
+        ratio = SPIKES_DMG_RATIOS.get(min(capas_spikes, 3), 1 / 4)
+        dmg   = max(1, int(hp_max * ratio))
+        hp_delta -= dmg
+        log.append(
+            f"  📍 ¡<b>Púas</b>! <b>{nombre}</b> recibió {dmg} HP de daño "
+            f"({capas_spikes} capa{'s' if capas_spikes > 1 else ''}).\n"
+        )
+
+    # ── Púas Tóxicas ─────────────────────────────────────────────────────────
+    capas_toxic = int(side_hazards.get("toxic_spikes", 0))
+    if capas_toxic > 0 and en_el_suelo and nuevo_status is None:
+        if "Veneno" in tipos:
+            side_hazards["toxic_spikes"] = 0
+            log.append(
+                f"  ☠️ ¡<b>{nombre}</b> absorbió las "
+                f"<b>Púas Tóxicas</b>!\n"
+            )
+        else:
+            nuevo_status = "psn" if capas_toxic == 1 else "tox"
+            efecto = "envenenado" if nuevo_status == "psn" else "gravemente envenenado"
+            log.append(
+                f"  ☠️ ¡<b>Púas Tóxicas</b>! "
+                f"<b>{nombre}</b> quedó {efecto}.\n"
+            )
+
+    # ── Red Viscosa ───────────────────────────────────────────────────────────
+    if side_hazards.get("sticky_web", False) and en_el_suelo:
+        old_vel = stages.get("vel", 0)
+        stages["vel"] = max(-6, old_vel - 1)
+        if stages["vel"] < old_vel:
+            log.append(
+                f"  🕸️ ¡<b>Red Viscosa</b>! La Velocidad de "
+                f"<b>{nombre}</b> bajó.\n"
+            )
+
+    return hp_delta, nuevo_status, stages
+
+
+def apply_hazard_move_effect(
+    effect: dict,
+    attacker_side_hazards: dict,
+    defender_side_hazards: dict,
+    attacker_name: str,
+    log: list,
+) -> bool:
+    """
+    Procesa los efectos de hazard de un movimiento.
+    Modifica los dicts in-place.
+    Returns True si se aplicó algún efecto.
+    """
+    applied = False
+
+    # ── Colocar hazard ────────────────────────────────────────────────────────
+    if "hazard_set" in effect:
+        h_key  = effect["hazard_set"]
+        target = defender_side_hazards
+
+        if h_key == "stealth_rock":
+            if not target.get("stealth_rock", False):
+                target["stealth_rock"] = True
+                log.append("  🪨 ¡<b>Trampa Rocas</b> colocadas!\n")
+                applied = True
+            else:
+                log.append("  🪨 Las Trampas Rocas ya estaban activas.\n")
+
+        elif h_key == "spikes":
+            capas = int(target.get("spikes", 0))
+            if capas < 3:
+                target["spikes"] = capas + 1
+                log.append(
+                    f"  📍 ¡<b>Púas</b> colocadas! "
+                    f"(capa {target['spikes']}/3)\n"
+                )
+                applied = True
+            else:
+                log.append("  📍 Las Púas ya están al máximo (3 capas).\n")
+
+        elif h_key == "toxic_spikes":
+            capas = int(target.get("toxic_spikes", 0))
+            if capas < 2:
+                target["toxic_spikes"] = capas + 1
+                log.append(
+                    f"  ☠️ ¡<b>Púas Tóxicas</b> colocadas! "
+                    f"(capa {target['toxic_spikes']}/2)\n"
+                )
+                applied = True
+            else:
+                log.append("  ☠️ Las Púas Tóxicas ya están al máximo.\n")
+
+        elif h_key == "sticky_web":
+            if not target.get("sticky_web", False):
+                target["sticky_web"] = True
+                log.append("  🕸️ ¡<b>Red Viscosa</b> colocada!\n")
+                applied = True
+            else:
+                log.append("  🕸️ La Red Viscosa ya estaba activa.\n")
+
+    # ── Limpiar hazards ───────────────────────────────────────────────────────
+    if "hazard_clear" in effect:
+        scope = effect["hazard_clear"]
+
+        def _clear(h: dict) -> bool:
+            _had = (
+                h.get("stealth_rock", False)
+                or h.get("spikes", 0) > 0
+                or h.get("toxic_spikes", 0) > 0
+                or h.get("sticky_web", False)
+            )
+            h["stealth_rock"] = False
+            h["spikes"]       = 0
+            h["toxic_spikes"] = 0
+            h["sticky_web"]   = False
+            return _had
+
+        if scope in ("self", "both"):
+            if _clear(attacker_side_hazards):
+                log.append(
+                    f"  🌀 <b>{attacker_name}</b> eliminó las trampas "
+                    f"de su lado.\n"
+                )
+                applied = True
+        if scope in ("foe", "both"):
+            if _clear(defender_side_hazards):
+                log.append(
+                    f"  🌀 <b>{attacker_name}</b> eliminó las trampas "
+                    f"del rival.\n"
+                )
+                applied = True
+
+    # ── Intercambio (Court Change) ────────────────────────────────────────────
+    if effect.get("hazard_swap"):
+        _KEYS = ("stealth_rock", "spikes", "toxic_spikes", "sticky_web")
+        snap_a = {k: attacker_side_hazards.get(k) for k in _KEYS}
+        snap_d = {k: defender_side_hazards.get(k) for k in _KEYS}
+        for k in _KEYS:
+            attacker_side_hazards[k] = snap_d[k]
+            defender_side_hazards[k] = snap_a[k]
+        log.append(
+            f"  🔄 ¡<b>{attacker_name}</b> intercambió las trampas "
+            f"de ambos lados!\n"
+        )
+        applied = True
+
+    return applied

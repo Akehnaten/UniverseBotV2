@@ -356,14 +356,15 @@ CREATE TABLE IF NOT EXISTS JUAN_MIEMBROS (
 )
 """
 
-# ============== JUAN (El caballo de los memes) ==============
-
-TABLA_JUAN_MIEMBROS = """
-CREATE TABLE IF NOT EXISTS JUAN_MIEMBROS (
-    user_id     INTEGER PRIMARY KEY,
-    nombre      TEXT NOT NULL,
-    username    TEXT,
-    descripcion TEXT
+TABLA_JUAN_APRENDIZAJE = """
+CREATE TABLE IF NOT EXISTS JUAN_APRENDIZAJE (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    categoria        TEXT NOT NULL,
+    frase            TEXT NOT NULL,
+    autor            TEXT,
+    fuente_username  TEXT,
+    fecha            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(categoria, frase)
 )
 """
 
@@ -390,6 +391,7 @@ TODAS_LAS_TABLAS = [
     TABLA_HUEVOS,
     TABLA_POKEDEX_USUARIO,
     TABLA_JUAN_MIEMBROS,
+    TABLA_JUAN_APRENDIZAJE,
 ]
 
 # ============== ÍNDICES ==============
