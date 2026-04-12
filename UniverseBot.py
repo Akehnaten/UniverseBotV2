@@ -414,7 +414,15 @@ except Exception as e:
 # ─────────────────────────────────────────────────────────────────────────────
 # ARRANQUE
 # ─────────────────────────────────────────────────────────────────────────────
-
+# ── DIAGNÓSTICO TEMPORAL ─────────────────────────────────────────────────────
+@bot.message_handler(func=lambda m: True, content_types=['text', 'photo', 'sticker'])
+def _debug_catch_all(message):
+    """Handler de diagnóstico — captura CUALQUIER mensaje."""
+    uid  = message.from_user.id if message.from_user else "None"
+    text = (message.text or "")[:40]
+    logger.info(f"[DEBUG] ✅ Mensaje llegó a handler: user={uid} text={repr(text)}")
+    # Si llegás hasta aquí y aun así el comando no funciona,
+    # el problema está en setup_all_handlers o en el orden de handlers
 if __name__ == "__main__":
     from config import (
         WEBHOOK_URL,
