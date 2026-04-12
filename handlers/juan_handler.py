@@ -3,6 +3,15 @@
 handlers/juan_handler.py
 Juan, el caballo de los memes. Usando Groq (gratuito).
 Incluye sistema de aprendizaje pasivo + chistes internos con atribución.
+
+FIXES v2:
+- Orden de registro corregido: aprendizaje pasivo va DESPUÉS del handler activo.
+- Un único @bot.message_handler para texto que bifurca internamente,
+  evitando que el listener pasivo consuma updates antes que Juan.
+- Aprendizaje de stickers/fotos añadido con handler separado de baja prioridad.
+- Lógica de categoría corregida: se categoriza el texto del AUTOR, no el original.
+- Manejo robusto de None en respuesta Groq.
+- Cooldown movido a check previo para no desperdiciar llamadas.
 """
 
 import random
@@ -34,6 +43,8 @@ COOLDOWN_SEGUNDOS = 30
 
 
 # ── Patrones de categorías pasivas ────────────────────────────────────────────
+# NOTA: la categoría se detecta sobre el texto QUE ESCRIBE EL USUARIO,
+# no sobre el mensaje original al que responde.
 
 _PATRONES_CATEGORIA: dict[str, list[str]] = {
     "saludo": [
@@ -78,7 +89,6 @@ _FRASES_IGNORAR = {
 }
 
 # Patrones para detectar que alguien le está contando algo a Juan sobre otro
-# Ejemplo: "juan, cris es intenso" / "juancito sabés que cris es intenso?"
 _PATRONES_CHISTE_INTERNO = [
     r"\b(sab[eé]s?|sa[bv]ías?|cont[aé]|te\s*cuento|imaginate|fijate)\b",
     r"\bes\s+(un[ao]?|re|muy|bastante|demasiado)\b",
@@ -89,8 +99,26 @@ _PATRONES_CHISTE_INTERNO = [
     r"\btodos\s+(saben?|dicen?|lo|la)\b",
 ]
 
+# Excusas cuando Groq falla
+_EXCUSAS = [
+    "Neeeeigh... me colgué viendo un hilo de culos en Twitter. Tirá de nuevo. 🐴🍑",
+    "Bancame que me salió un edit de Lisa de Blackpink y me quedé embobado. 😍",
+    "Me fui por unos cigarros y vi una yegua que me dejó recalculando.",
+    "Justo me enganchaste viendo un fancam de Jennie... no respondo por 5 minutos. ✨",
+    "¿Qué decías? Estaba scrolleando el feed de Twitter buscando 'contenido educativo' (guiño, guiño).",
+    "Man, soy un caballo arriba de un balcón, ¿qué esperabas? Me dio vértigo, mandá de nuevo.",
+    "Se me reinició la neurona de equino. Probá de nuevo que estaba viendo coreos de NewJeans. 🐰",
+    "Me distraje mirando culos en el explorador de Instagram. La carne es débil, neeeeigh.",
+    "Aguantá que estoy tratando de entender por qué carajo soy un meme en un balcón. Ya vuelvo.",
+    "Me fui a ver si las de Blackpink sacaron tema nuevo. Prioridades, flaco.",
+    "Estaba por responderte pero me crucé con un hilo de 'Las mejores nalgas de X' y perdí el foco. 🐎💨",
+]
+
+
+# ── Helpers de texto ──────────────────────────────────────────────────────────
 
 def _detectar_categoria(texto: str) -> str | None:
+    """Detecta categoría del texto escrito por el usuario."""
     texto_lower = texto.lower().strip()
     for categoria, patrones in _PATRONES_CATEGORIA.items():
         for patron in patrones:
@@ -180,10 +208,7 @@ def _get_chiste_de_miembro(nombre_miembro: str) -> dict | None:
 
 
 def _formatear_respuesta_con_atribucion(frase: str, fuente_username: str) -> str:
-    """
-    Si la frase tiene fuente conocida, agrega la atribución de forma natural.
-    Ejemplo: "Sí, Cris es intenso, como me contó @rei jajaj"
-    """
+    """Agrega atribución natural si hay fuente conocida."""
     if fuente_username:
         sufijos = [
             f", como me contó @{fuente_username} jajaj",
@@ -197,14 +222,15 @@ def _formatear_respuesta_con_atribucion(frase: str, fuente_username: str) -> str
 
 # ── Aprendizaje pasivo ────────────────────────────────────────────────────────
 
-def _procesar_aprendizaje(message) -> None:
+def _procesar_aprendizaje_texto(message) -> None:
     """
-    Escucha todos los mensajes:
-    1. Si es reply a otro usuario → categoría pasiva (saludo, opinión, etc.)
-    2. Si está dirigido a Juan y menciona a un miembro → chiste_interno
+    Aprende de mensajes de texto:
+    1. Si está dirigido a Juan y menciona a un miembro → chiste_interno
+    2. Si el propio texto del usuario matchea una categoría → guardar
+    3. Si es reply a otro usuario y el texto del usuario es categorizable → guardar
     """
     texto = message.text or message.caption or ""
-    if not texto:
+    if not texto or texto.startswith("/"):
         return
 
     autor = message.from_user.first_name or "alguien"
@@ -214,23 +240,30 @@ def _procesar_aprendizaje(message) -> None:
     if _es_mensaje_a_juan(texto) and _detectar_chiste_interno(texto):
         nombre = _menciona_miembro_conocido(texto)
         if nombre:
-            # Guardar la parte del texto que viene después de mencionar a Juan
-            # para extraer el dato sobre el miembro
             frase_limpia = re.sub(
                 r'\b(juan|juancito|el\s+caballo)[,!?.]?\s*', '', texto,
                 flags=re.IGNORECASE
             ).strip()
             if _es_frase_guardable(frase_limpia):
                 _guardar_frase("chiste_interno", frase_limpia, autor, fuente_username)
-                logger.info(f"[JUAN-LEARN] Chiste interno aprendido sobre {nombre}: '{frase_limpia[:50]}'")
+                logger.info(
+                    f"[JUAN-LEARN] Chiste interno sobre {nombre}: '{frase_limpia[:50]}'"
+                )
         return
 
-    # ── Caso 2: reply a otro usuario → categoría pasiva ──────────────────────
+    # ── Caso 2: categorizar el texto del propio usuario ──────────────────────
+    # FIX: categorizamos lo que ESCRIBIÓ el usuario, no el mensaje original
+    categoria = _detectar_categoria(texto)
+    if categoria and _es_frase_guardable(texto):
+        _guardar_frase(categoria, texto, autor, fuente_username)
+        return
+
+    # ── Caso 3: reply a otro usuario — guardar la respuesta del usuario ───────
     if not message.reply_to_message:
         return
 
     original = message.reply_to_message
-    # No aprender de mensajes del propio bot
+    # No aprender de respuestas al propio bot
     if (original.from_user and
             (original.from_user.username or "").lower() == BOT_USERNAME.lower()):
         return
@@ -239,14 +272,41 @@ def _procesar_aprendizaje(message) -> None:
     if not texto_original:
         return
 
-    categoria = _detectar_categoria(texto_original)
-    if not categoria:
+    # La frase que guardamos es la que escribió el usuario (su respuesta)
+    # pero la categorizamos según el contexto del mensaje original
+    categoria_ctx = _detectar_categoria(texto_original)
+    if categoria_ctx and _es_frase_guardable(texto):
+        _guardar_frase(categoria_ctx, texto, autor, fuente_username)
+
+
+def _procesar_aprendizaje_sticker(message) -> None:
+    """Aprende el emoji/set de un sticker como reacción en contexto."""
+    sticker = message.sticker
+    if not sticker:
         return
 
-    if not _es_frase_guardable(texto):
+    autor = message.from_user.first_name or "alguien"
+    fuente_username = message.from_user.username or ""
+
+    # Construir descripción del sticker
+    emoji = sticker.emoji or "🎭"
+    set_name = sticker.set_name or "sticker_suelto"
+    frase = f"{emoji} [{set_name}]"
+
+    if not _es_frase_guardable(frase):
         return
 
-    _guardar_frase(categoria, texto, autor, fuente_username)
+    # Si es reply, intentar categorizar por contexto
+    categoria = "reaccion"  # los stickers son casi siempre reacciones
+    if message.reply_to_message:
+        original = message.reply_to_message
+        texto_original = original.text or original.caption or ""
+        categoria_ctx = _detectar_categoria(texto_original)
+        if categoria_ctx:
+            categoria = categoria_ctx
+
+    _guardar_frase(categoria, frase, autor, fuente_username)
+    logger.debug(f"[JUAN-LEARN] Sticker [{categoria}]: '{frase}' de {autor}")
 
 
 # ── Funciones de miembros ─────────────────────────────────────────────────────
@@ -291,17 +351,17 @@ def _mensaje_menciona_miembro(texto: str) -> bool:
 def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str:
     """
     Prioridad:
-    1. Si menciona a un miembro conocido → buscar chiste interno guardado (0 tokens)
+    1. Si menciona a un miembro conocido → chiste interno guardado (0 tokens)
     2. Si matchea categoría pasiva → frase aprendida random (0 tokens)
     3. Fallback → Groq
     """
-    # Prioridad 1: chiste interno sobre miembro mencionado
+    # Prioridad 1: chiste interno
     nombre = _menciona_miembro_conocido(texto_original)
     if nombre:
         chiste = _get_chiste_de_miembro(nombre)
         if chiste:
             return _formatear_respuesta_con_atribucion(
-                chiste["frase"], chiste["fuente_username"] or ""
+                chiste["frase"], chiste.get("fuente_username") or ""
             )
 
     # Prioridad 2: frase aprendida por categoría
@@ -310,23 +370,8 @@ def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str
         row = _get_frase_random(categoria)
         if row:
             return _formatear_respuesta_con_atribucion(
-                row["frase"], row["fuente_username"] or ""
+                row["frase"], row.get("fuente_username") or ""
             )
-
-    # Lista de excusas para cuando el modelo falla
-    excusas = [
-        "Neeeeigh... me colgué viendo un hilo de culos en Twitter. Tirá de nuevo. 🐴🍑",
-        "Bancame que me salió un edit de Lisa de Blackpink y me quedé embobado. 😍",
-        "Me fui por unos cigarros y vi una yegua que me dejó recalculando.",
-        "Justo me enganchaste viendo un fancam de Jennie... no respondo por 5 minutos. ✨",
-        "¿Qué decías? Estaba scrolleando el feed de Twitter buscando 'contenido educativo' (guiño, guiño).",
-        "Man, soy un caballo arriba de un balcón, ¿qué esperabas? Me dio vértigo, mandá de nuevo.",
-        "Se me reinició la neurona de equino. Probá de nuevo que estaba viendo coreos de NewJeans. 🐰",
-        "Me distraje mirando culos en el explorador de Instagram. La carne es débil, neeeeigh.",
-        "Aguantá que estoy tratando de entender por qué carajo soy un meme en un balcón. Ya vuelvo.",
-        "Me fui a ver si las de Blackpink sacaron tema nuevo. Prioridades, flaco.",
-        "Estaba por responderte pero me crucé con un hilo de 'Las mejores nalgas de X' y perdí el foco. 🐎💨"
-    ]
 
     # Prioridad 3: Groq
     inyectar_miembros = _mensaje_menciona_miembro(texto_original)
@@ -354,30 +399,31 @@ def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str
                 max_tokens=300,
                 temperature=0.85,
             )
-            
-            # SOLUCIÓN AL ERROR: Validamos que content no sea None antes de usar .strip()
             content = response.choices[0].message.content
             if content is None:
-                raise ValueError("La respuesta de Groq vino vacía")
-                
+                raise ValueError("Respuesta de Groq vacía (content=None)")
+
             respuesta = content.strip()
+            if not respuesta:
+                raise ValueError("Respuesta de Groq vacía tras strip()")
+
             history.append({"role": "assistant", "content": respuesta})
             return respuesta
-            
+
         except Exception as e:
-            # ... (Lógica de logs y rate limit se mantiene igual) ...
+            logger.warning(f"[JUAN] Groq intento {intento + 1}/{max_intentos}: {e}")
             if "429" in str(e) and intento < max_intentos - 1:
+                logger.info(f"[JUAN] Rate limit, esperando {espera}s...")
                 time.sleep(espera)
                 espera *= 2
                 continue
             break
 
-    # Limpieza de historial si falló
+    # Limpiar el turno de usuario que quedó sin respuesta
     if history and history[-1]["role"] == "user":
         history.pop()
 
-    # Retorna una frase aleatoria de la lista de excusas
-    return random.choice(excusas)
+    return random.choice(_EXCUSAS)
 
 
 # ── Helpers de detección ───────────────────────────────────────────────────────
@@ -414,11 +460,9 @@ def _tiene_palabra_clave_random(message) -> bool:
 
 def _deberia_responder_juan(message) -> bool:
     try:
-        # Nunca interceptar comandos
         texto = message.text or message.caption or ""
         if texto.startswith("/"):
             return False
-        
         if _es_reply_a_juan(message):
             return True
         if message.text is None and message.caption is None:
@@ -432,51 +476,170 @@ def _deberia_responder_juan(message) -> bool:
 # ── Setup principal ────────────────────────────────────────────────────────────
 
 def setup_juan_handler(bot) -> None:
+    """
+    Registra todos los handlers de Juan.
 
-    # ── Listener pasivo — escucha todos los mensajes de texto ─────────────────
+    ORDEN IMPORTANTE en pyTelegramBotAPI:
+    Los handlers se evalúan en orden de registro.
+    El handler activo (juan_responder) debe registrarse PRIMERO para que su
+    func= predicate tenga prioridad. El aprendizaje pasivo va DESPUÉS y solo
+    procesa mensajes que juan_responder no consumió.
+
+    Para texto usamos un único handler unificado que bifurca internamente,
+    evitando la colisión de dos handlers con content_types=["text"].
+    """
+
+    # ── 1. Handler UNIFICADO para texto — activo + pasivo en uno ─────────────
+    # pyTelegramBotAPI entrega el update al PRIMER handler cuya func= retorna True.
+    # Si registramos dos handlers separados para "text", el primero en registrarse
+    # consume el update aunque no quiera responder, impidiendo que el segundo actúe.
+    # Solución: un solo handler que hace ambas cosas.
     @bot.message_handler(
-    content_types=["text"],
-    func=lambda m: not (m.text or "").startswith("/")
+        content_types=["text"],
+        func=lambda m: not (m.text or "").startswith("/"),
     )
-    def juan_aprender(message):
+    def juan_texto_handler(message):
+        """Handler unificado: responde si debe, siempre aprende."""
+        chat_id = message.chat.id
+        thread_id = get_thread_id(message)
+        user_id = message.from_user.id
+        user_name = message.from_user.first_name or "alguien"
+
+        debe_responder = _deberia_responder_juan(message)
+
+        # ── Respuesta activa ──────────────────────────────────────────────────
+        if debe_responder:
+            ahora = time.time()
+            if ahora - _ultimo_uso.get(user_id, 0) < COOLDOWN_SEGUNDOS:
+                logger.info(f"[JUAN] Cooldown activo para user={user_id}")
+                # Cooldown activo: no responde pero SÍ aprende
+            else:
+                _ultimo_uso[user_id] = ahora
+                texto = message.text or "[sin texto]"
+                prompt = f"{user_name} dice: {texto}"
+                logger.info(f"[JUAN] Respondiendo | chat={chat_id} | {prompt[:80]}")
+
+                respuesta = _pedir_respuesta(chat_id, prompt, texto_original=texto)
+                try:
+                    bot.reply_to(message, respuesta)
+                except Exception as e:
+                    logger.warning(f"[JUAN] reply_to falló: {e}")
+                    try:
+                        bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
+                    except Exception as e2:
+                        logger.error(f"[JUAN] send_message también falló: {e2}")
+
+        # ── Aprendizaje pasivo (siempre, independiente de si respondió) ───────
         try:
-            _procesar_aprendizaje(message)
+            _procesar_aprendizaje_texto(message)
         except Exception as e:
             logger.debug(f"[JUAN-LEARN] Error en aprendizaje pasivo: {e}")
 
-    # ── Respuesta activa de Juan ───────────────────────────────────────────────
-    @bot.message_handler(
-        content_types=["text", "photo", "video", "document", "sticker", "audio", "voice"],
-        func=_deberia_responder_juan,
-    )
-    def juan_responder(message):
-        chat_id   = message.chat.id
+    # ── 2. Handler para FOTOS con caption ────────────────────────────────────
+    @bot.message_handler(content_types=["photo"])
+    def juan_foto_handler(message):
+        """Responde si lo mencionan en el caption; aprende del caption."""
+        try:
+            _procesar_aprendizaje_texto(message)  # caption como texto
+        except Exception as e:
+            logger.debug(f"[JUAN-LEARN] Error aprendizaje foto: {e}")
+
+        if not _deberia_responder_juan(message):
+            return
+
+        chat_id = message.chat.id
         thread_id = get_thread_id(message)
-        user_id   = message.from_user.id
+        user_id = message.from_user.id
         user_name = message.from_user.first_name or "alguien"
 
         ahora = time.time()
         if ahora - _ultimo_uso.get(user_id, 0) < COOLDOWN_SEGUNDOS:
-            logger.info(f"[JUAN] Cooldown activo para user={user_id}")
             return
         _ultimo_uso[user_id] = ahora
 
-        texto = message.text or message.caption or "[sin texto]"
-        prompt = f"{user_name} dice: {texto}"
-        logger.info(f"[JUAN] chat={chat_id} | {prompt[:80]}")
-
+        texto = message.caption or "[foto sin texto]"
+        prompt = f"{user_name} manda una foto y dice: {texto}"
         respuesta = _pedir_respuesta(chat_id, prompt, texto_original=texto)
-
         try:
             bot.reply_to(message, respuesta)
         except Exception as e:
-            logger.warning(f"[JUAN] reply_to falló: {e}")
+            logger.warning(f"[JUAN] reply foto falló: {e}")
             try:
                 bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
             except Exception as e2:
-                logger.error(f"[JUAN] send_message también falló: {e2}")
+                logger.error(f"[JUAN] send_message foto falló: {e2}")
 
-    # ── /resetjuan ────────────────────────────────────────────────────────────
+    # ── 3. Handler para STICKERS ──────────────────────────────────────────────
+    @bot.message_handler(content_types=["sticker"])
+    def juan_sticker_handler(message):
+        """
+        Aprende stickers como reacciones.
+        Responde solo si el sticker es reply a un mensaje de Juan.
+        """
+        # Siempre aprende el sticker
+        try:
+            _procesar_aprendizaje_sticker(message)
+        except Exception as e:
+            logger.debug(f"[JUAN-LEARN] Error aprendizaje sticker: {e}")
+
+        # Solo responde si es reply a Juan
+        if not _es_reply_a_juan(message):
+            return
+
+        chat_id = message.chat.id
+        thread_id = get_thread_id(message)
+        user_id = message.from_user.id
+        user_name = message.from_user.first_name or "alguien"
+
+        ahora = time.time()
+        if ahora - _ultimo_uso.get(user_id, 0) < COOLDOWN_SEGUNDOS:
+            return
+        _ultimo_uso[user_id] = ahora
+
+        emoji = (message.sticker.emoji or "🎭") if message.sticker else "🎭"
+        prompt = f"{user_name} te responde con un sticker {emoji}"
+        respuesta = _pedir_respuesta(chat_id, prompt, texto_original=emoji)
+        try:
+            bot.reply_to(message, respuesta)
+        except Exception as e:
+            logger.warning(f"[JUAN] reply sticker falló: {e}")
+            try:
+                bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
+            except Exception as e2:
+                logger.error(f"[JUAN] send_message sticker falló: {e2}")
+
+    # ── 4. Handler para VIDEO/AUDIO/VOICE/DOCUMENT ────────────────────────────
+    @bot.message_handler(content_types=["video", "audio", "voice", "document"])
+    def juan_media_handler(message):
+        """Responde solo si lo mencionan en el caption o es reply a Juan."""
+        if not _deberia_responder_juan(message):
+            return
+
+        chat_id = message.chat.id
+        thread_id = get_thread_id(message)
+        user_id = message.from_user.id
+        user_name = message.from_user.first_name or "alguien"
+
+        ahora = time.time()
+        if ahora - _ultimo_uso.get(user_id, 0) < COOLDOWN_SEGUNDOS:
+            return
+        _ultimo_uso[user_id] = ahora
+
+        tipo = message.content_type
+        texto = message.caption or f"[{tipo} sin descripción]"
+        prompt = f"{user_name} manda un {tipo} y dice: {texto}"
+        respuesta = _pedir_respuesta(chat_id, prompt, texto_original=texto)
+        try:
+            bot.reply_to(message, respuesta)
+        except Exception as e:
+            logger.warning(f"[JUAN] reply media falló: {e}")
+            try:
+                bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
+            except Exception as e2:
+                logger.error(f"[JUAN] send_message media falló: {e2}")
+
+    # ── 5. Comandos de gestión ────────────────────────────────────────────────
+
     @bot.message_handler(commands=["resetjuan"])
     def juan_reset(message):
         chat_id = message.chat.id
@@ -484,7 +647,6 @@ def setup_juan_handler(bot) -> None:
             del _chat_histories[chat_id]
         bot.reply_to(message, "Borrón y cuenta nueva 🐴 ¿De qué estábamos hablando?")
 
-    # ── /juanagregar ──────────────────────────────────────────────────────────
     @bot.message_handler(commands=["juanagregar"])
     def juan_agregar(message):
         """Respondé al mensaje del usuario + /juanagregar Nombre | descripción"""
@@ -495,13 +657,16 @@ def setup_juan_handler(bot) -> None:
                 bot.reply_to(message, "❌ Solo los admins.")
                 return
             if not message.reply_to_message:
-                bot.reply_to(message, "❌ Respondé al mensaje del usuario:\n/juanagregar Nombre | descripción")
+                bot.reply_to(
+                    message,
+                    "❌ Respondé al mensaje del usuario:\n/juanagregar Nombre | descripción",
+                )
                 return
 
-            target   = message.reply_to_message.from_user
-            user_id  = target.id
+            target = message.reply_to_message.from_user
+            user_id = target.id
             username = target.username or ""
-            partes   = message.text.split(maxsplit=1)
+            partes = message.text.split(maxsplit=1)
 
             if len(partes) < 2:
                 nombre_part = target.first_name
@@ -521,12 +686,15 @@ def setup_juan_handler(bot) -> None:
                        descripcion=excluded.descripcion""",
                 (user_id, nombre_part, username, descripcion),
             )
-            bot.reply_to(message, f"✅ Juan ya conoce a *{nombre_part}* 🐴", parse_mode="Markdown")
+            bot.reply_to(
+                message,
+                f"✅ Juan ya conoce a *{nombre_part}* 🐴",
+                parse_mode="Markdown",
+            )
         except Exception as e:
             logger.error(f"[JUAN] Error en /juanagregar: {e}")
             bot.reply_to(message, f"❌ Error: {e}")
 
-    # ── /juanolvidar ──────────────────────────────────────────────────────────
     @bot.message_handler(commands=["juanolvidar"])
     def juan_olvidar(message):
         """Respondé al mensaje del usuario + /juanolvidar"""
@@ -541,13 +709,18 @@ def setup_juan_handler(bot) -> None:
                 return
 
             user_id = message.reply_to_message.from_user.id
-            nombre  = message.reply_to_message.from_user.first_name
-            db_manager.execute_update("DELETE FROM JUAN_MIEMBROS WHERE user_id = ?", (user_id,))
-            bot.reply_to(message, f"🗑️ Juan ya no recuerda a *{nombre}*.", parse_mode="Markdown")
+            nombre = message.reply_to_message.from_user.first_name
+            db_manager.execute_update(
+                "DELETE FROM JUAN_MIEMBROS WHERE user_id = ?", (user_id,)
+            )
+            bot.reply_to(
+                message,
+                f"🗑️ Juan ya no recuerda a *{nombre}*.",
+                parse_mode="Markdown",
+            )
         except Exception as e:
             bot.reply_to(message, f"❌ Error: {e}")
 
-    # ── /juanmiembros ─────────────────────────────────────────────────────────
     @bot.message_handler(commands=["juanmiembros"])
     def juan_listar(message):
         miembros = _get_todos_los_miembros()
@@ -564,7 +737,6 @@ def setup_juan_handler(bot) -> None:
             lineas.append(linea)
         bot.reply_to(message, "\n".join(lineas), parse_mode="Markdown")
 
-    # ── /juanfrases ───────────────────────────────────────────────────────────
     @bot.message_handler(commands=["juanfrases"])
     def juan_frases(message):
         """
@@ -602,22 +774,29 @@ def setup_juan_handler(bot) -> None:
                     (categoria,),
                 ) or []
                 if not rows:
-                    bot.reply_to(message, f"No hay frases en `{categoria}`.", parse_mode="Markdown")
+                    bot.reply_to(
+                        message,
+                        f"No hay frases en `{categoria}`.",
+                        parse_mode="Markdown",
+                    )
                     return
                 lineas = [f"📚 *Frases [{categoria}]* (últimas 20):\n"]
                 for r in rows:
-                    fuente = f" · contada por @{r['fuente_username']}" if r.get("fuente_username") else ""
+                    fuente = (
+                        f" · contada por @{r['fuente_username']}"
+                        if r.get("fuente_username")
+                        else ""
+                    )
                     lineas.append(f"• _{r['frase']}_ — {r['autor']}{fuente}")
                 bot.reply_to(message, "\n".join(lineas), parse_mode="Markdown")
         except Exception as e:
             bot.reply_to(message, f"❌ Error: {e}")
 
-    # ── /juanborrarfrase ──────────────────────────────────────────────────────
     @bot.message_handler(commands=["juanborrarfrase"])
     def juan_borrar_frase(message):
         """
         Solo admins. Respondé al mensaje de Juan que contiene la frase
-        y ejecutá /juanborrarfrase — la busca y borra automáticamente.
+        y ejecutá /juanborrarfrase.
         """
         chat_id = message.chat.id
         try:
@@ -627,22 +806,29 @@ def setup_juan_handler(bot) -> None:
                 return
 
             if not message.reply_to_message:
-                bot.reply_to(message, "❌ Respondé al mensaje de Juan con la frase que querés borrar.")
+                bot.reply_to(
+                    message,
+                    "❌ Respondé al mensaje de Juan con la frase que querés borrar.",
+                )
                 return
 
-            # Verificar que el reply sea a Juan
             reply_from = message.reply_to_message.from_user
             if not reply_from or (reply_from.username or "").lower() != BOT_USERNAME.lower():
-                bot.reply_to(message, "❌ Respondé a un mensaje de Juan, no de otro usuario.")
+                bot.reply_to(
+                    message,
+                    "❌ Respondé a un mensaje de Juan, no de otro usuario.",
+                )
                 return
 
-            texto_juan = message.reply_to_message.text or message.reply_to_message.caption or ""
+            texto_juan = (
+                message.reply_to_message.text
+                or message.reply_to_message.caption
+                or ""
+            )
             if not texto_juan:
                 bot.reply_to(message, "❌ No pude leer el texto de ese mensaje.")
                 return
 
-            # Buscar la frase en la BD — buscamos si el texto del mensaje de Juan
-            # contiene alguna frase guardada (puede tener sufijo de atribución)
             rows = db_manager.execute_query(
                 "SELECT id, categoria, frase FROM JUAN_APRENDIZAJE"
             ) or []
@@ -654,14 +840,19 @@ def setup_juan_handler(bot) -> None:
                     break
 
             if not frase_encontrada:
-                bot.reply_to(message, "❌ No encontré esa frase en la memoria de Juan. Puede que ya fue borrada.")
+                bot.reply_to(
+                    message,
+                    "❌ No encontré esa frase en la memoria de Juan. Puede que ya fue borrada.",
+                )
                 return
 
             db_manager.execute_update(
                 "DELETE FROM JUAN_APRENDIZAJE WHERE id = ?",
                 (frase_encontrada["id"],),
             )
-            logger.info(f"[JUAN] Frase borrada: id={frase_encontrada['id']} [{frase_encontrada['categoria']}]")
+            logger.info(
+                f"[JUAN] Frase borrada: id={frase_encontrada['id']} [{frase_encontrada['categoria']}]"
+            )
             bot.reply_to(
                 message,
                 f"🗑️ Frase borrada de `{frase_encontrada['categoria']}`.",
@@ -671,4 +862,6 @@ def setup_juan_handler(bot) -> None:
             logger.error(f"[JUAN] Error en /juanborrarfrase: {e}")
             bot.reply_to(message, f"❌ Error: {e}")
 
-    logger.info("[OK] Juan handler registrado con Groq + aprendizaje + chistes internos")
+    logger.info(
+        "[OK] Juan handler registrado con Groq + aprendizaje unificado + stickers"
+    )
