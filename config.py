@@ -130,7 +130,7 @@ UNKNOWN_SPRITE = BASE_DIR / "src" / "unknow.png"
 GEMINI_API_KEY = "AIzaSyDPu_ua1z19gxMxBY6OntChVo48dXxu1GE"
 
 # Username del bot en Telegram (sin arroba), para detectar menciones
-BOT_USERNAME = "UniverseMaster_Bot"
+BOT_USERNAME = "universeMaster_bot"
 
 # Probabilidad de que Pitu salte por una palabra clave (0.05 = 5%)
 PITU_PROBABILIDAD_RANDOM = 0.05

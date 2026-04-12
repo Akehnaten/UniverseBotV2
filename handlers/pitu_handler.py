@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 # ── Inicialización de Gemini (NUEVO SDK) ───────────────────────────────────────
 # En el nuevo SDK no hay "configure", se usa una instancia de Client
 client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = "gemini-1.5-flash"
+MODEL_ID = "gemini-2.0-flash-lite"
 
 # Historial de chat por chat_id → sesión de Gemini con memoria
 _chat_sessions: dict = {}

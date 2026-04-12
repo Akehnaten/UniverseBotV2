@@ -17,7 +17,14 @@ def setup_all_handlers(bot):
         bot: Instancia del bot de Telegram
     """
     handlers_initialized = []
-    
+
+    #try:
+    #    from handlers.pitu_handler import setup_pitu_handler
+    #    setup_pitu_handler(bot)
+    #    logger.info("✅ Pitu Sistem cargado")
+    #except Exception as e:
+    #    logger.error(f"❌ Pitu Sistem: {e}", exc_info=True)
+        
     try:
         from handlers.basic_handlers import BasicUserHandlers
         BasicUserHandlers(bot)
@@ -129,13 +136,6 @@ def setup_all_handlers(bot):
         logger.info("✅ Gym handlers configurados")
     except Exception as e:
         logger.error(f"❌ Gym handlers: {e}", exc_info=True)
-
-    try:
-        from handlers.pitu_handler import setup_pitu_handler
-        setup_pitu_handler(bot)
-        logger.info("✅ Pitu Sistem cargado")
-    except Exception as e:
-        logger.error(f"❌ Pitu Sistem: {e}", exc_info=True)
 
     # ── Callbacks de uso de ítems desde la mochila ────────────────────────────
     try:
