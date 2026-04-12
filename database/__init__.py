@@ -35,6 +35,14 @@ def _migrate_missing_tables() -> None:
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_pokedex_user ON POKEDEX_USUARIO(userID)",
+        """
+        CREATE TABLE IF NOT EXISTS JUAN_MIEMBROS (
+            user_id     INTEGER PRIMARY KEY,
+            nombre      TEXT NOT NULL,
+            username    TEXT,
+            descripcion TEXT
+        )
+        """,
     ]
 
     # Columnas a añadir con ALTER TABLE.

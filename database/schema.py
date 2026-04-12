@@ -345,6 +345,28 @@ CREATE TABLE IF NOT EXISTS POKEDEX_USUARIO (
 )
 """
 
+# ============== JUAN (El caballo de los memes) ==============
+
+TABLA_JUAN_MIEMBROS = """
+CREATE TABLE IF NOT EXISTS JUAN_MIEMBROS (
+    user_id     INTEGER PRIMARY KEY,
+    nombre      TEXT NOT NULL,
+    username    TEXT,
+    descripcion TEXT
+)
+"""
+
+# ============== JUAN (El caballo de los memes) ==============
+
+TABLA_JUAN_MIEMBROS = """
+CREATE TABLE IF NOT EXISTS JUAN_MIEMBROS (
+    user_id     INTEGER PRIMARY KEY,
+    nombre      TEXT NOT NULL,
+    username    TEXT,
+    descripcion TEXT
+)
+"""
+
 # ============== LISTA DE TODAS LAS TABLAS ==============
 
 TODAS_LAS_TABLAS = [
@@ -367,6 +389,7 @@ TODAS_LAS_TABLAS = [
     TABLA_GUARDERIA,
     TABLA_HUEVOS,
     TABLA_POKEDEX_USUARIO,
+    TABLA_JUAN_MIEMBROS,
 ]
 
 # ============== ÍNDICES ==============
