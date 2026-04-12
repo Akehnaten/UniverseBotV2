@@ -155,135 +155,146 @@ def check_user_and_channel(bot_instance, message):
     5. Generar caja misteriosa con probabilidad configurada.
     6. Entregar recompensa diaria.
     """
-    import threading
-    from datetime import date
-    from config import (
-        RECOMPENSA_DIARIA, RECOMPENSA_DIARIA_P,
-        PROBABILIDAD_CAJA_MISTERIOSA,
-        CANAL_ENTREVISTAS, ENTREVISTADORES, INVITADOS_TEMPORALES,
-        ROLES, ADMIN_IDS,
-    )
-    from funciones import economy_service
-
-    user_id   = message.from_user.id
-    chat_id   = message.chat.id
-    chat_type = message.chat.type
-
-    # ── 1. Sincronización silenciosa de datos de perfil ───────────────────────
-    try:
-        from funciones.user_service import user_service as _us
-        _username = message.from_user.username or ""
-        _nombre   = message.from_user.first_name or ""
-        if message.from_user.last_name:
-            _nombre += f" {message.from_user.last_name}"
-        if db_manager.user_exists(user_id):
-            _us.sync_user_data(user_id, _username, _nombre)
-    except Exception as _sync_err:
-        logger.warning(f"[MIDDLEWARE] Error en sync_user_data: {_sync_err}")
-
-    # ── Solo aplicar filtros de canal en grupos ───────────────────────────────
-    if chat_type not in ("group", "supergroup"):
-        return  # Mensajes privados: no aplicar ningún filtro
-
-    # FIX: usar _get_thread_id() en lugar de getattr directo para cubrir
-    # el caso donde pyTelegramBotAPI no deserializa message_thread_id
-    # correctamente en grupos con Topics siempre activos.
-    thread_id = _get_thread_id(message)
-
-    # ── 2. Filtro ROLES: solo idols y admins ──────────────────────────────────
-    if thread_id == ROLES:
-        if _es_admin_grupo(bot_instance, chat_id, user_id):
-            return
-        if user_id in ADMIN_IDS:
-            return
-        try:
-            user_data = db_manager.get_user(user_id)
-            if user_data and user_data.get("clase") == "idol":
-                return
-        except Exception as _roles_err:
-            logger.warning(f"[MIDDLEWARE] Error verificando clase en ROLES: {_roles_err}")
-        try:
-            bot_instance.delete_message(chat_id, message.message_id)
-        except Exception:
-            pass
+    # ── Guardia: ignorar mensajes sin usuario (canales, mensajes de sistema) ──
+    if message.from_user is None:
         return
 
-    # ── 3. Filtro ENTREVISTAS ─────────────────────────────────────────────────
-    if CANAL_ENTREVISTAS and thread_id == CANAL_ENTREVISTAS:
-        if (user_id not in ENTREVISTADORES
-                and user_id not in INVITADOS_TEMPORALES):
+    try:
+        import threading
+        from datetime import date
+        from config import (
+            RECOMPENSA_DIARIA, RECOMPENSA_DIARIA_P,
+            PROBABILIDAD_CAJA_MISTERIOSA,
+            CANAL_ENTREVISTAS, ENTREVISTADORES, INVITADOS_TEMPORALES,
+            ROLES, ADMIN_IDS,
+        )
+        from funciones import economy_service
+
+        user_id   = message.from_user.id
+        chat_id   = message.chat.id
+        chat_type = message.chat.type
+
+        # ── 1. Sincronización silenciosa de datos de perfil ───────────────────────
+        try:
+            from funciones.user_service import user_service as _us
+            _username = message.from_user.username or ""
+            _nombre   = message.from_user.first_name or ""
+            if message.from_user.last_name:
+                _nombre += f" {message.from_user.last_name}"
+            if db_manager.user_exists(user_id):
+                _us.sync_user_data(user_id, _username, _nombre)
+        except Exception as _sync_err:
+            logger.warning(f"[MIDDLEWARE] Error en sync_user_data: {_sync_err}")
+
+        # ── Solo aplicar filtros de canal en grupos ───────────────────────────────
+        if chat_type not in ("group", "supergroup"):
+            return  # Mensajes privados: no aplicar ningún filtro
+
+        # FIX: usar _get_thread_id() en lugar de getattr directo para cubrir
+        # el caso donde pyTelegramBotAPI no deserializa message_thread_id
+        # correctamente en grupos con Topics siempre activos.
+        thread_id = _get_thread_id(message)
+
+        # ── 2. Filtro ROLES: solo idols y admins ──────────────────────────────────
+        if thread_id == ROLES:
+            if _es_admin_grupo(bot_instance, chat_id, user_id):
+                return
+            if user_id in ADMIN_IDS:
+                return
+            try:
+                user_data = db_manager.get_user(user_id)
+                if user_data and user_data.get("clase") == "idol":
+                    return
+            except Exception as _roles_err:
+                logger.warning(f"[MIDDLEWARE] Error verificando clase en ROLES: {_roles_err}")
             try:
                 bot_instance.delete_message(chat_id, message.message_id)
             except Exception:
                 pass
             return
 
-    # ── 4. Registro obligatorio ───────────────────────────────────────────────
-    message_text      = message.text or message.caption or ""
-    sin_registro_cmds = ("/registrar", "/start", "/help")
-    if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
-        return
+        # ── 3. Filtro ENTREVISTAS ─────────────────────────────────────────────────
+        if CANAL_ENTREVISTAS and thread_id == CANAL_ENTREVISTAS:
+            if (user_id not in ENTREVISTADORES
+                    and user_id not in INVITADOS_TEMPORALES):
+                try:
+                    bot_instance.delete_message(chat_id, message.message_id)
+                except Exception:
+                    pass
+                return
 
-    # Los bots son administradores sin registro — sus mensajes nunca se borran
-    if getattr(message.from_user, "is_bot", False):
-        return
+        # ── 4. Registro obligatorio ───────────────────────────────────────────────
+        message_text      = message.text or message.caption or ""
+        sin_registro_cmds = ("/registrar", "/start", "/help")
+        if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
+            return
 
-    if not db_manager.user_exists(user_id):
-        try:
-            bot_instance.delete_message(chat_id, message.message_id)
-            warning = bot_instance.send_message(
-                chat_id,
-                f"⚠️ {message.from_user.first_name}, debes registrarte primero.\n"
-                f"Usa: /registrar cliente\n"
-                f"o: /registrar idol [nombre]",
-                message_thread_id=thread_id,
-            )
-            threading.Timer(
-                10,
-                lambda: _eliminar_mensaje_seguro(bot_instance, chat_id, warning.message_id),
-            ).start()
-        except Exception:
-            pass
-        return
+        # Los bots son administradores sin registro — sus mensajes nunca se borran
+        if getattr(message.from_user, "is_bot", False):
+            return
 
-    # ── 5. Caja misteriosa ────────────────────────────────────────────────────
-    import random
-    if random.random() <= PROBABILIDAD_CAJA_MISTERIOSA:
-        try:
-            caja_misteriosa.generar_caja(user_id, chat_id, bot_instance, thread_id)
-        except Exception:
-            pass
+        if not db_manager.user_exists(user_id):
+            try:
+                bot_instance.delete_message(chat_id, message.message_id)
+                warning = bot_instance.send_message(
+                    chat_id,
+                    f"⚠️ {message.from_user.first_name}, debes registrarte primero.\n"
+                    f"Usa: /registrar cliente\n"
+                    f"o: /registrar idol [nombre]",
+                    message_thread_id=thread_id,
+                )
+                threading.Timer(
+                    10,
+                    lambda: _eliminar_mensaje_seguro(bot_instance, chat_id, warning.message_id),
+                ).start()
+            except Exception:
+                pass
+            return
 
-    # ── 6. Recompensa diaria ──────────────────────────────────────────────────
-    if message.content_type in ("text", "photo", "video"):
-        try:
-            hoy       = str(date.today())
-            resultado = db_manager.execute_query(
-                "SELECT ultima_recompensa_diaria FROM USUARIOS WHERE userID = ?",
-                (user_id,),
-            )
-            if resultado:
-                ultima = resultado[0].get("ultima_recompensa_diaria")
-                if ultima != hoy:
-                    economy_service.add_credits(
-                        user_id, RECOMPENSA_DIARIA, "Recompensa diaria"
-                    )
-                    db_manager.execute_update(
-                        "UPDATE USUARIOS SET puntos = puntos + ? WHERE userID = ?",
-                        (RECOMPENSA_DIARIA_P, user_id),
-                    )
-                    db_manager.execute_update(
-                        "UPDATE USUARIOS SET ultima_recompensa_diaria = ? WHERE userID = ?",
-                        (hoy, user_id),
-                    )
-                    if RECOMPENSA_DIARIA_P > 0:
-                        from funciones.user_experience import aplicar_experiencia_usuario
-                        aplicar_experiencia_usuario(
-                            user_id, RECOMPENSA_DIARIA_P,
-                            bot_instance, chat_id, thread_id,
+        # ── 5. Caja misteriosa ────────────────────────────────────────────────────
+        import random
+        if random.random() <= PROBABILIDAD_CAJA_MISTERIOSA:
+            try:
+                caja_misteriosa.generar_caja(user_id, chat_id, bot_instance, thread_id)
+            except Exception:
+                pass
+
+        # ── 6. Recompensa diaria ──────────────────────────────────────────────────
+        if message.content_type in ("text", "photo", "video"):
+            try:
+                hoy       = str(date.today())
+                resultado = db_manager.execute_query(
+                    "SELECT ultima_recompensa_diaria FROM USUARIOS WHERE userID = ?",
+                    (user_id,),
+                )
+                if resultado:
+                    ultima = resultado[0].get("ultima_recompensa_diaria")
+                    if ultima != hoy:
+                        economy_service.add_credits(
+                            user_id, RECOMPENSA_DIARIA, "Recompensa diaria"
                         )
-        except Exception as _daily_err:
-            logger.warning(f"[MIDDLEWARE] Error en recompensa diaria: {_daily_err}")
+                        db_manager.execute_update(
+                            "UPDATE USUARIOS SET puntos = puntos + ? WHERE userID = ?",
+                            (RECOMPENSA_DIARIA_P, user_id),
+                        )
+                        db_manager.execute_update(
+                            "UPDATE USUARIOS SET ultima_recompensa_diaria = ? WHERE userID = ?",
+                            (hoy, user_id),
+                        )
+                        if RECOMPENSA_DIARIA_P > 0:
+                            from funciones.user_experience import aplicar_experiencia_usuario
+                            aplicar_experiencia_usuario(
+                                user_id, RECOMPENSA_DIARIA_P,
+                                bot_instance, chat_id, thread_id,
+                            )
+            except Exception as _daily_err:
+                logger.warning(f"[MIDDLEWARE] Error en recompensa diaria: {_daily_err}")
+
+    except Exception as _mw_err:
+        # Loguear el error pero NUNCA bloquear el mensaje — el handler debe ejecutarse
+        logger.error(f"[MIDDLEWARE] Error inesperado procesando mensaje de "
+                     f"user={getattr(message.from_user, 'id', '?')}: {_mw_err}",
+                     exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -344,7 +355,6 @@ except Exception as _handlers_err:
         f"  Causa: {_handlers_err}",
         exc_info=True,
     )
-    # Re-intentar importar módulo a módulo para identificar el culpable
     import importlib, traceback
     for _mod in [
         "pokemon.battle_engine",
@@ -412,10 +422,41 @@ if __name__ == "__main__":
         WEBHOOK_PORT,
         WEBHOOK_SECRET_TOKEN,
     )
- 
+
+    # ── Resetear webhook siempre al iniciar ───────────────────────────────────
+    # Esto limpia cualquier webhook caído o con allowed_updates incompleto.
+    try:
+        bot.remove_webhook()
+        logger.info("[WEBHOOK] Webhook anterior eliminado")
+        import time; time.sleep(1)
+    except Exception as _wh_err:
+        logger.warning(f"[WEBHOOK] No se pudo eliminar webhook previo: {_wh_err}")
+
     if WEBHOOK_URL:
         logger.info("[START] Modo: WEBHOOK")
         logger.info("[START] URL pública: %s", WEBHOOK_URL)
+
+        # Configurar webhook con todos los update types necesarios
+        try:
+            bot.set_webhook(
+                url           = WEBHOOK_URL,
+                allowed_updates = [
+                    "message",
+                    "callback_query",
+                    "inline_query",
+                    "my_chat_member",
+                    "chat_member",
+                ],
+                drop_pending_updates = True,   # Descarta updates acumulados mientras estuvo caído
+            )
+            info = bot.get_webhook_info()
+            logger.info(f"[WEBHOOK] Activo en: {info.url}")
+            logger.info(f"[WEBHOOK] Pending updates: {info.pending_update_count}")
+            if info.last_error_message:
+                logger.warning(f"[WEBHOOK] Último error: {info.last_error_message}")
+        except Exception as _set_wh_err:
+            logger.error(f"[WEBHOOK] Error configurando webhook: {_set_wh_err}")
+
         from webhook_server import start_webhook
         start_webhook(
             bot=bot,
