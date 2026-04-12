@@ -1,15 +1,15 @@
 # -*- coding: utf-8 -*-
 """
 handlers/pitu_handler.py
-Actualizado para google-genai v1.x
+Usando Groq (gratuito) en lugar de Gemini
 """
 
 import random
 import logging
-from google import genai  # Importación para el nuevo SDK
-from google.genai import types # Necesario para las configuraciones
+import time
+from groq import Groq
 from config import (
-    GEMINI_API_KEY,
+    GROQ_API_KEY,
     BOT_USERNAME,
     PITU_PROBABILIDAD_RANDOM,
     PITU_PALABRAS_CLAVE,
@@ -19,50 +19,82 @@ from utils.thread_utils import get_thread_id
 
 logger = logging.getLogger(__name__)
 
-# ── Inicialización de Gemini (NUEVO SDK) ───────────────────────────────────────
-# En el nuevo SDK no hay "configure", se usa una instancia de Client
-client = genai.Client(api_key=GEMINI_API_KEY)
-MODEL_ID = "gemini-2.0-flash-lite"
+# ── Inicialización de Groq ─────────────────────────────────────────────────────
+client = Groq(api_key=GROQ_API_KEY)
+MODEL_ID = "llama-3.3-70b-versatile"  # El más capaz en tier gratuito
 
-# Historial de chat por chat_id → sesión de Gemini con memoria
-_chat_sessions: dict = {}
+# Historial de conversación por chat_id (Groq es stateless, lo manejamos nosotros)
+_chat_histories: dict[int, list] = {}
+MAX_HISTORY = 20  # Mensajes a recordar por chat
 
-def _get_session(chat_id: int):
-    """Devuelve (o crea) la sesión de chat de Gemini usando client.chats.create."""
-    if chat_id not in _chat_sessions:
-        # En el nuevo SDK, system_instruction se pasa aquí dentro del config
-        _chat_sessions[chat_id] = client.chats.create(
-            model=MODEL_ID,
-            config=types.GenerateContentConfig(
-                system_instruction=PITU_SYSTEM_INSTRUCTION
-            )
-        )
-        logger.info(f"[PITU] Nueva sesión (SDK v1.x) para chat_id={chat_id}")
-    return _chat_sessions[chat_id]
+
+def _get_history(chat_id: int) -> list:
+    if chat_id not in _chat_histories:
+        _chat_histories[chat_id] = []
+    return _chat_histories[chat_id]
 
 
 def _pedir_respuesta(chat_id: int, prompt: str) -> str:
-    """Manda el prompt a Gemini y devuelve el texto de respuesta."""
-    try:
-        session = _get_session(chat_id)
-        # El método sigue siendo send_message pero el retorno es un objeto simplificado
-        response = session.send_message(prompt)
-        return response.text.strip()
-    except Exception as e:
-        logger.error(f"[PITU] Error Gemini: {e}")
-        return "Che, me trabé un momento. Probá de nuevo, boludo 😅"
+    """Manda el prompt a Groq y devuelve el texto de respuesta."""
+    history = _get_history(chat_id)
+    
+    # Agregar mensaje del usuario al historial
+    history.append({"role": "user", "content": prompt})
+    
+    # Mantener historial acotado
+    if len(history) > MAX_HISTORY:
+        history = history[-MAX_HISTORY:]
+        _chat_histories[chat_id] = history
+
+    max_intentos = 3
+    espera = 10
+
+    for intento in range(max_intentos):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=[
+                    {"role": "system", "content": PITU_SYSTEM_INSTRUCTION},
+                    *history,
+                ],
+                max_tokens=300,
+                temperature=0.85,
+            )
+            respuesta = response.choices[0].message.content.strip()
+            
+            # Guardar respuesta en historial
+            history.append({"role": "assistant", "content": respuesta})
+            
+            return respuesta
+
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str and intento < max_intentos - 1:
+                logger.warning(f"[PITU] Rate limit Groq, esperando {espera}s...")
+                time.sleep(espera)
+            else:
+                logger.error(f"[PITU] Error Groq: {e}")
+                return "Che, me trabé un momento. Probá de nuevo, boludo 😅"
+
+    return "Che, me trabé un momento. Probá de nuevo, boludo 😅"
 
 
-# ── Helpers de detección (Sin cambios) ────────────────────────────────────────
+# ── Helpers de detección ───────────────────────────────────────────────────────
 
 def _menciona_a_pitu(message) -> bool:
     texto = (message.text or message.caption or "").lower()
-    return (
-        "pitu" in texto
-        or "pitufo" in texto
-        or "enrique" in texto
-        or f"@{BOT_USERNAME.lower()}" in texto
-    )
+    if any(kw in texto for kw in ["pitu", "pitufo", "enrique"]):
+        return True
+    # Detección por entities (forma correcta para @menciones)
+    entities = message.entities or message.caption_entities or []
+    for entity in entities:
+        if entity.type == "mention":
+            mention_text = (message.text or message.caption or "")[
+                entity.offset: entity.offset + entity.length
+            ].lower()
+            if mention_text == f"@{BOT_USERNAME.lower()}":
+                return True
+    return False
 
 def _es_reply_a_pitu(message) -> bool:
     return (
@@ -85,7 +117,7 @@ def _deberia_responder_pitu(message) -> bool:
             return False
         return _menciona_a_pitu(message) or _tiene_palabra_clave_random(message)
     except Exception as e:
-        logger.debug(f"[PITU] Error en predicado _deberia_responder_pitu: {e}")
+        logger.debug(f"[PITU] Error en predicado: {e}")
         return False
 
 
@@ -110,7 +142,7 @@ def setup_pitu_handler(bot) -> None:
         try:
             bot.reply_to(message, respuesta)
         except Exception as e:
-            logger.warning(f"[PITU] reply_to falló: {e}. Usando fallback.")
+            logger.warning(f"[PITU] reply_to falló: {e}")
             try:
                 bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
             except Exception as e2:
@@ -119,9 +151,9 @@ def setup_pitu_handler(bot) -> None:
     @bot.message_handler(commands=["resetpitu"])
     def pitu_reset(message):
         chat_id = message.chat.id
-        if chat_id in _chat_sessions:
-            del _chat_sessions[chat_id]
+        if chat_id in _chat_histories:
+            del _chat_histories[chat_id]
             logger.info(f"[PITU] Historial reseteado para chat_id={chat_id}")
         bot.reply_to(message, "Borrón y cuenta nueva, che. ¿De qué estábamos hablando? 🤷")
 
-    logger.info("[OK] Pitu handler registrado con SDK v1.x")
+    logger.info("[OK] Pitu handler registrado con Groq")
