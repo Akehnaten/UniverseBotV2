@@ -414,6 +414,11 @@ def _tiene_palabra_clave_random(message) -> bool:
 
 def _deberia_responder_juan(message) -> bool:
     try:
+        # Nunca interceptar comandos
+        texto = message.text or message.caption or ""
+        if texto.startswith("/"):
+            return False
+        
         if _es_reply_a_juan(message):
             return True
         if message.text is None and message.caption is None:
@@ -429,7 +434,10 @@ def _deberia_responder_juan(message) -> bool:
 def setup_juan_handler(bot) -> None:
 
     # ── Listener pasivo — escucha todos los mensajes de texto ─────────────────
-    @bot.message_handler(content_types=["text"])
+    @bot.message_handler(
+    content_types=["text"],
+    func=lambda m: not (m.text or "").startswith("/")
+    )
     def juan_aprender(message):
         try:
             _procesar_aprendizaje(message)

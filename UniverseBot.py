@@ -326,28 +326,6 @@ def cmd_remover_invitado(message):
 logger.info("[OK] Middleware configurado")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DIAGNÓSTICO — registrado ANTES de setup_all_handlers
-# ─────────────────────────────────────────────────────────────────────────────
-
-@bot.message_handler(commands=['ping'])
-def _debug_ping(message):
-    uid = message.from_user.id if message.from_user else 0
-    logger.info(f"[DEBUG] /ping recibido de user={uid}")
-    try:
-        bot.reply_to(message, "🏓 pong")
-    except Exception as e:
-        logger.error(f"[DEBUG] No pude responder /ping: {e}")
-
-@bot.message_handler(func=lambda m: True,
-                     content_types=['text', 'photo', 'sticker', 'document'])
-def _debug_catch_all(message):
-    uid  = message.from_user.id if message.from_user else "None"
-    text = (message.text or "")[:60]
-    logger.info(
-        f"[DEBUG] user={uid} type={message.content_type} text={repr(text)}"
-    )
-
-# ─────────────────────────────────────────────────────────────────────────────
 # SETUP DE HANDLERS Y SISTEMAS
 # ─────────────────────────────────────────────────────────────────────────────
 
