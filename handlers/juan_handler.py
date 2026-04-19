@@ -280,34 +280,22 @@ def _procesar_aprendizaje_texto(message) -> None:
 
 
 def _procesar_aprendizaje_sticker(message) -> None:
-    """Aprende el emoji/set de un sticker como reacción en contexto."""
+    """
+    Aprende stickers guardando su file_id real (prefijo 'sticker::').
+    Esto permite a Juan enviar el sticker de verdad cuando responde.
+    Los stickers se guardan en la categoría 'sticker' para no mezclarse
+    con frases de texto.
+    """
     sticker = message.sticker
-    if not sticker:
+    if not sticker or not sticker.file_id:
         return
 
     autor = message.from_user.first_name or "alguien"
     fuente_username = message.from_user.username or ""
 
-    # Construir descripción del sticker
-    emoji = sticker.emoji or "🎭"
-    set_name = sticker.set_name or "sticker_suelto"
-    frase = f"{emoji} [{set_name}]"
-
-    if not _es_frase_guardable(frase):
-        return
-
-    # Si es reply, intentar categorizar por contexto
-    categoria = "reaccion"  # los stickers son casi siempre reacciones
-    if message.reply_to_message:
-        original = message.reply_to_message
-        texto_original = original.text or original.caption or ""
-        categoria_ctx = _detectar_categoria(texto_original)
-        if categoria_ctx:
-            categoria = categoria_ctx
-
-    _guardar_frase(categoria, frase, autor, fuente_username)
-    logger.debug(f"[JUAN-LEARN] Sticker [{categoria}]: '{frase}' de {autor}")
-
+    frase = f"sticker::{sticker.file_id}"
+    _guardar_frase("sticker", frase, autor, fuente_username)
+    logger.debug(f"[JUAN-LEARN] Sticker guardado de {autor}: file_id={sticker.file_id}")
 
 # ── Funciones de miembros ─────────────────────────────────────────────────────
 
@@ -348,7 +336,7 @@ def _mensaje_menciona_miembro(texto: str) -> bool:
 
 # ── Lógica de respuesta ────────────────────────────────────────────────────────
 
-def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str:
+def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str | None:
     """
     Prioridad:
     1. Si menciona a un miembro conocido → chiste interno guardado (0 tokens)
@@ -423,15 +411,18 @@ def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str
     if history and history[-1]["role"] == "user":
         history.pop()
 
-    return random.choice(_EXCUSAS)
+    logger.info("[JUAN] Sin respuesta disponible (Groq sin tokens y sin frases guardadas) — silencio.")
+    return None
 
 
 # ── Helpers de detección ───────────────────────────────────────────────────────
 
 def _menciona_a_juan(message) -> bool:
-    texto = (message.text or message.caption or "").lower()
-    if any(kw in texto for kw in ["juan", "juancito", "el caballo"]):
-        return True
+    """
+    True SOLO si hay una entity de tipo 'mention' que apunta exactamente a
+    @BOT_USERNAME. Usar entities en vez de substring evita falsos positivos
+    con "juana", "juancito", etc.
+    """
     entities = message.entities or message.caption_entities or []
     for entity in entities:
         if entity.type == "mention":
@@ -467,10 +458,41 @@ def _deberia_responder_juan(message) -> bool:
             return True
         if message.text is None and message.caption is None:
             return False
-        return _menciona_a_juan(message) or _tiene_palabra_clave_random(message)
+        return _menciona_a_juan(message)
     except Exception as e:
         logger.debug(f"[JUAN] Error en predicado: {e}")
         return False
+
+
+
+# ── Helper de envío ────────────────────────────────────────────────────────────
+
+def _enviar_respuesta(bot, message, respuesta: str | None, chat_id: int, thread_id) -> None:
+    """
+    Envía la respuesta de Juan según su tipo:
+      - None          → silencio (sin tokens y sin frases guardadas)
+      - "sticker::ID" → envía el sticker real con bot.send_sticker()
+      - str           → reply_to con texto
+    """
+    if respuesta is None:
+        return
+
+    if respuesta.startswith("sticker::"):
+        file_id = respuesta[len("sticker::"):]
+        try:
+            bot.send_sticker(chat_id, file_id, reply_to_message_id=message.message_id)
+        except Exception as e:
+            logger.warning(f"[JUAN] send_sticker falló (file_id={file_id}): {e}")
+        return
+
+    try:
+        bot.reply_to(message, respuesta)
+    except Exception as e:
+        logger.warning(f"[JUAN] reply_to falló: {e}")
+        try:
+            bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
+        except Exception as e2:
+            logger.error(f"[JUAN] send_message también falló: {e2}")
 
 
 # ── Setup principal ────────────────────────────────────────────────────────────
@@ -520,14 +542,7 @@ def setup_juan_handler(bot) -> None:
                 logger.info(f"[JUAN] Respondiendo | chat={chat_id} | {prompt[:80]}")
 
                 respuesta = _pedir_respuesta(chat_id, prompt, texto_original=texto)
-                try:
-                    bot.reply_to(message, respuesta)
-                except Exception as e:
-                    logger.warning(f"[JUAN] reply_to falló: {e}")
-                    try:
-                        bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
-                    except Exception as e2:
-                        logger.error(f"[JUAN] send_message también falló: {e2}")
+                _enviar_respuesta(bot, message, respuesta, chat_id, thread_id)
 
         # ── Aprendizaje pasivo (siempre, independiente de si respondió) ───────
         try:
@@ -560,14 +575,7 @@ def setup_juan_handler(bot) -> None:
         texto = message.caption or "[foto sin texto]"
         prompt = f"{user_name} manda una foto y dice: {texto}"
         respuesta = _pedir_respuesta(chat_id, prompt, texto_original=texto)
-        try:
-            bot.reply_to(message, respuesta)
-        except Exception as e:
-            logger.warning(f"[JUAN] reply foto falló: {e}")
-            try:
-                bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
-            except Exception as e2:
-                logger.error(f"[JUAN] send_message foto falló: {e2}")
+        _enviar_respuesta(bot, message, respuesta, chat_id, thread_id)
 
     # ── 3. Handler para STICKERS ──────────────────────────────────────────────
     @bot.message_handler(content_types=["sticker"])
@@ -596,17 +604,15 @@ def setup_juan_handler(bot) -> None:
             return
         _ultimo_uso[user_id] = ahora
 
-        emoji = (message.sticker.emoji or "🎭") if message.sticker else "🎭"
-        prompt = f"{user_name} te responde con un sticker {emoji}"
-        respuesta = _pedir_respuesta(chat_id, prompt, texto_original=emoji)
-        try:
-            bot.reply_to(message, respuesta)
-        except Exception as e:
-            logger.warning(f"[JUAN] reply sticker falló: {e}")
-            try:
-                bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
-            except Exception as e2:
-                logger.error(f"[JUAN] send_message sticker falló: {e2}")
+        # Responde con un sticker aprendido si hay, si no con texto de Groq
+        sticker_aprendido = _get_frase_random("sticker")
+        if sticker_aprendido and sticker_aprendido["frase"].startswith("sticker::"):
+            _enviar_respuesta(bot, message, sticker_aprendido["frase"], chat_id, thread_id)
+        else:
+            emoji = (message.sticker.emoji or "🎭") if message.sticker else "🎭"
+            prompt = f"{user_name} te responde con un sticker {emoji}"
+            respuesta = _pedir_respuesta(chat_id, prompt, texto_original=emoji)
+            _enviar_respuesta(bot, message, respuesta, chat_id, thread_id)
 
     # ── 4. Handler para VIDEO/AUDIO/VOICE/DOCUMENT ────────────────────────────
     @bot.message_handler(content_types=["video", "audio", "voice", "document"])
@@ -629,14 +635,7 @@ def setup_juan_handler(bot) -> None:
         texto = message.caption or f"[{tipo} sin descripción]"
         prompt = f"{user_name} manda un {tipo} y dice: {texto}"
         respuesta = _pedir_respuesta(chat_id, prompt, texto_original=texto)
-        try:
-            bot.reply_to(message, respuesta)
-        except Exception as e:
-            logger.warning(f"[JUAN] reply media falló: {e}")
-            try:
-                bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
-            except Exception as e2:
-                logger.error(f"[JUAN] send_message media falló: {e2}")
+        _enviar_respuesta(bot, message, respuesta, chat_id, thread_id)
 
     # ── 5. Comandos de gestión ────────────────────────────────────────────────
 
