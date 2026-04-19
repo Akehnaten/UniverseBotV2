@@ -114,7 +114,7 @@ UNKNOWN_SPRITE = BASE_DIR / "src" / "unknow.png"
 
 # ============== JUAN (El caballo de los memes) ==============
 
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "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"
 
 # Username del bot en Telegram (sin arroba), para detectar menciones
 BOT_USERNAME = "universeMaster_bot"

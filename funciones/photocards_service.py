@@ -36,8 +36,30 @@ class Photocard:
         """True si la carta es un video (.mp4)."""
         return self.path.lower().endswith(".mp4")
 
+    @property
+    def nombre_display(self) -> str:
+        """
+        Nombre limpio para mostrar al usuario.
+        Elimina el prefijo del album y los numeros finales.
+        Ejemplos:
+          Pokemon_lisa2   -> Lisa
+          Pokemon_nayeon2 -> Nayeon
+          Jisoo           -> Jisoo  (sin cambios si no hay prefijo)
+        """
+        import re
+        nombre = self.nombre
+        # Quitar prefijo del album (case-insensitive) seguido de guion bajo
+        prefijo = re.escape(self.album.capitalize())
+        nombre = re.sub(rf"^{prefijo}_?", "", nombre, flags=re.IGNORECASE)
+        # Quitar numeros del final
+        nombre = re.sub(r"\d+$", "", nombre)
+        # Limpiar guiones bajos y espacios sobrantes
+        nombre = nombre.strip("_ ").replace("_", " ").strip()
+        # Si quedo vacio, usar el nombre original
+        return nombre.capitalize() if nombre else self.nombre
+
     def __str__(self) -> str:
-        return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre}"
+        return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre_display}"
 
 
 class PhotocardsService:
