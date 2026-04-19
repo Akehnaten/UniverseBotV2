@@ -385,23 +385,45 @@ class PhotocardsHandlers:
         markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_album:{uid}:{pc.album}:0:1"))
 
         thread_id = getattr(call.message, "message_thread_id", None)
+        chat_id   = call.message.chat.id
+
         try:
-            with open(pc.path, "rb") as foto:
-                self.bot.send_photo(
-                    call.message.chat.id,
-                    foto,
-                    caption=caption,
-                    parse_mode="HTML",
-                    reply_markup=markup,
-                    message_thread_id=thread_id,
-                )
-            self._delete(call.message.chat.id, call.message.message_id)
+            with open(pc.path, "rb") as media:
+                if pc.es_video:
+                    self.bot.send_video(
+                        chat_id, media,
+                        caption=caption, parse_mode="HTML",
+                        reply_markup=markup, message_thread_id=thread_id,
+                        supports_streaming=True,
+                    )
+                else:
+                    try:
+                        self.bot.send_photo(
+                            chat_id, media,
+                            caption=caption, parse_mode="HTML",
+                            reply_markup=markup, message_thread_id=thread_id,
+                        )
+                    except Exception as photo_exc:
+                        # send_photo falla con imágenes de alta resolución
+                        # (Telegram rechaza si ancho+alto > 10.000px).
+                        # Fallback: send_document — sin límite de dimensiones,
+                        # la imagen se ve completa al tocarla.
+                        logger.warning(
+                            f"send_photo falló para '{pc.nombre}' ({photo_exc}), "
+                            f"reintentando como documento..."
+                        )
+                        media.seek(0)
+                        self.bot.send_document(
+                            chat_id, media,
+                            caption=caption, parse_mode="HTML",
+                            reply_markup=markup, message_thread_id=thread_id,
+                        )
+            self._delete(chat_id, call.message.message_id)
         except FileNotFoundError:
-            # Imagen no disponible en disco: mostrar detalle solo con texto
-            logger.warning(f"Imagen no encontrada: {pc.path}")
+            logger.warning(f"Archivo no encontrado: {pc.path}")
             self._edit(call, caption, markup)
         except Exception as exc:
-            logger.error(f"_show_carta_detalle send_photo: {exc}", exc_info=True)
+            logger.error(f"_show_carta_detalle: {exc}", exc_info=True)
             self._edit(call, caption, markup)
 
     # ── vender ────────────────────────────────────────────────────────────────

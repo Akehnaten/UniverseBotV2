@@ -31,6 +31,11 @@ class Photocard:
         self.album  = album
         self.path   = path
 
+    @property
+    def es_video(self) -> bool:
+        """True si la carta es un video (.mp4)."""
+        return self.path.lower().endswith(".mp4")
+
     def __str__(self) -> str:
         return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre}"
 
@@ -148,7 +153,7 @@ class PhotocardsService:
                     continue
                 archivos = sorted(
                     f for f in os.listdir(ruta)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".mp4"))
                 )
                 for archivo in archivos:
                     nombre   = os.path.splitext(archivo)[0].capitalize()
@@ -271,7 +276,7 @@ class PhotocardsService:
                     continue
                 archivos = sorted(
                     f for f in os.listdir(ruta)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".mp4"))
                 )
                 for archivo in archivos:
                     nombre = os.path.splitext(archivo)[0].capitalize()
