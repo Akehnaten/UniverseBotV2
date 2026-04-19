@@ -489,7 +489,7 @@ class PhotocardsHandlers:
                 types.InlineKeyboardButton("⬅️ Menú",          callback_data=f"pc_menu:{uid}"),
             )
             nombre_u = self._nombre_usuario(call)
-            self._edit(
+            self._send_text(
                 call,
                 f"👤 <b>Menú de {nombre_u}</b>\n\n"
                 f"💸 <b>Venta completada</b>\n\n"
@@ -501,7 +501,7 @@ class PhotocardsHandlers:
         else:
             markup = types.InlineKeyboardMarkup(row_width=1)
             markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_menu:{uid}"))
-            self._edit(call, f"❌ {msg}", markup)
+            self._send_text(call, f"❌ {msg}", markup)
 
     def _vender_repetidas(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
         self._answer(call)
@@ -529,7 +529,7 @@ class PhotocardsHandlers:
                 types.InlineKeyboardButton("⬅️ Menú",                   callback_data=f"pc_menu:{uid}"),
             )
             nombre_u = self._nombre_usuario(call)
-            self._edit(
+            self._send_text(
                 call,
                 f"👤 <b>Menú de {nombre_u}</b>\n\n"
                 f"💸 <b>Repetidas liquidadas</b>\n\n"
@@ -541,7 +541,7 @@ class PhotocardsHandlers:
                 markup_ok,
             )
         else:
-            self._edit(call, f"❌ {msg}", markup)
+            self._send_text(call, f"❌ {msg}", markup)
 
     # ── intercambiar ──────────────────────────────────────────────────────────
 
