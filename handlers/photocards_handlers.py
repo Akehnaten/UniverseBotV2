@@ -472,27 +472,36 @@ class PhotocardsHandlers:
     # ── vender ────────────────────────────────────────────────────────────────
 
     def _vender_todo(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
+        self._answer(call)
         cantidad = photocards_service.get_cantidad_carta(uid, carta_id)
         if cantidad == 0:
-            self._answer(call, "❌ No tenés esta carta.", alert=True)
+            self._edit(call, "❌ No tenés esta carta.")
             return
         pc     = photocards_service.get_carta_by_id(carta_id)
         nombre = pc.nombre_display if pc else f"#{carta_id}"
+        emoji  = RAREZA_EMOJI.get(pc.rareza, "⚪") if pc else "⚪"
         exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, cantidad)
         if exito:
-            # Popup con resumen de la venta
-            self._answer(
-                call,
-                f"✅ Vendiste {nombre} ×{cantidad}\n"
-                f"💰 +{cosmos} cosmos\n"
-                f"💳 Saldo: {economy_service.get_balance(uid)} cosmos",
-                alert=True,
+            saldo = economy_service.get_balance(uid)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(
+                types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+                types.InlineKeyboardButton("⬅️ Menú",          callback_data=f"pc_menu:{uid}"),
             )
-            # Volver al álbum (la carta ya no existe en el inventario)
-            album_key = pc.album if pc else ""
-            self._show_coleccion(call, uid)
+            nombre_u = self._nombre_usuario(call)
+            self._edit(
+                call,
+                f"👤 <b>Menú de {nombre_u}</b>\n\n"
+                f"💸 <b>Venta completada</b>\n\n"
+                f"{emoji} <b>{nombre}</b> — ×{cantidad} vendidas\n"
+                f"💰 Ganaste: <b>+{cosmos} cosmos</b>\n"
+                f"💳 Saldo actual: <b>{saldo} cosmos</b>",
+                markup,
+            )
         else:
-            self._answer(call, f"❌ {msg}", alert=True)
+            markup = types.InlineKeyboardMarkup(row_width=1)
+            markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_menu:{uid}"))
+            self._edit(call, f"❌ {msg}", markup)
 
     def _vender_repetidas(self, call: types.CallbackQuery, uid: int, carta_id: int) -> None:
         self._answer(call)
@@ -511,20 +520,28 @@ class PhotocardsHandlers:
         exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, vender)
         if exito:
             precio_unit = photocards_service.precios_venta.get(pc.rareza, 2) if pc else 0
-            # Popup con resumen de la venta
-            self._answer(
-                call,
-                f"✅ Repetidas liquidadas\n"
-                f"Vendidas: ×{vender}  ({precio_unit} cosmos c/u)\n"
-                f"💰 +{cosmos} cosmos\n"
-                f"💳 Saldo: {economy_service.get_balance(uid)} cosmos",
-                alert=True,
+            emoji       = RAREZA_EMOJI.get(pc.rareza, "⚪") if pc else "⚪"
+            saldo       = economy_service.get_balance(uid)
+            markup_ok   = types.InlineKeyboardMarkup(row_width=1)
+            markup_ok.add(
+                types.InlineKeyboardButton("🃏 Ver carta actualizada", callback_data=f"pc_carta:{uid}:{carta_id}"),
+                types.InlineKeyboardButton("🗂️ Mi Colección",          callback_data=f"pc_coleccion:{uid}"),
+                types.InlineKeyboardButton("⬅️ Menú",                   callback_data=f"pc_menu:{uid}"),
             )
-            # Recargar el detalle de la carta — ahora mostrará cantidad=1
-            # y el botón "Liquidar repetidas" habrá desaparecido
-            self._show_carta_detalle(call, uid, carta_id)
+            nombre_u = self._nombre_usuario(call)
+            self._edit(
+                call,
+                f"👤 <b>Menú de {nombre_u}</b>\n\n"
+                f"💸 <b>Repetidas liquidadas</b>\n\n"
+                f"{emoji} <b>{nombre}</b>\n"
+                f"🗑️ Vendidas: <b>×{vender}</b>  ·  {precio_unit} cosmos c/u\n"
+                f"💰 Ganaste: <b>+{cosmos} cosmos</b>\n"
+                f"📦 Te quedás con: <b>×1</b>\n"
+                f"💳 Saldo actual: <b>{saldo} cosmos</b>",
+                markup_ok,
+            )
         else:
-            self._answer(call, f"❌ {msg}", alert=True)
+            self._edit(call, f"❌ {msg}", markup)
 
     # ── intercambiar ──────────────────────────────────────────────────────────
 
