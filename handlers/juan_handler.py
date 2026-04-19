@@ -24,7 +24,7 @@ from config import (
     BOT_USERNAME,
     JUAN_PROBABILIDAD_RANDOM,
     JUAN_PALABRAS_CLAVE,
-    JUAN_CANAL_ANUNCIOS,
+    CANAL_ID,
     JUAN_THREAD_ANUNCIOS,
 )
 from utils.thread_utils import get_thread_id
@@ -383,10 +383,10 @@ def _cmd_pregunta(bot, message, chat_id: int, thread_id) -> None:
         max_tokens=180,
     )
     if texto:
-        bot.send_message(
-            chat_id, f"🧠 <b>Pregunta de Juan</b>\n\n{texto}",
-            parse_mode="HTML", message_thread_id=thread_id,
-        )
+        kwargs = {"parse_mode": "HTML"}
+        if thread_id:
+            kwargs["message_thread_id"] = thread_id
+        bot.send_message(chat_id, f"🧠 <b>Pregunta de Juan</b>\n\n{texto}", **kwargs)
     else:
         bot.reply_to(message, "Se me fue la pregunta de la cabeza. Intenta de nuevo.")
 
@@ -418,13 +418,16 @@ def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
         max_tokens=120, temperature=0.95,
     ) or "El oráculo ecuestre ha hablado."
 
+    kwargs = {"parse_mode": "HTML"}
+    if thread_id:
+        kwargs["message_thread_id"] = thread_id
     bot.send_message(
         chat_id,
         f"💘 <b>Ship Meter</b>\n\n"
         f"<b>{p1}</b> + <b>{p2}</b>\n"
         f"Compatibilidad: <b>{pct}%</b> — {nivel}\n\n"
         f"<i>{comentario}</i>",
-        parse_mode="HTML", message_thread_id=thread_id,
+        **kwargs,
     )
 
 
@@ -442,11 +445,10 @@ def _cmd_horoscopo(bot, message, args: str, chat_id: int, thread_id) -> None:
         max_tokens=200,
     ) or "Las estrellas están en mantenimiento. Vuelve mañana."
 
-    bot.send_message(
-        chat_id,
-        f"🔮 <b>Horóscopo de Juan — {signo}</b>\n<i>{hoy}</i>\n\n{texto}",
-        parse_mode="HTML", message_thread_id=thread_id,
-    )
+    kwargs = {"parse_mode": "HTML"}
+    if thread_id:
+        kwargs["message_thread_id"] = thread_id
+    bot.send_message(chat_id, f"🔮 <b>Horóscopo de Juan — {signo}</b>\n<i>{hoy}</i>\n\n{texto}", **kwargs)
 
 
 def _cmd_top(bot, message, chat_id: int, thread_id) -> None:
@@ -593,7 +595,7 @@ def _verificar_aniversarios(bot) -> None:
                 if JUAN_THREAD_ANUNCIOS:
                     kwargs["message_thread_id"] = JUAN_THREAD_ANUNCIOS
 
-                bot.send_message(JUAN_CANAL_ANUNCIOS, texto, **kwargs)
+                bot.send_message(CANAL_ID, texto, **kwargs)
                 logger.info(f"[JUAN] Aniversario enviado: {nombre} ({anos} años)")
 
             except Exception as e:
@@ -644,14 +646,21 @@ def setup_juan_handler(bot) -> None:
             cmd    = partes[0].lower()
             args   = partes[1].strip() if len(partes) > 1 else ""
 
-            if cmd == "!pregunta":
-                _cmd_pregunta(bot, message, chat_id, thread_id)
-            elif cmd == "!shipear":
-                _cmd_shipear(bot, message, args, chat_id, thread_id)
-            elif cmd in ("!horoscopo", "!horóscopo"):
-                _cmd_horoscopo(bot, message, args, chat_id, thread_id)
-            elif cmd == "!top":
-                _cmd_top(bot, message, chat_id, thread_id)
+            try:
+                if cmd in ("!pregunta", "!trivia", "!quiz"):
+                    _cmd_pregunta(bot, message, chat_id, thread_id)
+                elif cmd in ("!shipear", "!ship"):
+                    _cmd_shipear(bot, message, args, chat_id, thread_id)
+                elif cmd in ("!horoscopo", "!horóscopo", "!horo"):
+                    _cmd_horoscopo(bot, message, args, chat_id, thread_id)
+                elif cmd in ("!top", "!ranking"):
+                    _cmd_top(bot, message, chat_id, thread_id)
+            except Exception as e:
+                logger.error(f"[JUAN] Error en comando {cmd}: {e}", exc_info=True)
+                try:
+                    bot.reply_to(message, "Algo salió mal. Intenta de nuevo.")
+                except Exception:
+                    pass
 
             try:
                 _procesar_aprendizaje_texto(message)
