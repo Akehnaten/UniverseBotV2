@@ -167,7 +167,7 @@ class PhotocardsService:
                     continue
                 archivos = sorted(
                     f for f in os.listdir(ruta)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".mp4"))
                 )
                 for archivo in archivos:
                     nombre   = os.path.splitext(archivo)[0].capitalize()
@@ -290,7 +290,7 @@ class PhotocardsService:
                     continue
                 archivos = sorted(
                     f for f in os.listdir(ruta)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg"))
+                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".mp4"))
                 )
                 for archivo in archivos:
                     nombre = os.path.splitext(archivo)[0].capitalize()
