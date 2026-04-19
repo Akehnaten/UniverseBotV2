@@ -449,17 +449,27 @@ def _cmd_pregunta(bot, message, chat_id: int, thread_id) -> None:
     como encuesta nativa de Telegram (open_period=30s, anónima).
     Telegram cierra y muestra resultados automáticamente — sin tokens extra.
     """
+    _TEMAS = [
+        "cultura pop", "historia mundial", "ciencia y tecnología",
+        "geografía", "deportes", "cine y series", "música",
+        "videojuegos", "animales", "comida del mundo",
+        "mitología", "espacio y astronomía",
+    ]
+    tema = random.choice(_TEMAS)
+    seed = random.randint(1, 99999)
+
     raw = _groq_simple(
-        "Genera una pregunta de trivia con exactamente 4 opciones. "
-        "Una sola es correcta. Formato EXACTO (sin texto extra):\n"
+        f"Genera una pregunta de trivia ORIGINAL sobre {tema} (seed={seed}). "
+        "Con exactamente 4 opciones, una sola correcta. Formato EXACTO (sin texto extra):\n"
         "PREGUNTA: [la pregunta]\n"
         "A: [opción correcta]\n"
         "B: [opción incorrecta]\n"
         "C: [opción incorrecta]\n"
         "D: [opción incorrecta]\n"
         "CORRECTA: A\n"
-        "Temas: cultura pop, historia, ciencia, geografía, deportes. Español neutro.",
+        "Español neutro. NO uses las preguntas más típicas del tema.",
         max_tokens=200,
+        temperature=1.0,
     )
 
     if not raw:
