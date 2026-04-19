@@ -34,8 +34,24 @@ class Photocard:
         self.album  = album
         self.path   = path
 
+    @property
+    def es_video(self) -> bool:
+        """True si la carta es un video (.mp4)."""
+        return self.path.lower().endswith(".mp4")
+
+    @property
+    def nombre_display(self) -> str:
+        """Nombre limpio: sin prefijo del album ni numeros finales."""
+        import re
+        nombre = self.nombre
+        prefijo = re.escape(self.album.capitalize())
+        nombre = re.sub(rf"^{prefijo}_?", "", nombre, flags=re.IGNORECASE)
+        nombre = re.sub(r"\d+$", "", nombre)
+        nombre = nombre.strip("_ ").replace("_", " ").strip()
+        return nombre.capitalize() if nombre else self.nombre
+
     def __str__(self) -> str:
-        return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre}"
+        return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre_display}"
 
 
 class PhotocardsService:
