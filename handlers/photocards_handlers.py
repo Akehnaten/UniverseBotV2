@@ -6,6 +6,8 @@ Solo el dueño del mensaje puede usar los botones.
 
 from __future__ import annotations
 
+import io
+import os
 import logging
 from typing import List, Optional
 
@@ -387,37 +389,63 @@ class PhotocardsHandlers:
         thread_id = getattr(call.message, "message_thread_id", None)
         chat_id   = call.message.chat.id
 
+        MAX_PHOTO_BYTES = 9 * 1024 * 1024  # 9MB — margen bajo el límite de 10MB de Telegram
+
         try:
-            with open(pc.path, "rb") as media:
-                if pc.es_video:
+            if pc.es_video:
+                with open(pc.path, "rb") as media:
                     self.bot.send_video(
                         chat_id, media,
                         caption=caption, parse_mode="HTML",
                         reply_markup=markup, message_thread_id=thread_id,
                         supports_streaming=True,
                     )
-                else:
-                    try:
+            else:
+                file_size = os.path.getsize(pc.path)
+
+                if file_size <= MAX_PHOTO_BYTES:
+                    # Imagen pequeña: enviar directamente como foto
+                    with open(pc.path, "rb") as media:
                         self.bot.send_photo(
                             chat_id, media,
                             caption=caption, parse_mode="HTML",
                             reply_markup=markup, message_thread_id=thread_id,
                         )
-                    except Exception as photo_exc:
-                        # send_photo falla con imágenes de alta resolución
-                        # (Telegram rechaza si ancho+alto > 10.000px).
-                        # Fallback: send_document — sin límite de dimensiones,
-                        # la imagen se ve completa al tocarla.
-                        logger.warning(
-                            f"send_photo falló para '{pc.nombre}' ({photo_exc}), "
-                            f"reintentando como documento..."
+                else:
+                    # Imagen grande: comprimir en memoria hasta < 9MB
+                    try:
+                        from PIL import Image
+                        img = Image.open(pc.path).convert("RGB")
+
+                        # Redimensionar si algún lado supera 2560px
+                        img.thumbnail((2560, 2560), Image.LANCZOS)
+
+                        buf = io.BytesIO()
+                        quality = 90
+                        while True:
+                            buf.seek(0)
+                            buf.truncate()
+                            img.save(buf, format="JPEG", quality=quality, optimize=True)
+                            if buf.tell() <= MAX_PHOTO_BYTES or quality <= 40:
+                                break
+                            quality -= 10
+
+                        buf.seek(0)
+                        logger.info(
+                            f"[PC] '{pc.nombre}' comprimida de "
+                            f"{file_size/1024/1024:.1f}MB → "
+                            f"{buf.tell()/1024/1024:.1f}MB (quality={quality})"
                         )
-                        media.seek(0)
-                        self.bot.send_document(
-                            chat_id, media,
+                        self.bot.send_photo(
+                            chat_id, buf,
                             caption=caption, parse_mode="HTML",
                             reply_markup=markup, message_thread_id=thread_id,
                         )
+                    except ImportError:
+                        logger.error("[PC] Pillow no instalado — pip install Pillow")
+                        self._edit(call, "❌ Error: instalar Pillow en el servidor.", markup)
+                        return
+
             self._delete(chat_id, call.message.message_id)
         except FileNotFoundError:
             logger.warning(f"Archivo no encontrado: {pc.path}")
