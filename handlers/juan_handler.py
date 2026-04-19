@@ -106,6 +106,74 @@ _EXCUSAS = [
 ]
 
 
+# ── DB Ships ─────────────────────────────────────────────────────────────────
+
+def _crear_tabla_ships() -> None:
+    """Crea JUAN_SHIPS si no existe. Idempotente."""
+    try:
+        db_manager.execute_update(
+            """CREATE TABLE IF NOT EXISTS JUAN_SHIPS (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                clave       TEXT    UNIQUE,
+                nombre1     TEXT,
+                nombre2     TEXT,
+                porcentaje  INTEGER,
+                nivel       TEXT,
+                comentario  TEXT,
+                fecha       TEXT
+            )"""
+        )
+    except Exception as e:
+        logger.warning(f"[JUAN] _crear_tabla_ships: {e}")
+
+
+def _clave_ship(a: str, b: str) -> str:
+    """Clave canónica del ship: los dos nombres ordenados y en minúsculas."""
+    return "|".join(sorted([a.lower().strip(), b.lower().strip()]))
+
+
+def _buscar_ship(clave: str) -> dict | None:
+    """Devuelve el ship guardado o None si es nuevo."""
+    try:
+        rows = db_manager.execute_query(
+            "SELECT * FROM JUAN_SHIPS WHERE clave = ?", (clave,)
+        ) or []
+        return dict(rows[0]) if rows else None
+    except Exception:
+        return None
+
+
+def _guardar_ship(clave: str, nombre1: str, nombre2: str,
+                  porcentaje: int, nivel: str, comentario: str) -> None:
+    try:
+        from datetime import date
+        db_manager.execute_update(
+            """INSERT OR REPLACE INTO JUAN_SHIPS
+               (clave, nombre1, nombre2, porcentaje, nivel, comentario, fecha)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (clave, nombre1, nombre2, porcentaje, nivel, comentario,
+             date.today().isoformat()),
+        )
+    except Exception as e:
+        logger.warning(f"[JUAN] _guardar_ship: {e}")
+
+
+def _buscar_miembro(texto: str) -> dict | None:
+    """
+    Busca en JUAN_MIEMBROS por nombre o username (case-insensitive).
+    Devuelve el dict del miembro o None si no está registrado.
+    """
+    try:
+        t = texto.lower().strip().lstrip("@")
+        rows = db_manager.execute_query(
+            "SELECT * FROM JUAN_MIEMBROS WHERE LOWER(nombre)=? OR LOWER(username)=?",
+            (t, t),
+        ) or []
+        return dict(rows[0]) if rows else None
+    except Exception:
+        return None
+
+
 # ── Helpers de texto ──────────────────────────────────────────────────────────
 
 def _detectar_categoria(texto: str) -> str | None:
@@ -376,30 +444,148 @@ def _groq_simple(prompt: str, max_tokens: int = 200, temperature: float = 0.9) -
 
 
 def _cmd_pregunta(bot, message, chat_id: int, thread_id) -> None:
-    texto = _groq_simple(
-        "Genera una pregunta de trivia interesante. Formato exacto:\n"
-        "PREGUNTA: [pregunta]\nRESPUESTA: [respuesta]\n"
-        "Que sea divertida: cultura pop, historia, ciencia o cualquier tema. Español neutro.",
-        max_tokens=180,
+    """
+    Genera una pregunta de trivia con 4 opciones usando Groq y la envía
+    como encuesta nativa de Telegram (open_period=30s, anónima).
+    Telegram cierra y muestra resultados automáticamente — sin tokens extra.
+    """
+    raw = _groq_simple(
+        "Genera una pregunta de trivia con exactamente 4 opciones. "
+        "Una sola es correcta. Formato EXACTO (sin texto extra):\n"
+        "PREGUNTA: [la pregunta]\n"
+        "A: [opción correcta]\n"
+        "B: [opción incorrecta]\n"
+        "C: [opción incorrecta]\n"
+        "D: [opción incorrecta]\n"
+        "CORRECTA: A\n"
+        "Temas: cultura pop, historia, ciencia, geografía, deportes. Español neutro.",
+        max_tokens=200,
     )
-    if texto:
-        kwargs = {"parse_mode": "HTML"}
+
+    if not raw:
+        bot.reply_to(message, "Se me fue la pregunta de la cabeza. Intenta de nuevo.")
+        return
+
+    # ── Parsear la respuesta de Groq ──────────────────────────────────────────
+    try:
+        lines = {
+            l.split(":", 1)[0].strip().upper(): l.split(":", 1)[1].strip()
+            for l in raw.splitlines()
+            if ":" in l
+        }
+        pregunta  = lines.get("PREGUNTA", "").strip()
+        opciones  = [
+            lines.get("A", "Opción A"),
+            lines.get("B", "Opción B"),
+            lines.get("C", "Opción C"),
+            lines.get("D", "Opción D"),
+        ]
+        correcta_letra = lines.get("CORRECTA", "A").strip().upper()
+        idx_correcta   = {"A": 0, "B": 1, "C": 2, "D": 3}.get(correcta_letra, 0)
+
+        if not pregunta or any(not o for o in opciones):
+            raise ValueError("Parseo incompleto")
+
+    except Exception as e:
+        logger.warning(f"[JUAN] !pregunta parseo falló: {e} | raw: {raw[:100]}")
+        bot.reply_to(message, "La pregunta me salió rara. Intenta de nuevo.")
+        return
+
+    # ── Mezclar opciones (para que la correcta no siempre sea la A) ───────────
+    import random as _rnd
+    indices = list(range(4))
+    _rnd.shuffle(indices)
+    opciones_mezcladas = [opciones[i] for i in indices]
+    # Encontrar dónde quedó la opción correcta después del shuffle
+    idx_correcta_final = indices.index(idx_correcta)
+
+    # ── Enviar encuesta nativa ────────────────────────────────────────────────
+    try:
+        kwargs = {
+            "question":             f"🧠 {pregunta}",
+            "options":              opciones_mezcladas,
+            "type":                 "quiz",
+            "correct_option_id":    idx_correcta_final,
+            "is_anonymous":         True,
+            "open_period":          30,
+            "explanation":          "Pregunta generada por Juan 🐴",
+        }
         if thread_id:
             kwargs["message_thread_id"] = thread_id
-        bot.send_message(chat_id, f"🧠 <b>Pregunta de Juan</b>\n\n{texto}", **kwargs)
-    else:
-        bot.reply_to(message, "Se me fue la pregunta de la cabeza. Intenta de nuevo.")
+
+        bot.send_poll(chat_id, **kwargs)
+        logger.info(f"[JUAN] Poll enviado en chat={chat_id}")
+
+    except Exception as e:
+        logger.error(f"[JUAN] send_poll falló: {e}")
+        # Fallback: mostrar como texto si el poll falla
+        letras = ["A", "B", "C", "D"]
+        texto_fb = f"🧠 <b>{pregunta}</b>\n\n"
+        for i, op in enumerate(opciones_mezcladas):
+            marca = " ✅" if i == idx_correcta_final else ""
+            texto_fb += f"{letras[i]}) {op}{marca}\n"
+        msg_kwargs = {"parse_mode": "HTML"}
+        if thread_id:
+            msg_kwargs["message_thread_id"] = thread_id
+        bot.send_message(chat_id, texto_fb, **msg_kwargs)
 
 
 def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
+    # Extraer los dos argumentos
     partes = re.findall(r'@?\w+', args)
     partes = [p for p in partes if p.lower() not in ("shipear", "ship")]
     if len(partes) < 2:
-        bot.reply_to(message, "Necesito dos personas para shipear. Ejemplo: !shipear @Ana @Luis")
+        bot.reply_to(message, "Necesito dos personas para shipear. Ejemplo: !ship @Ana @Luis")
         return
 
-    p1  = partes[0].lstrip("@")
-    p2  = partes[1].lstrip("@")
+    raw1 = partes[0].lstrip("@")
+    raw2 = partes[1].lstrip("@")
+
+    # ── Validar que ambos están en JUAN_MIEMBROS ──────────────────────────────
+    m1 = _buscar_miembro(raw1)
+    m2 = _buscar_miembro(raw2)
+
+    desconocidos = []
+    if not m1:
+        desconocidos.append(f"@{raw1}" if not raw1.startswith("@") else raw1)
+    if not m2:
+        desconocidos.append(f"@{raw2}" if not raw2.startswith("@") else raw2)
+
+    if desconocidos:
+        nombres = " y ".join(desconocidos)
+        bot.reply_to(
+            message,
+            f"No puedo shipear a {nombres} porque no los conozco. "
+            f"Que un admin los registre primero con /juanagregar. 🐴"
+        )
+        return
+
+    # Usar los nombres oficiales guardados en JUAN_MIEMBROS
+    nombre1 = m1["nombre"]
+    nombre2 = m2["nombre"]
+
+    # ── Buscar ship existente (orden no importa) ──────────────────────────────
+    clave = _clave_ship(nombre1, nombre2)
+    ship  = _buscar_ship(clave)
+
+    if ship:
+        # Ship ya analizado: devolver el mismo veredicto
+        footer = "\n<i>(Este veredicto ya fue sellado por el destino. No hay vuelta atrás.)</i>"
+        kwargs = {"parse_mode": "HTML"}
+        if thread_id:
+            kwargs["message_thread_id"] = thread_id
+        bot.send_message(
+            chat_id,
+            f"💘 <b>Ship Meter</b>\n\n"
+            f"<b>{ship['nombre1']}</b> + <b>{ship['nombre2']}</b>\n"
+            f"Compatibilidad: <b>{ship['porcentaje']}%</b> — {ship['nivel']}\n\n"
+            f"<i>{ship['comentario']}</i>"
+            f"{footer}",
+            **kwargs,
+        )
+        return
+
+    # ── Ship nuevo: generar y guardar ─────────────────────────────────────────
     pct = random.randint(1, 100)
 
     niveles = [
@@ -413,10 +599,13 @@ def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
     nivel = next((v for r, v in niveles if pct in r), "🤷")
 
     comentario = _groq_simple(
-        f"Analiza la compatibilidad entre {p1} y {p2} con un {pct}% de compatibilidad. "
+        f"Analiza la compatibilidad entre {nombre1} y {nombre2} "
+        f"con un {pct}% de compatibilidad. "
         "Sé creativo, gracioso y un poco dramático. Máximo 3 líneas. Español neutro.",
         max_tokens=120, temperature=0.95,
     ) or "El oráculo ecuestre ha hablado."
+
+    _guardar_ship(clave, nombre1, nombre2, pct, nivel, comentario)
 
     kwargs = {"parse_mode": "HTML"}
     if thread_id:
@@ -424,7 +613,7 @@ def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
     bot.send_message(
         chat_id,
         f"💘 <b>Ship Meter</b>\n\n"
-        f"<b>{p1}</b> + <b>{p2}</b>\n"
+        f"<b>{nombre1}</b> + <b>{nombre2}</b>\n"
         f"Compatibilidad: <b>{pct}%</b> — {nivel}\n\n"
         f"<i>{comentario}</i>",
         **kwargs,
@@ -626,6 +815,7 @@ def _scheduler_aniversarios(bot) -> None:
 def setup_juan_handler(bot) -> None:
     """Registra todos los handlers y arranca el scheduler de aniversarios."""
 
+    _crear_tabla_ships()
     _scheduler_aniversarios(bot)
 
     # ── 1. Texto (unificado: comandos ! + conversación + aprendizaje pasivo) ──
