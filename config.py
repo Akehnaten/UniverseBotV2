@@ -119,6 +119,8 @@ GROQ_API_KEY = "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"
 # Username del bot en Telegram (sin arroba), para detectar menciones
 BOT_USERNAME = "universeMaster_bot"
 
+JUAN_THREAD_ANUNCIOS = 938  # Reemplaza con el ID real del topic de anuncios
+
 # Probabilidad de que Juan salte por una palabra clave (0.05 = 5%)
 JUAN_PROBABILIDAD_RANDOM = 0.05
 

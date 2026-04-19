@@ -24,7 +24,8 @@ from config import (
     BOT_USERNAME,
     JUAN_PROBABILIDAD_RANDOM,
     JUAN_PALABRAS_CLAVE,
-    CANAL_ID,
+    JUAN_CANAL_ANUNCIOS,
+    JUAN_THREAD_ANUNCIOS,
 )
 from utils.thread_utils import get_thread_id
 from database import db_manager
@@ -490,8 +491,11 @@ def _cmd_top(bot, message, chat_id: int, thread_id) -> None:
 def _verificar_aniversarios(bot) -> None:
     """
     Revisa USUARIOS buscando quién cumple aniversario de entrada hoy
-    y envía un mensaje al canal principal.
+    y envía un mensaje decorado al canal de anuncios configurado.
     """
+    MEDALLAS = {1: "🥇", 2: "🥈", 3: "🥉"}
+    BANDERAS  = ["🎊","🎉","✨","🌟","💫","🎈","🎀","🏆","👑","💎"]
+
     try:
         hoy = date.today()
         rows = db_manager.execute_query(
@@ -519,16 +523,21 @@ def _verificar_aniversarios(bot) -> None:
                 if fecha_reg.year == hoy.year:
                     continue  # primer día, no es aniversario
 
-                anos = hoy.year - fecha_reg.year
+                anos  = hoy.year - fecha_reg.year
                 nombre   = row.get("nombre") or row.get("nombre_usuario") or "alguien"
                 user_id  = row.get("userID") or row.get("userid")
                 username = row.get("nombre_usuario") or ""
 
-                # Buscar interacción memorable en JUAN_APRENDIZAJE
+                # Ícono según años
+                icono_anos = MEDALLAS.get(anos, "🌟")
+                bandera    = random.choice(BANDERAS)
+
+                # Buscar interacción memorable
                 recuerdo = ""
                 try:
                     frases = db_manager.execute_query(
-                        "SELECT frase FROM JUAN_APRENDIZAJE WHERE autor = ? AND frase NOT LIKE 'sticker::%' LIMIT 20",
+                        "SELECT frase FROM JUAN_APRENDIZAJE "
+                        "WHERE autor = ? AND frase NOT LIKE 'sticker::%' LIMIT 20",
                         (nombre,),
                     ) or []
                     if frases:
@@ -536,41 +545,56 @@ def _verificar_aniversarios(bot) -> None:
                 except Exception:
                     pass
 
+                # Prompt para Groq
                 prompt = (
                     f"Hoy es el aniversario de {nombre} en el servidor. "
-                    f"Lleva exactamente {anos} año{'s' if anos != 1 else ''} con nosotros. "
+                    f"Lleva exactamente {anos} año{'s' if anos != 1 else ''} con esta comunidad. "
                 )
                 if recuerdo:
-                    prompt += f"Una vez dijo: '{recuerdo}'. Recuérdalo de forma nostálgica. "
+                    prompt += (
+                        f"Un momento que recuerdo de él/ella: '{recuerdo}'. "
+                        "Mencionalo de forma nostálgica y cariñosa en el mensaje. "
+                    )
                 prompt += (
-                    "Escribe un mensaje emotivo y con gracia celebrando su aniversario. "
-                    "Agradece los momentos compartidos y hazlo sentir especial. "
-                    "Máximo 4 líneas. Español neutro."
+                    "Escribe un mensaje de aniversario emotivo, cálido y especial. "
+                    "No es un cumpleaños, es el aniversario de su llegada al servidor. "
+                    "Expresa gratitud por los momentos compartidos, recuerda algo bonito "
+                    "y hazlo sentir parte de la familia. Máximo 4 líneas. Español neutro."
                 )
 
-                mensaje_groq = _groq_simple(prompt, max_tokens=220, temperature=0.9)
-                if not mensaje_groq:
-                    mensaje_groq = (
-                        f"¡{anos} año{'s' if anos != 1 else ''} con nosotros! "
-                        "Eso merece un reconocimiento. 🐴"
+                cuerpo = _groq_simple(prompt, max_tokens=250, temperature=0.9)
+                if not cuerpo:
+                    cuerpo = (
+                        f"Un año más de momentos, risas y locuras juntos. "
+                        f"Gracias por ser parte de esto. 🐴"
                     )
 
+                # Mención
                 if username:
                     mencion = f"@{username}"
                 elif user_id:
                     mencion = f'<a href="tg://user?id={user_id}">{nombre}</a>'
                 else:
-                    mencion = nombre
+                    mencion = f"<b>{nombre}</b>"
 
-                bot.send_message(
-                    CANAL_ID,
-                    f"🎂 <b>¡Aniversario en el servidor!</b>\n\n"
-                    f"Hoy {mencion} cumple <b>{anos} año{'s' if anos != 1 else ''}</b> "
-                    f"con nosotros. 🎉\n\n"
-                    f"{mensaje_groq}",
-                    parse_mode="HTML",
+                # Texto decorado
+                separador = "· ─────────────────── ·"
+                texto = (
+                    f"{bandera}{bandera}{bandera} <b>ANIVERSARIO EN EL SERVIDOR</b> {bandera}{bandera}{bandera}\n"
+                    f"{separador}\n\n"
+                    f"{icono_anos} {mencion}\n"
+                    f"<b>{anos} año{'s' if anos != 1 else ''} con nosotros</b>\n\n"
+                    f"<i>{cuerpo}</i>\n\n"
+                    f"{separador}\n"
+                    f"<i>— con cariño, Juan 🐴</i>"
                 )
-                logger.info(f"[JUAN] Aniversario: {nombre} ({anos} años)")
+
+                kwargs = {"parse_mode": "HTML"}
+                if JUAN_THREAD_ANUNCIOS:
+                    kwargs["message_thread_id"] = JUAN_THREAD_ANUNCIOS
+
+                bot.send_message(JUAN_CANAL_ANUNCIOS, texto, **kwargs)
+                logger.info(f"[JUAN] Aniversario enviado: {nombre} ({anos} años)")
 
             except Exception as e:
                 logger.warning(f"[JUAN] Error aniversario {row}: {e}")

@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 COSTO_SOBRE: int = 500
 
+# Probabilidad de God Pack (todas legendarias). 0.003 = 0.3% ≈ 1 en 333 sobres.
+PROB_GOD_PACK: float = 0.003
+
 
 class Photocard:
     _EMOJI: Dict[str, str] = {"comun": "⚪", "rara": "🔵", "legendaria": "🟡"}
@@ -31,35 +34,8 @@ class Photocard:
         self.album  = album
         self.path   = path
 
-    @property
-    def es_video(self) -> bool:
-        """True si la carta es un video (.mp4)."""
-        return self.path.lower().endswith(".mp4")
-
-    @property
-    def nombre_display(self) -> str:
-        """
-        Nombre limpio para mostrar al usuario.
-        Elimina el prefijo del album y los numeros finales.
-        Ejemplos:
-          Pokemon_lisa2   -> Lisa
-          Pokemon_nayeon2 -> Nayeon
-          Jisoo           -> Jisoo  (sin cambios si no hay prefijo)
-        """
-        import re
-        nombre = self.nombre
-        # Quitar prefijo del album (case-insensitive) seguido de guion bajo
-        prefijo = re.escape(self.album.capitalize())
-        nombre = re.sub(rf"^{prefijo}_?", "", nombre, flags=re.IGNORECASE)
-        # Quitar numeros del final
-        nombre = re.sub(r"\d+$", "", nombre)
-        # Limpiar guiones bajos y espacios sobrantes
-        nombre = nombre.strip("_ ").replace("_", " ").strip()
-        # Si quedo vacio, usar el nombre original
-        return nombre.capitalize() if nombre else self.nombre
-
     def __str__(self) -> str:
-        return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre_display}"
+        return f"{self._EMOJI.get(self.rareza, '')} [#{self.id}] {self.nombre}"
 
 
 class PhotocardsService:
@@ -175,7 +151,7 @@ class PhotocardsService:
                     continue
                 archivos = sorted(
                     f for f in os.listdir(ruta)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".mp4"))
+                    if f.lower().endswith((".png", ".jpg", ".jpeg"))
                 )
                 for archivo in archivos:
                     nombre   = os.path.splitext(archivo)[0].capitalize()
@@ -298,7 +274,7 @@ class PhotocardsService:
                     continue
                 archivos = sorted(
                     f for f in os.listdir(ruta)
-                    if f.lower().endswith((".png", ".jpg", ".jpeg", ".mp4"))
+                    if f.lower().endswith((".png", ".jpg", ".jpeg"))
                 )
                 for archivo in archivos:
                     nombre = os.path.splitext(archivo)[0].capitalize()
@@ -464,28 +440,58 @@ class PhotocardsService:
     # SOBRES
     # ══════════════════════════════════════════════════════════════════════════
 
-    def abrir_sobre(self, user_id: int, album: str, cantidad: int = 5) -> Tuple[bool, str, List[Photocard]]:
+    def abrir_sobre(
+        self, user_id: int, album: str, cantidad: int = 5
+    ) -> Tuple[bool, str, List[Photocard], bool]:
+        """
+        Abre un sobre.
+        Retorna (exito, mensaje, cartas, god_pack).
+        god_pack=True significa que todas las cartas son legendarias (evento raro).
+        """
         if album not in self.config_albums or album not in self.biblioteca:
-            return False, "Álbum no disponible.", []
-        weights  = self.config_albums[album].get("weights", [80, 19, 1])
+            return False, "Álbum no disponible.", [], False
+
         nombre_a = self.config_albums[album]["name"]
+        pool_leg = self.biblioteca[album].get("legendaria", [])
+
+        # ── Tirar God Pack ────────────────────────────────────────────────────
+        god_pack = (
+            len(pool_leg) > 0
+            and random.random() < PROB_GOD_PACK
+        )
+
         obtenidas: List[Photocard] = []
         try:
-            for _ in range(cantidad):
-                rareza = random.choices(list(self.RAREZAS), weights=weights)[0]
-                pool   = self.biblioteca[album][rareza]
-                if not pool:
-                    continue
-                carta = random.choice(pool)
-                obtenidas.append(carta)
-                self.agregar_photocard(user_id, carta.id, 1)
+            if god_pack:
+                # Todas las cartas son legendarias (con repetición permitida)
+                for _ in range(cantidad):
+                    carta = random.choice(pool_leg)
+                    obtenidas.append(carta)
+                    self.agregar_photocard(user_id, carta.id, 1)
+            else:
+                weights = self.config_albums[album].get("weights", [80, 19, 1])
+                for _ in range(cantidad):
+                    rareza = random.choices(list(self.RAREZAS), weights=weights)[0]
+                    pool   = self.biblioteca[album][rareza]
+                    if not pool:
+                        continue
+                    carta = random.choice(pool)
+                    obtenidas.append(carta)
+                    self.agregar_photocard(user_id, carta.id, 1)
+
             if not obtenidas:
-                return False, "No se encontraron cartas.", []
-            lineas  = "\n".join(str(c) for c in obtenidas)
-            return True, f"📦 ¡Abriste un sobre de {nombre_a}!\n\n{lineas}", obtenidas
+                return False, "No se encontraron cartas.", [], False
+
+            lineas = "\n".join(str(c) for c in obtenidas)
+            if god_pack:
+                msg = f"✨ ¡GOD PACK de {nombre_a}!\n\n{lineas}"
+            else:
+                msg = f"📦 ¡Abriste un sobre de {nombre_a}!\n\n{lineas}"
+            return True, msg, obtenidas, god_pack
+
         except Exception as exc:
             logger.error(f"❌ abrir_sobre: {exc}")
-            return False, f"Error: {exc}", []
+            return False, f"Error: {exc}", [], False
 
     def obtener_albums_disponibles(self) -> List[Dict]:
         return [

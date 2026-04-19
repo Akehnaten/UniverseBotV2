@@ -232,23 +232,36 @@ class PhotocardsHandlers:
         if not economy_service.subtract_credits(uid, COSTO_SOBRE, "Apertura sobre photocards"):
             self._edit(call, "❌ Error al descontar cosmos.", volver)
             return
-        exito, _, cartas = photocards_service.abrir_sobre(uid, album_key)
+        resultado = photocards_service.abrir_sobre(uid, album_key)
+        exito, _, cartas = resultado[0], resultado[1], resultado[2]
+        god_pack = resultado[3] if len(resultado) > 3 else False
         if not exito or not cartas:
             economy_service.add_credits(uid, COSTO_SOBRE, "Reembolso sobre fallido")
             self._edit(call, "❌ Error al abrir el sobre. Cosmos reembolsados.", volver)
             return
         nombre_album = photocards_service.config_albums.get(album_key, {}).get("name", album_key)
-        lineas = [f"{RAREZA_EMOJI.get(c.rareza,'⚪')} <b>{c.nombre}</b> — {c.rareza.capitalize()}" for c in cartas]
+        lineas = [f"{RAREZA_EMOJI.get(c.rareza,'⚪')} <b>{c.nombre_display}</b> — {c.rareza.capitalize()}" for c in cartas]
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
             types.InlineKeyboardButton("📦 Otro sobre",   callback_data=f"pc_abrir:{uid}:{album_key}"),
             types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
         )
         markup.add(types.InlineKeyboardButton("⬅️ Menú", callback_data=f"pc_menu:{uid}"))
-        self._edit(call,
-            f"🎉 <b>¡Sobre de {nombre_album} abierto!</b>\n"
-            f"💰 Saldo restante: <b>{economy_service.get_balance(uid)} cosmos</b>\n\n"
-            "🃏 <b>Cartas obtenidas:</b>\n" + "\n".join(lineas), markup)
+
+        if god_pack:
+            encabezado = (
+                f"✨✨✨ <b>¡GOD PACK!</b> ✨✨✨\n"
+                f"<i>Conseguiste un sobre completamente legendario</i>\n"
+                f"💰 Saldo: <b>{economy_service.get_balance(uid)} cosmos</b>\n\n"
+                f"🟡 <b>Cartas legendarias obtenidas:</b>\n"
+            )
+        else:
+            encabezado = (
+                f"🎉 <b>¡Sobre de {nombre_album} abierto!</b>\n"
+                f"💰 Saldo restante: <b>{economy_service.get_balance(uid)} cosmos</b>\n\n"
+                f"🃏 <b>Cartas obtenidas:</b>\n"
+            )
+        self._edit(call, encabezado + "\n".join(lineas), markup)
 
     # ── mi colección ──────────────────────────────────────────────────────────
 
