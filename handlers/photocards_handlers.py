@@ -326,7 +326,7 @@ class PhotocardsHandlers:
             else:
                 emoji = RAREZA_EMOJI.get(pc.rareza, "⚪")
                 fila.append(types.InlineKeyboardButton(
-                    f"{emoji} {pc.nombre} ×{cant}",
+                    f"{emoji} {pc.nombre_display} ×{cant}",
                     callback_data=f"pc_carta:{uid}:{cid}",
                 ))
             if len(fila) == COLUMNAS:
@@ -369,7 +369,7 @@ class PhotocardsHandlers:
         emoji        = RAREZA_EMOJI.get(pc.rareza, "⚪")
 
         caption = (
-            f"{emoji} <b>{pc.nombre}</b>\n"
+            f"{emoji} <b>{pc.nombre_display}</b>\n"
             f"📀 Álbum: <b>{nombre_album}</b>  ·  ✨ <b>{pc.rareza.capitalize()}</b>\n"
             f"🔢 Cantidad: <b>{cantidad}</b>  ·  💰 <b>{precio_unit} cosmos</b> c/u"
         )
@@ -464,7 +464,7 @@ class PhotocardsHandlers:
             return
         exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, cantidad)
         pc     = photocards_service.get_carta_by_id(carta_id)
-        nombre = pc.nombre if pc else f"#{carta_id}"
+        nombre = pc.nombre_display if pc else f"#{carta_id}"
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
@@ -479,7 +479,7 @@ class PhotocardsHandlers:
         self._answer(call)
         cantidad = photocards_service.get_cantidad_carta(uid, carta_id)
         pc       = photocards_service.get_carta_by_id(carta_id)
-        nombre   = pc.nombre if pc else f"#{carta_id}"
+        nombre   = pc.nombre_display if pc else f"#{carta_id}"
         markup   = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
@@ -491,7 +491,24 @@ class PhotocardsHandlers:
         vender = cantidad - 1
         exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, vender)
         if exito:
-            self._edit(call, f"✅ Liquidaste <b>{vender} copia(s) de {nombre}</b> — te quedás con 1.\n💰 +<b>{cosmos} cosmos</b>  |  Saldo: <b>{economy_service.get_balance(uid)}</b>", markup)
+            precio_unit = photocards_service.precios_venta.get(pc.rareza, 2) if pc else 0
+            emoji       = RAREZA_EMOJI.get(pc.rareza, "⚪") if pc else "⚪"
+            markup_ok   = types.InlineKeyboardMarkup(row_width=1)
+            markup_ok.add(
+                types.InlineKeyboardButton("🃏 Ver carta",     callback_data=f"pc_carta:{uid}:{carta_id}"),
+                types.InlineKeyboardButton("🗂️ Mi Colección",  callback_data=f"pc_coleccion:{uid}"),
+                types.InlineKeyboardButton("⬅️ Menú",           callback_data=f"pc_menu:{uid}"),
+            )
+            self._edit(
+                call,
+                f"✅ <b>Repetidas liquidadas</b>\n\n"
+                f"{emoji} <b>{nombre}</b>\n"
+                f"🗑️ Vendidas: <b>×{vender}</b>  ·  {precio_unit} cosmos c/u\n"
+                f"💰 Ganaste: <b>+{cosmos} cosmos</b>\n"
+                f"📦 Te quedás con: <b>×1</b>\n\n"
+                f"💳 Saldo: <b>{economy_service.get_balance(uid)} cosmos</b>",
+                markup_ok,
+            )
         else:
             self._edit(call, f"❌ {msg}", markup)
 
