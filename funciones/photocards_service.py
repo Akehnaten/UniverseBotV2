@@ -436,6 +436,14 @@ class PhotocardsService:
             return False, "Carta no encontrada.", 0
         precio_unit  = self.precios_venta.get(carta.rareza, 2)
         cosmos_total = precio_unit * cantidad
+        # Bonus VIP +25%
+        try:
+            from database import db_manager as _db
+            _row = _db.execute_query("SELECT nickname FROM USUARIOS WHERE userID = ?", (user_id,))
+            if _row and str(_row[0]["nickname"]).upper() == "VIP":
+                cosmos_total = round(cosmos_total * 1.25)
+        except Exception:
+            pass
         try:
             self.db.execute_update(
                 "UPDATE INVENTARIOS SET cantidad = cantidad - ? WHERE userID = ? AND cartaID = ?",
@@ -470,10 +478,18 @@ class PhotocardsService:
         nombre_a = self.config_albums[album]["name"]
         pool_leg = self.biblioteca[album].get("legendaria", [])
 
-        # ── Tirar God Pack ────────────────────────────────────────────────────
+        # ── Tirar God Pack (VIP duplica la probabilidad) ──────────────────────
+        prob_gp = PROB_GOD_PACK
+        try:
+            from database import db_manager as _db
+            _row = _db.execute_query("SELECT nickname FROM USUARIOS WHERE userID = ?", (user_id,))
+            if _row and str(_row[0]["nickname"]).upper() == "VIP":
+                prob_gp *= 2.0
+        except Exception:
+            pass
         god_pack = (
             len(pool_leg) > 0
-            and random.random() < PROB_GOD_PACK
+            and random.random() < prob_gp
         )
 
         obtenidas: List[Photocard] = []

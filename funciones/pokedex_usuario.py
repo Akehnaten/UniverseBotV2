@@ -282,10 +282,26 @@ def verificar_pokedex_completa(
 # MULTIPLICADOR SHINY
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _es_vip(user_id: int) -> bool:
+    """True si el usuario tiene VIP activo."""
+    try:
+        row = db_manager.execute_query(
+            "SELECT nickname FROM USUARIOS WHERE userID = ?", (user_id,)
+        )
+        return bool(row and str(row[0]["nickname"]).upper() == "VIP")
+    except Exception:
+        return False
+
+
 def get_shiny_multiplier(user_id: int) -> float:
     """
     Devuelve el multiplicador de probabilidad shiny para el usuario.
-      · Sin Amuleto Iris: 1.0  (probabilidad base de config)
+      · Sin nada:         1.0  (probabilidad base de config)
       · Con Amuleto Iris: 3.0  (×3 más probable)
+      · Con VIP:          ×2 adicional sobre el valor anterior
+      · Con ambos:        6.0  (×3 amuleto × ×2 VIP)
     """
-    return 3.0 if tiene_amuleto_iris(user_id) else 1.0
+    mult = 3.0 if tiene_amuleto_iris(user_id) else 1.0
+    if _es_vip(user_id):
+        mult *= 2.0
+    return mult

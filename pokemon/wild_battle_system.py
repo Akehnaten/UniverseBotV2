@@ -2496,6 +2496,16 @@ class WildBattleManager:
                     es_entrenador      = False,
                 )
                 money_reward = max(10, min(50, 10 + wild.nivel * 40 // 100))
+                # Bonus VIP: +25% EXP y cosmos
+                try:
+                    _vip_row = db_manager.execute_query(
+                        "SELECT nickname FROM USUARIOS WHERE userID = ?", (user_id,)
+                    )
+                    if _vip_row and str(_vip_row[0]["nickname"]).upper() == "VIP":
+                        exp_ganada   = round(exp_ganada * 1.25)
+                        money_reward = round(money_reward * 1.25)
+                except Exception:
+                    pass
 
                 exp_result = ExperienceSystem.aplicar_experiencia(
                     battle.player_pokemon_id, exp_ganada
@@ -3238,6 +3248,16 @@ class WildBattleManager:
                 es_entrenador      = False,
             )
             money_reward = max(10, min(50, 10 + wild.nivel * 40 // 100))
+            # Bonus VIP: +25% EXP y cosmos
+            try:
+                _vip_row = db_manager.execute_query(
+                    "SELECT nickname FROM USUARIOS WHERE userID = ?", (user_id,)
+                )
+                if _vip_row and str(_vip_row[0]["nickname"]).upper() == "VIP":
+                    exp_ganada   = round(exp_ganada * 1.25)
+                    money_reward = round(money_reward * 1.25)
+            except Exception:
+                pass
             economy_service.add_credits(user_id, money_reward, "Victoria en batalla Pokémon")
  
             linea_exp = _repartir_experiencia(battle, exp_ganada, user_id, bot, delay=1.0)

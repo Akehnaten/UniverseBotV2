@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Costo en cosmos para obtener el VIP mensual (propio o regalo).
-COSTO_VIP = 5000
+COSTO_VIP = 2000
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -451,8 +451,12 @@ class EconomyHandlers:
             f"💸 Costo: <b>-{COSTO_VIP:,} cosmos</b>\n"
             f"💳 Saldo restante: <b>{nuevo_saldo:,} cosmos</b>\n\n"
             f"🎁 <b>Beneficios VIP:</b>\n"
-            f"  • +25% puntos por rol\n"
-            f"  • +25% ganancias en casino\n\n"
+            f"  • +25% puntos y cosmos por rol\n"
+            f"  • +25% ganancias en casino\n"
+            f"  • +25% EXP y cosmos en batallas Pokémon\n"
+            f"  • +25% cosmos al vender photocards\n"
+            f"  • ×2 probabilidad de Pokémon Shiny\n"
+            f"  • ×2 probabilidad de God Pack en sobres\n\n"
             f"<i>El VIP se resetea al inicio de cada mes con /nuevomes.</i>",
             parse_mode="HTML",
             message_thread_id=tid,
