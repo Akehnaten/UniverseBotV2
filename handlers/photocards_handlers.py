@@ -404,8 +404,8 @@ class PhotocardsHandlers:
 
         markup = types.InlineKeyboardMarkup(row_width=2)
         markup.add(
-            types.InlineKeyboardButton("🔄 Intercambiar",      callback_data=f"pc_intercambiar:{uid}:{carta_id}"),
-            types.InlineKeyboardButton("💰 Vender todo",       callback_data=f"pc_vender_todo:{uid}:{carta_id}"),
+            types.InlineKeyboardButton("🔄 Intercambiar",  callback_data=f"pc_intercambiar:{uid}:{carta_id}"),
+            types.InlineKeyboardButton("💰 Vender ×1",     callback_data=f"pc_vender_todo:{uid}:{carta_id}"),
         )
         if cantidad > 1:
             markup.add(types.InlineKeyboardButton(
@@ -529,7 +529,7 @@ class PhotocardsHandlers:
         pc     = photocards_service.get_carta_by_id(carta_id)
         nombre = pc.nombre_display if pc else f"#{carta_id}"
         emoji  = RAREZA_EMOJI.get(pc.rareza, "⚪") if pc else "⚪"
-        exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, cantidad)
+        exito, msg, cosmos = photocards_service.vender_photocard(uid, carta_id, 1)
         if exito:
             saldo = economy_service.get_balance(uid)
             markup = types.InlineKeyboardMarkup(row_width=1)
@@ -542,7 +542,7 @@ class PhotocardsHandlers:
                 call,
                 f"👤 <b>Menú de {nombre_u}</b>\n\n"
                 f"💸 <b>Venta completada</b>\n\n"
-                f"{emoji} <b>{nombre}</b> — ×{cantidad} vendidas\n"
+                f"{emoji} <b>{nombre}</b> — ×1 vendida\n"
                 f"💰 Ganaste: <b>+{cosmos} cosmos</b>\n"
                 f"💳 Saldo actual: <b>{saldo} cosmos</b>",
                 markup,

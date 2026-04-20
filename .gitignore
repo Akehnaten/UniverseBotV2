@@ -13,3 +13,6 @@ database/universebot.db
 
 #Ignorar carpeta de recursos es muy pesada
 src/
+
+#Ignora config por keys de API
+config.py

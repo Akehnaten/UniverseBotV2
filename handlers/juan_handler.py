@@ -180,17 +180,39 @@ def _guardar_ship(clave: str, nombre1: str, nombre2: str,
 
 def _buscar_miembro(texto: str) -> dict | None:
     """
-    Busca en JUAN_MIEMBROS por nombre o username (case-insensitive).
-    Devuelve el dict del miembro o None si no está registrado.
+    Busca un miembro por nombre o username.
+    1. JUAN_MIEMBROS (tabla manual de admins)
+    2. USUARIOS (todos los registrados del bot) como fallback
+    Devuelve dict con user_id, nombre, username. Nunca None si el usuario existe.
     """
     try:
         t = texto.lower().strip().lstrip("@")
+
+        # 1. JUAN_MIEMBROS
         rows = db_manager.execute_query(
             "SELECT * FROM JUAN_MIEMBROS WHERE LOWER(nombre)=? OR LOWER(username)=?",
             (t, t),
         ) or []
-        return dict(rows[0]) if rows else None
-    except Exception:
+        if rows:
+            return dict(rows[0])
+
+        # 2. USUARIOS (fallback)
+        rows2 = db_manager.execute_query(
+            "SELECT userID, nombre, nombre_usuario FROM USUARIOS "
+            "WHERE LOWER(nombre)=? OR LOWER(nombre_usuario)=?",
+            (t, t),
+        ) or []
+        if rows2:
+            r = dict(rows2[0])
+            return {
+                "user_id":     r.get("userID") or 0,
+                "nombre":      r.get("nombre") or texto,
+                "username":    r.get("nombre_usuario") or "",
+                "descripcion": "",
+            }
+        return None
+    except Exception as e:
+        logger.warning(f"[JUAN] _buscar_miembro: {e}")
         return None
 
 
@@ -232,14 +254,44 @@ def _menciona_miembro_conocido(texto: str) -> str | None:
     return None
 
 
-def _guardar_frase(categoria: str, frase: str, autor: str, fuente_username: str = "") -> None:
+def _guardar_frase(categoria: str, frase: str, autor: str,
+                   fuente_username: str = "", user_id: int = 0) -> None:
     try:
+        # Agregar columna user_id si no existe (idempotente)
+        try:
+            db_manager.execute_update(
+                "ALTER TABLE JUAN_APRENDIZAJE ADD COLUMN user_id INTEGER DEFAULT 0"
+            )
+        except Exception:
+            pass
         db_manager.execute_update(
-            "INSERT OR IGNORE INTO JUAN_APRENDIZAJE (categoria, frase, autor, fuente_username) VALUES (?,?,?,?)",
-            (categoria, frase.strip(), autor, fuente_username),
+            "INSERT OR IGNORE INTO JUAN_APRENDIZAJE "
+            "(categoria, frase, autor, fuente_username, user_id) VALUES (?,?,?,?,?)",
+            (categoria, frase.strip(), autor, fuente_username, user_id),
         )
     except Exception as e:
         logger.warning(f"[JUAN-LEARN] {e}")
+
+
+def _mencion_usuario(user_id: int) -> str:
+    """
+    Construye una mención HTML con el @username y user_id actuales desde USUARIOS.
+    Siempre usa datos frescos de la DB para que no queden nombres viejos.
+    """
+    try:
+        rows = db_manager.execute_query(
+            "SELECT nombre, nombre_usuario FROM USUARIOS WHERE userID = ?", (user_id,)
+        ) or []
+        if rows:
+            nombre   = rows[0].get("nombre") or ""
+            username = rows[0].get("nombre_usuario") or ""
+            if username:
+                return f'<a href="tg://user?id={user_id}">@{username}</a>'
+            elif nombre:
+                return f'<a href="tg://user?id={user_id}">{nombre}</a>'
+    except Exception:
+        pass
+    return f'<a href="tg://user?id={user_id}">usuario</a>'
 
 
 def _get_frase_random(categoria: str) -> dict | None:
@@ -282,18 +334,19 @@ def _procesar_aprendizaje_texto(message) -> None:
 
     autor    = message.from_user.first_name or "alguien"
     username = message.from_user.username or ""
+    user_id  = message.from_user.id or 0
 
     if _es_mensaje_a_juan(texto) and _detectar_chiste_interno(texto):
         nombre = _menciona_miembro_conocido(texto)
         if nombre:
-            limpio = re.sub(r'\b(juan|el\s+caballo)[,!?.]?\s*', '', texto, flags=re.IGNORECASE).strip()
-            if _es_frase_guardable(limpio):
-                _guardar_frase("chiste_interno", limpio, autor, username)
+            frase_limpia = re.sub(r'\b(juan|el\s+caballo)[,!?.]?\s*', '', texto, flags=re.IGNORECASE).strip()
+            if _es_frase_guardable(frase_limpia):
+                _guardar_frase("chiste_interno", frase_limpia, autor, username, user_id)
         return
 
     cat = _detectar_categoria(texto)
     if cat and _es_frase_guardable(texto):
-        _guardar_frase(cat, texto, autor, username)
+        _guardar_frase(cat, texto, autor, username, user_id)
         return
 
     if not message.reply_to_message:
@@ -305,7 +358,7 @@ def _procesar_aprendizaje_texto(message) -> None:
     texto_orig = original.text or original.caption or ""
     cat_ctx = _detectar_categoria(texto_orig)
     if cat_ctx and _es_frase_guardable(texto):
-        _guardar_frase(cat_ctx, texto, autor, username)
+        _guardar_frase(cat_ctx, texto, autor, username, user_id)
 
 
 def _procesar_aprendizaje_sticker(message) -> None:
@@ -609,7 +662,7 @@ def _cmd_pregunta(bot, message, chat_id: int, thread_id) -> None:
 
 
 def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
-    # Extraer los dos argumentos
+    # Extraer los dos argumentos — preferir entities de Telegram para obtener user_id real
     partes = re.findall(r'@?\w+', args)
     partes = [p for p in partes if p.lower() not in ("shipear", "ship")]
     if len(partes) < 2:
@@ -619,28 +672,78 @@ def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
     raw1 = partes[0].lstrip("@")
     raw2 = partes[1].lstrip("@")
 
-    # ── Validar que ambos están en JUAN_MIEMBROS ──────────────────────────────
-    m1 = _buscar_miembro(raw1)
-    m2 = _buscar_miembro(raw2)
+    # Intentar resolver user_id directamente desde las entities del mensaje original
+    # para que Juan use el ID real aunque el usuario cambie de nombre
+    def _resolver_entity(username_raw: str) -> int | None:
+        try:
+            all_entities = (message.entities or []) + (message.caption_entities or [])
+            full_text = message.text or message.caption or ""
+            for e in all_entities:
+                if e.type == "mention":
+                    uname = full_text[e.offset + 1: e.offset + e.length].lower()
+                    if uname == username_raw.lower():
+                        rows = db_manager.execute_query(
+                            "SELECT userID FROM USUARIOS WHERE LOWER(nombre_usuario)=?", (uname,)
+                        ) or []
+                        if rows:
+                            return int(rows[0]["userID"])
+                elif e.type == "text_mention" and e.user:
+                    if (e.user.username or "").lower() == username_raw.lower():
+                        return e.user.id
+        except Exception:
+            pass
+        return None
+
+    uid1 = _resolver_entity(raw1)
+    uid2 = _resolver_entity(raw2)
+
+    # Validar que ambos existen — busca por entity, luego por texto
+    m1 = None
+    m2 = None
+    if uid1:
+        rows = db_manager.execute_query(
+            "SELECT userID, nombre, nombre_usuario FROM USUARIOS WHERE userID=?", (uid1,)
+        ) or []
+        if rows:
+            r = rows[0]
+            m1 = {"user_id": r["userID"], "nombre": r.get("nombre") or raw1,
+                  "username": r.get("nombre_usuario") or ""}
+    if not m1:
+        m1 = _buscar_miembro(raw1)
+
+    if uid2:
+        rows = db_manager.execute_query(
+            "SELECT userID, nombre, nombre_usuario FROM USUARIOS WHERE userID=?", (uid2,)
+        ) or []
+        if rows:
+            r = rows[0]
+            m2 = {"user_id": r["userID"], "nombre": r.get("nombre") or raw2,
+                  "username": r.get("nombre_usuario") or ""}
+    if not m2:
+        m2 = _buscar_miembro(raw2)
 
     desconocidos = []
     if not m1:
-        desconocidos.append(f"@{raw1}" if not raw1.startswith("@") else raw1)
+        desconocidos.append(f"@{raw1}")
     if not m2:
-        desconocidos.append(f"@{raw2}" if not raw2.startswith("@") else raw2)
-
+        desconocidos.append(f"@{raw2}")
     if desconocidos:
-        nombres = " y ".join(desconocidos)
         bot.reply_to(
             message,
-            f"No puedo shipear a {nombres} porque no los conozco. "
-            f"Que un admin los registre primero con /juanagregar. 🐴"
+            f"No encuentro a {' y '.join(desconocidos)} en el servidor. "
+            f"Deben estar registrados para que pueda shiparlos. 🐴"
         )
         return
 
-    # Usar los nombres oficiales guardados en JUAN_MIEMBROS
+    # Nombres para la lógica interna (clave del ship)
     nombre1 = m1["nombre"]
     nombre2 = m2["nombre"]
+
+    # Menciones HTML con datos frescos de USUARIOS
+    uid1_real = m1.get("user_id") or 0
+    uid2_real = m2.get("user_id") or 0
+    mencion1 = _mencion_usuario(uid1_real) if uid1_real else f"<b>{nombre1}</b>"
+    mencion2 = _mencion_usuario(uid2_real) if uid2_real else f"<b>{nombre2}</b>"
 
     # ── Buscar ship existente (orden no importa) ──────────────────────────────
     clave = _clave_ship(nombre1, nombre2)
@@ -655,7 +758,7 @@ def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
         bot.send_message(
             chat_id,
             f"💘 <b>Ship Meter</b>\n\n"
-            f"<b>{ship['nombre1']}</b> + <b>{ship['nombre2']}</b>\n"
+            f"{mencion1} + {mencion2}\n"
             f"Compatibilidad: <b>{ship['porcentaje']}%</b> — {ship['nivel']}\n\n"
             f"<i>{ship['comentario']}</i>"
             f"{footer}",
@@ -691,7 +794,7 @@ def _cmd_shipear(bot, message, args: str, chat_id: int, thread_id) -> None:
     bot.send_message(
         chat_id,
         f"💘 <b>Ship Meter</b>\n\n"
-        f"<b>{nombre1}</b> + <b>{nombre2}</b>\n"
+        f"{mencion1} + {mencion2}\n"
         f"Compatibilidad: <b>{pct}%</b> — {nivel}\n\n"
         f"<i>{comentario}</i>",
         **kwargs,

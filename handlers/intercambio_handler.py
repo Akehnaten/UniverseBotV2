@@ -45,6 +45,7 @@ from funciones.photocards_service import photocards_service
 from pokemon.services.intercambio_service import intercambio_service
 from pokemon.services.pokemon_service import pokemon_service
 from pokemon.services.pokedex_service import pokedex_service
+from funciones import economy_service
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +198,11 @@ class IntercambioHandler:
     def handle_callback(self, call: types.CallbackQuery) -> None:
         """Enruta todos los callbacks con prefijo itrd_."""
         # Guard: call.data puede ser None en Telegram
-        if not call.data:
+        if not call.data or call.data.startswith("itrd_noop:"):
+            try:
+                self.bot.answer_callback_query(call.id)
+            except Exception:
+                pass
             return
         # Guard: from_user puede ser None en mensajes de sistema
         if not call.from_user:
@@ -231,6 +236,103 @@ class IntercambioHandler:
                 sid    = partes[2] if len(partes) > 2 else ""
                 answer = partes[3] if len(partes) > 3 else "no"
                 self._pcd_confirmar(call, uid, sid, answer)
+
+            elif accion == "itrd_pcd_cosmos":
+                # B quiere ofrecer cosmos — guardar en sesión y pedir cantidad
+                sid = partes[2] if len(partes) > 2 else ""
+                s   = self._pcd_get_sesion(sid)
+                if not s:
+                    self._answer(call, "⌛ Esta oferta expiró.", alert=True)
+                    return
+                if uid != s["receptor_id"]:
+                    self._answer(call, "🚫 Este botón no es tuyo.", alert=True)
+                    return
+                pc_a  = photocards_service.get_carta_by_id(s["carta_a_id"])
+                nom_a = pc_a.nombre_display if pc_a else f"#{s['carta_a_id']}"
+                em_a  = RAREZA_EMOJI.get(pc_a.rareza if pc_a else "", "⚪")
+                s["ofrece_cosmos"] = True
+                s["msg_b_id"]  = call.message.message_id
+                s["chat_b_id"] = call.message.chat.id
+                saldo = economy_service.get_balance(uid)
+                mk = types.InlineKeyboardMarkup(row_width=2)
+                for amt in [50, 100, 250, 500, 1000, 2000]:
+                    mk.add(types.InlineKeyboardButton(
+                        f"💰 {amt} cosmos",
+                        callback_data=f"itrd_pcd_cosamt:{uid}:{sid}:{amt}",
+                    ))
+                mk.add(types.InlineKeyboardButton(
+                    "❌ Cancelar",
+                    callback_data=f"itrd_pcd_rej:{uid}:{sid}",
+                ))
+                self._answer(call)
+                self._edit(
+                    call,
+                    f"💰 <b>Ofrecer cosmos</b>\n\n"
+                    f"Recibirías: {em_a} <b>{nom_a}</b>\n\n"
+                    f"Tu saldo: <b>{saldo} cosmos</b>\n"
+                    f"¿Cuántos cosmos querés ofrecer?",
+                    mk,
+                )
+
+            elif accion == "itrd_pcd_cosamt":
+                # B confirmó cantidad de cosmos
+                sid    = partes[2] if len(partes) > 2 else ""
+                cosmos = int(partes[3]) if len(partes) > 3 else 0
+                s      = self._pcd_get_sesion(sid)
+                if not s:
+                    self._answer(call, "⌛ Esta oferta expiró.", alert=True)
+                    return
+                if uid != s["receptor_id"]:
+                    self._answer(call, "🚫 Este botón no es tuyo.", alert=True)
+                    return
+                saldo = economy_service.get_balance(uid)
+                if saldo < cosmos:
+                    self._answer(call, f"❌ No tenés suficientes cosmos (tenés {saldo}).", alert=True)
+                    return
+                s["cosmos_b"] = cosmos
+                s["carta_b_id"] = None  # indica que B ofrece cosmos, no carta
+                pc_a  = photocards_service.get_carta_by_id(s["carta_a_id"])
+                nom_a = pc_a.nombre_display if pc_a else f"#{s['carta_a_id']}"
+                em_a  = RAREZA_EMOJI.get(pc_a.rareza if pc_a else "", "⚪")
+                # Panel de B
+                mk_b = types.InlineKeyboardMarkup(row_width=2)
+                mk_b.add(
+                    types.InlineKeyboardButton("✅ Confirmar", callback_data=f"itrd_pcd_conf:{uid}:{sid}:yes"),
+                    types.InlineKeyboardButton("❌ Cancelar",  callback_data=f"itrd_pcd_conf:{uid}:{sid}:no"),
+                )
+                self._answer(call)
+                self._edit(
+                    call,
+                    f"🔄 <b>Confirmación de intercambio</b>\n\n"
+                    f"📤 Vos das:     <b>{cosmos} cosmos</b>\n"
+                    f"📥 Vos recibís: {em_a} <b>{nom_a}</b>\n\n"
+                    f"¿Confirmás?",
+                    mk_b,
+                )
+                s["msg_b_id"]  = call.message.message_id
+                s["chat_b_id"] = call.message.chat.id
+                # Notificar a A
+                mk_a = types.InlineKeyboardMarkup(row_width=2)
+                mk_a.add(
+                    types.InlineKeyboardButton("✅ Confirmar", callback_data=f"itrd_pcd_conf:{s['oferente_id']}:{sid}:yes"),
+                    types.InlineKeyboardButton("❌ Cancelar",  callback_data=f"itrd_pcd_conf:{s['oferente_id']}:{sid}:no"),
+                )
+                resumen_a = (
+                    f"🔄 <b>Confirmación de intercambio</b>\n\n"
+                    f"📤 Vos das:     {em_a} <b>{nom_a}</b>\n"
+                    f"📥 Vos recibís: <b>{cosmos} cosmos</b>\n\n"
+                    f"¿Confirmás?"
+                )
+                try:
+                    chat_a = s.get("chat_a_id")
+                    msg_a  = s.get("msg_a_id")
+                    if chat_a and msg_a:
+                        self.bot.edit_message_text(
+                            resumen_a, int(chat_a), int(msg_a),
+                            parse_mode="HTML", reply_markup=mk_a,
+                        )
+                except Exception as exc:
+                    logger.error(f"[PCD] notificar A en cosmos: {exc}")
 
             elif accion == "itrd_pcd_rej":
                 sid = partes[2] if len(partes) > 2 else ""
@@ -393,8 +495,12 @@ class IntercambioHandler:
         markup = types.InlineKeyboardMarkup(row_width=1)
         markup.add(
             types.InlineKeyboardButton(
-                "✅ Aceptar — elegir mi carta",
+                "🃏 Aceptar — ofrecer una carta",
                 callback_data=f"itrd_pcd_inv:{receptor_id}:{sid}:0",
+            ),
+            types.InlineKeyboardButton(
+                "💰 Aceptar — ofrecer cosmos",
+                callback_data=f"itrd_pcd_cosmos:{receptor_id}:{sid}",
             ),
             types.InlineKeyboardButton(
                 "❌ Rechazar",
@@ -462,20 +568,38 @@ class IntercambioHandler:
             self._edit(call, "😔 No tenés photocards para ofrecer.", markup)
             return
 
-        ids_ord    = sorted(cartas.keys())
+        # Ordenar: por álbum, luego por rareza (legendaria→rara→comun), luego por nombre
+        _ORDEN_RAR = {"legendaria": 0, "rara": 1, "comun": 2}
+
+        def _sort_key(cid):
+            pc = photocards_service.get_carta_by_id(cid)
+            if not pc:
+                return ("zzz", 9, "")
+            return (pc.album, _ORDEN_RAR.get(pc.rareza, 9), pc.nombre_display)
+
+        ids_ord    = sorted(cartas.keys(), key=_sort_key)
         por_pag    = _PC_CARTAS_POR_PAG
         total_pags = max(1, (len(ids_ord) + por_pag - 1) // por_pag)
         pagina     = max(0, min(pagina, total_pags - 1))
         ids_pag    = ids_ord[pagina * por_pag:(pagina + 1) * por_pag]
 
         pc_a  = photocards_service.get_carta_by_id(s["carta_a_id"])
-        nom_a = pc_a.nombre if pc_a else f"#{s['carta_a_id']}"
+        nom_a = pc_a.nombre_display if pc_a else f"#{s['carta_a_id']}"
         em_a  = RAREZA_EMOJI.get(pc_a.rareza if pc_a else "", "⚪")
 
+        album_actual = None
         for cid in ids_pag:
             pc    = photocards_service.get_carta_by_id(cid)
             emoji = RAREZA_EMOJI.get(pc.rareza, "⚪") if pc else "❓"
-            nom   = pc.nombre if pc else f"#{cid}"
+            nom   = pc.nombre_display if pc else f"#{cid}"
+            album = pc.album.capitalize() if pc else "?"
+            # Separador de álbum
+            if album != album_actual:
+                album_actual = album
+                markup.add(types.InlineKeyboardButton(
+                    f"── 📂 {album} ──",
+                    callback_data=f"itrd_noop:{uid}",
+                ))
             markup.add(types.InlineKeyboardButton(
                 f"{emoji} {nom} ×{cartas[cid]}",
                 callback_data=f"itrd_pcd_sel:{uid}:{sid}:{cid}",
@@ -611,6 +735,47 @@ class IntercambioHandler:
         # ── Ambos confirmaron → ejecutar swap ─────────────────────────────────
         if s["conf_a"] and s["conf_b"]:
             IntercambioHandler._PC_DIRECT_SESSIONS.pop(s["sid"], None)
+
+            # Caso cosmos: B ofreció cosmos en lugar de carta
+            if s.get("cosmos_b") and not s.get("carta_b_id"):
+                cosmos_b = s["cosmos_b"]
+                if economy_service.get_balance(s["receptor_id"]) < cosmos_b:
+                    for cid_, mid_ in [(s["chat_a_id"], s["msg_a_id"]), (s["chat_b_id"], s["msg_b_id"])]:
+                        if cid_ and mid_:
+                            try:
+                                self.bot.edit_message_text(
+                                    "❌ Intercambio cancelado: saldo insuficiente.",
+                                    cid_, mid_, parse_mode="HTML",
+                                )
+                            except Exception:
+                                pass
+                    return
+                economy_service.subtract_credits(s["receptor_id"], cosmos_b, "Intercambio photocard cosmos")
+                economy_service.add_credits(s["oferente_id"], cosmos_b, "Intercambio photocard cosmos")
+                photocards_service.vender_photocard(s["oferente_id"], s["carta_a_id"], 1)
+                photocards_service.agregar_photocard(s["receptor_id"], s["carta_a_id"], 1)
+                pc_a  = photocards_service.get_carta_by_id(s["carta_a_id"])
+                nom_a = pc_a.nombre_display if pc_a else f"#{s['carta_a_id']}"
+                em_a  = RAREZA_EMOJI.get(pc_a.rareza if pc_a else "", "⚪")
+                msgs = [
+                    (s["chat_a_id"], s["msg_a_id"],
+                     f"✅ <b>¡Intercambio completado!</b>\n\n"
+                     f"📤 Diste: {em_a} <b>{nom_a}</b>\n"
+                     f"📥 Recibiste: <b>{cosmos_b} cosmos</b>"),
+                    (s["chat_b_id"], s["msg_b_id"],
+                     f"✅ <b>¡Intercambio completado!</b>\n\n"
+                     f"📤 Diste: <b>{cosmos_b} cosmos</b>\n"
+                     f"📥 Recibiste: {em_a} <b>{nom_a}</b>"),
+                ]
+                for cid_, mid_, texto_ in msgs:
+                    if cid_ and mid_:
+                        try:
+                            self.bot.edit_message_text(texto_, int(cid_), int(mid_), parse_mode="HTML")
+                        except Exception:
+                            pass
+                return
+
+            # Caso normal: intercambio carta por carta
             exito, msg = photocards_service.ejecutar_swap_directo(
                 oferente_id = s["oferente_id"],
                 carta_a_id  = s["carta_a_id"],
