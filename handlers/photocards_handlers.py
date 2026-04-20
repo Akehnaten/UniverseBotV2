@@ -421,13 +421,49 @@ class PhotocardsHandlers:
 
         try:
             if pc.es_video:
-                with open(pc.path, "rb") as media:
-                    self.bot.send_video(
-                        chat_id, media,
-                        caption=caption, parse_mode="HTML",
-                        reply_markup=markup, message_thread_id=thread_id,
-                        supports_streaming=True,
-                    )
+                MAX_VIDEO_BYTES = 50 * 1024 * 1024  # 50MB límite de Telegram
+                file_size = os.path.getsize(pc.path)
+
+                if file_size <= MAX_VIDEO_BYTES:
+                    # Video dentro del límite: enviar directo
+                    with open(pc.path, "rb") as media:
+                        self.bot.send_video(
+                            chat_id, media,
+                            caption=caption, parse_mode="HTML",
+                            reply_markup=markup, message_thread_id=thread_id,
+                            supports_streaming=True,
+                        )
+                else:
+                    # Video demasiado grande: comprimir con ffmpeg
+                    import subprocess, tempfile
+                    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+                        tmp_path = tmp.name
+                    try:
+                        subprocess.run([
+                            "ffmpeg", "-y", "-i", pc.path,
+                            "-vcodec", "libx264", "-crf", "28",
+                            "-preset", "fast",
+                            "-acodec", "aac", "-b:a", "128k",
+                            "-movflags", "+faststart",
+                            tmp_path
+                        ], check=True, capture_output=True)
+                        with open(tmp_path, "rb") as media:
+                            self.bot.send_video(
+                                chat_id, media,
+                                caption=caption, parse_mode="HTML",
+                                reply_markup=markup, message_thread_id=thread_id,
+                                supports_streaming=True,
+                            )
+                    except subprocess.CalledProcessError as ffmpeg_err:
+                        logger.error(f"[PC] ffmpeg falló: {ffmpeg_err.stderr.decode()}")
+                        self._edit(call, caption, markup)
+                        return
+                    finally:
+                        import os as _os
+                        try:
+                            _os.remove(tmp_path)
+                        except Exception:
+                            pass
             else:
                 file_size = os.path.getsize(pc.path)
 
