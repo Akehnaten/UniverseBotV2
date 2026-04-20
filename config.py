@@ -113,8 +113,8 @@ NIVEL_SPAWN_DEFAULT = (5, 10)
 UNKNOWN_SPRITE = BASE_DIR / "src" / "unknow.png"
 
 # ============== JUAN (El caballo de los memes) ==============
-
 GROQ_API_KEY = "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"
+OPENROUTER_API_KEY = "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"  # De https://openrouter.ai/keys
 
 # Username del bot en Telegram (sin arroba), para detectar menciones
 BOT_USERNAME = "universeMaster_bot"

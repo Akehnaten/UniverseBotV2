@@ -19,6 +19,7 @@ import re
 import threading
 from datetime import datetime, date, timedelta
 from groq import Groq
+from openai import OpenAI
 from config import (
     GROQ_API_KEY,
     BOT_USERNAME,
@@ -26,6 +27,7 @@ from config import (
     JUAN_PALABRAS_CLAVE,
     CANAL_ID,
     JUAN_THREAD_ANUNCIOS,
+    OPENROUTER_API_KEY,
 )
 from utils.thread_utils import get_thread_id
 from database import db_manager
@@ -35,6 +37,24 @@ logger = logging.getLogger(__name__)
 # ── Groq ───────────────────────────────────────────────────────────────────────
 client   = Groq(api_key=GROQ_API_KEY)
 MODEL_ID = "llama-3.3-70b-versatile"
+
+# ── OpenRouter (fallback cuando Groq está sin tokens) ─────────────────────────
+# Modelos gratuitos en orden de preferencia. Si uno falla, prueba el siguiente.
+_OR_MODELS = [
+    "meta-llama/llama-3.1-8b-instruct:free",
+    "mistralai/mistral-7b-instruct:free",
+    "google/gemma-2-9b-it:free",
+    "microsoft/phi-3-mini-128k-instruct:free",
+]
+
+def _get_openrouter_client():
+    """Cliente OpenRouter lazy — solo se crea si se necesita."""
+    if not OPENROUTER_API_KEY:
+        return None
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
 
 _chat_histories: dict[int, list] = {}
 MAX_HISTORY = 8
@@ -353,6 +373,7 @@ def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str
             system = f"{system}\n\n{ctx}"
 
     espera = 15
+    groq_429 = False
     for intento in range(3):
         try:
             resp = client.chat.completions.create(
@@ -367,10 +388,21 @@ def _pedir_respuesta(chat_id: int, prompt: str, texto_original: str = "") -> str
             return content
         except Exception as e:
             logger.warning(f"[JUAN] Groq intento {intento+1}/3: {e}")
-            if "429" in str(e) and intento < 2:
-                time.sleep(espera); espera *= 2
-                continue
+            if "429" in str(e) or "rate" in str(e).lower():
+                groq_429 = True
+                if intento < 2:
+                    time.sleep(espera); espera *= 2
+                    continue
             break
+
+    # ── Fallback a OpenRouter si Groq está sin tokens ─────────────────────────
+    if groq_429:
+        logger.info("[JUAN] Groq agotado, intentando OpenRouter para conversación...")
+        messages = [{"role": "system", "content": system}, *history]
+        fallback = _openrouter_call(messages, 300, 0.85)
+        if fallback:
+            history.append({"role": "assistant", "content": fallback})
+            return fallback
 
     if history and history[-1]["role"] == "user":
         history.pop()
@@ -426,20 +458,56 @@ def _deberia_responder_juan(message) -> bool:
 
 # ── Comandos ! ────────────────────────────────────────────────────────────────
 
+def _openrouter_call(messages: list, max_tokens: int, temperature: float) -> str:
+    """
+    Intenta cada modelo gratuito de OpenRouter en orden.
+    Devuelve el texto de la respuesta o '' si todos fallan.
+    """
+    or_client = _get_openrouter_client()
+    if not or_client:
+        logger.warning("[JUAN] OPENROUTER_API_KEY no configurada — no hay fallback")
+        return ""
+
+    for model in _OR_MODELS:
+        try:
+            r = or_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            text = (r.choices[0].message.content or "").strip()
+            if text:
+                logger.info(f"[JUAN] OpenRouter OK con modelo: {model}")
+                return text
+        except Exception as e:
+            logger.warning(f"[JUAN] OpenRouter {model} falló: {e}")
+            continue
+
+    return ""
+
+
 def _groq_simple(prompt: str, max_tokens: int = 200, temperature: float = 0.9) -> str:
-    """Llamada Groq simple sin historial. Devuelve texto o string de error."""
+    """
+    Llamada simple sin historial.
+    Intenta Groq primero; si devuelve 429 usa OpenRouter como fallback.
+    """
+    messages = [
+        {"role": "system", "content": JUAN_SYSTEM_NEUTRO},
+        {"role": "user", "content": prompt},
+    ]
     try:
         r = client.chat.completions.create(
             model=MODEL_ID,
-            messages=[
-                {"role": "system", "content": JUAN_SYSTEM_NEUTRO},
-                {"role": "user", "content": prompt},
-            ],
+            messages=messages,
             max_tokens=max_tokens, temperature=temperature,
         )
         return (r.choices[0].message.content or "").strip()
     except Exception as e:
-        logger.warning(f"[JUAN] _groq_simple: {e}")
+        if "429" in str(e) or "rate" in str(e).lower():
+            logger.warning(f"[JUAN] Groq rate limit en _groq_simple, usando OpenRouter...")
+            return _openrouter_call(messages, max_tokens, temperature)
+        logger.warning(f"[JUAN] _groq_simple error: {e}")
         return ""
 
 
