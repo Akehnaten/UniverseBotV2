@@ -73,18 +73,34 @@ def _obtener_id_desde_username(username: str, chat_id: int, bot) -> Optional[int
             username_limpio, type(exc).__name__, exc,
         )
 
-    # 2. API de Telegram (fallback) ─────────────────────────────────────────
-    try:
-        member = bot.get_chat_member(chat_id, f"@{username_limpio}")
-        if member and member.user:
-            uid = member.user.id
-            logger.debug("[USER_UTILS] '%s' resuelto por API → %s", username_limpio, uid)
-            return uid
-    except Exception as exc:
-        logger.warning(
-            "[USER_UTILS] get_chat_member falló para '@%s': %s: %s",
-            username_limpio, type(exc).__name__, exc,
-        )
+    # 2. API de Telegram: get_chat(@username) ─────────────────────────────
+    # NOTA: get_chat_member(chat_id, "@username") da 400 Bad Request porque
+    # ese parámetro solo acepta user_id numérico. get_chat() sí acepta
+    # @username y devuelve el objeto Chat con el id real.
+    for candidate in (f"@{username_limpio}", username_limpio):
+        try:
+            chat = bot.get_chat(candidate)
+            if chat and chat.id:
+                uid = chat.id
+                logger.debug(
+                    "[USER_UTILS] '%s' resuelto por get_chat('%s') → %s",
+                    username_limpio, candidate, uid,
+                )
+                # Cachear en BD para próximas consultas
+                try:
+                    from database import db_manager as _db
+                    _db.execute_update(
+                        "UPDATE USUARIOS SET nombre_usuario = ? WHERE userID = ?",
+                        (username_limpio, uid),
+                    )
+                except Exception:
+                    pass
+                return uid
+        except Exception as exc:
+            logger.debug(
+                "[USER_UTILS] get_chat('%s') falló: %s: %s",
+                candidate, type(exc).__name__, exc,
+            )
 
     logger.warning("[USER_UTILS] No se pudo resolver '@%s' por ninguna vía", username_limpio)
     return None
@@ -170,8 +186,12 @@ def extraer_user_id(
         cid = message.chat.id
 
         # ── prefer_mention: entities antes que reply/forward ──────────────
-        if prefer_mention and message.entities:
-            for entity in message.entities:
+        # Se leen tanto entities (texto) como caption_entities (foto/video)
+        all_entities = list(message.entities or []) + list(message.caption_entities or [])
+        raw_text = message.text or message.caption or ""
+
+        if prefer_mention and all_entities:
+            for entity in all_entities:
                 if entity.type == "text_mention" and entity.user:
                     uid     = entity.user.id
                     display = (
@@ -186,7 +206,6 @@ def extraer_user_id(
                     return uid, display
 
                 if entity.type == "mention":
-                    raw_text = message.text or ""
                     username = raw_text[entity.offset + 1 : entity.offset + entity.length]
                     if username:
                         uid = _obtener_id_desde_username(username, cid, bot)
@@ -221,8 +240,8 @@ def extraer_user_id(
             )
             return target.id, display
 
-        # ── 3. text_mention entity ────────────────────────────────────────
-        for entity in (message.entities or []):
+        # ── 3. text_mention entity (usuarios sin @) ───────────────────────
+        for entity in all_entities:
             if entity.type == "text_mention" and entity.user:
                 target = entity.user
                 logger.debug(
@@ -233,7 +252,7 @@ def extraer_user_id(
 
             # ── 4. mention entity (@username) ─────────────────────────────
             if entity.type == "mention":
-                raw = (message.text or "")[entity.offset + 1 : entity.offset + entity.length]
+                raw = raw_text[entity.offset + 1 : entity.offset + entity.length]
                 resolved_id = _obtener_id_desde_username(raw, cid, bot)
                 if resolved_id:
                     logger.debug(
@@ -250,7 +269,7 @@ def extraer_user_id(
 
         # ── 5. userID numérico en texto ───────────────────────────────────
         # IDs reales de Telegram comienzan desde ~100 000.
-        for part in (message.text or "").split()[1:]:
+        for part in raw_text.split()[1:]:
             try:
                 potential_id = int(part)
                 if potential_id >= 100_000:
