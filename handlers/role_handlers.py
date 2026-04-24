@@ -354,6 +354,25 @@ class RoleHandlers:
             threading.Timer(5.0, lambda: self._borrar_seguro(cid, m.message_id)).start()
             return
 
+
+        MAX_ROLES_IDOL = 3
+
+        # Verificar límite de roles simultáneos de la idol
+        roles_actuales_idol = sum(
+            1 for r in self.roles_activos.values()
+            if r["idol_id"] == uid
+        )
+        if roles_actuales_idol >= MAX_ROLES_IDOL:
+            m = self.bot.send_message(
+                cid,
+                f"❌ Ya tenés <b>{roles_actuales_idol} roles activos</b>. "
+                f"El máximo permitido es {MAX_ROLES_IDOL}.",
+                parse_mode="HTML",
+                message_thread_id=tid,
+            )
+            threading.Timer(8.0, lambda: self._borrar_seguro(cid, m.message_id)).start()
+            return
+
         clientes_bloqueados: list[str] = []
         for cliente_id in clientes_ids:
             info_cliente = user_service.get_user_info(cliente_id)
@@ -384,14 +403,27 @@ class RoleHandlers:
             rol_id = db_manager.create_role(uid, clientes_str)
 
             # ── Sistema cazadora ──────────────────────────────────────────────
-            # Aplica si: exactamente 1 cliente, nunca rolearon juntos este mes,
-            # y la idol no estaba en otro rol activo en este momento.
+            # Condiciones para el bonus x2:
+            #   1. Exactamente 1 cliente de clase 'cliente' (no idol)
+            #   2. Primera vez que rolean juntos este mes
+            #   3. La idol NO tenía ningún rol activo antes de este
             cazadora = False
-            if len(clientes_ids) == 1:
+            roles_previos_idol = sum(
+                1 for rid, r in self.roles_activos.items()
+                if r["idol_id"] == uid and rid != rol_id
+            )
+            if len(clientes_ids) == 1 and roles_previos_idol == 0:
                 from funciones.role_service import get_frecuencia
-                freq_previa = get_frecuencia(uid, clientes_ids[0])
-                if freq_previa == 0:
-                    cazadora = True
+                _clase_row = db_manager.execute_query(
+                    "SELECT clase FROM USUARIOS WHERE userID = ?", (clientes_ids[0],)
+                )
+                _es_cliente = (
+                    _clase_row and _clase_row[0].get("clase") == "cliente"
+                )
+                if _es_cliente:
+                    freq_previa = get_frecuencia(uid, clientes_ids[0])
+                    if freq_previa == 0:
+                        cazadora = True
 
             self.roles_activos[rol_id] = {
                 "inicio":       datetime.now(),
@@ -535,6 +567,8 @@ class RoleHandlers:
                     if _fila_clase and _fila_clase[0].get("clase") == "idol":
                         _es_idol_vs_idol = True
                 icono_tipo = "❌" if _es_idol_vs_idol else "✅"
+                if _es_idol_vs_idol:
+                    puntos_ganados = max(1, puntos_ganados // 2)
 
                 h    = tiempo_segundos // 3600
                 mins = (tiempo_segundos % 3600) // 60
@@ -549,6 +583,10 @@ class RoleHandlers:
                 if info_caz.get("activo"):
                     lineas_extra += (
                         f"🦅 <b>Bonus cazadora:</b> +{info_caz['puntos_bonus']} pts (×2)\n"
+                    )
+                if _es_idol_vs_idol:
+                    lineas_extra += (
+                        f"⚔️ <b>Rol entre idols:</b> ×0.5 puntos\n"
                     )
 
                 if info_freq:
@@ -575,11 +613,22 @@ class RoleHandlers:
                     f"(duración insuficiente)."
                 )
 
-            participantes = [rol_info["idol_id"]] + rol_info.get("clientes_ids", [])
-            for participante_id in participantes:
+            # Liberar a los clientes siempre
+            for cliente_id in rol_info.get("clientes_ids", []):
                 db_manager.execute_update(
                     "UPDATE USUARIOS SET enrol = 0 WHERE userID = ?",
-                    (participante_id,),
+                    (cliente_id,),
+                )
+            # Liberar a la idol solo si no tiene otros roles activos
+            idol_id_fin = rol_info["idol_id"]
+            otros_roles_idol = sum(
+                1 for rid, r in self.roles_activos.items()
+                if r["idol_id"] == idol_id_fin and rid != rol_id
+            )
+            if otros_roles_idol == 0:
+                db_manager.execute_update(
+                    "UPDATE USUARIOS SET enrol = 0 WHERE userID = ?",
+                    (idol_id_fin,),
                 )
             del self.roles_activos[rol_id]
 
