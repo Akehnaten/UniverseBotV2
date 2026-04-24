@@ -382,10 +382,22 @@ class RoleHandlers:
         try:
             clientes_str = ",".join(str(c) for c in clientes_ids)
             rol_id = db_manager.create_role(uid, clientes_str)
+
+            # ── Sistema cazadora ──────────────────────────────────────────────
+            # Aplica si: exactamente 1 cliente, nunca rolearon juntos este mes,
+            # y la idol no estaba en otro rol activo en este momento.
+            cazadora = False
+            if len(clientes_ids) == 1:
+                from funciones.role_service import get_frecuencia
+                freq_previa = get_frecuencia(uid, clientes_ids[0])
+                if freq_previa == 0:
+                    cazadora = True
+
             self.roles_activos[rol_id] = {
                 "inicio":       datetime.now(),
                 "idol_id":      uid,
                 "clientes_ids": clientes_ids,
+                "cazadora":     cazadora,
             }
             db_manager.execute_update(
                 "UPDATE USUARIOS SET enrol = 1, encola = 0 WHERE userID = ?", (uid,)
@@ -491,8 +503,14 @@ class RoleHandlers:
             _snap_antes   = user_service.get_user_info(uid)
             _wallet_antes = int(_snap_antes["wallet"]) if _snap_antes else 0
 
-            is_valid, puntos_ganados = role_service.end_role(
-                rol_id, tiempo_segundos, "valido"
+            cazadora_flag = rol_info.get("cazadora", False)
+
+            is_valid, puntos_ganados, info_sistemas = role_service.end_role(
+                rol_id          = rol_id,
+                tiempo_segundos = tiempo_segundos,
+                validez         = "valido",
+                clientes_ids    = rol_info.get("clientes_ids", []),
+                cazadora        = cazadora_flag,
             )
 
             if is_valid:
@@ -522,10 +540,30 @@ class RoleHandlers:
                 mins = (tiempo_segundos % 3600) // 60
                 s    = tiempo_segundos % 60
 
+                # ── Líneas de sistemas especiales ─────────────────────────────
+                lineas_extra = ""
+
+                info_caz  = info_sistemas.get("cazadora", {})
+                info_freq = info_sistemas.get("frecuentes", {})
+
+                if info_caz.get("activo"):
+                    lineas_extra += (
+                        f"🦅 <b>Bonus cazadora:</b> +{info_caz['puntos_bonus']} pts (×2)\n"
+                    )
+
+                if info_freq:
+                    pct  = info_freq["penalizacion_pct"]
+                    cant = info_freq["cantidad_previa"]
+                    lineas_extra += (
+                        f"⚠️ <b>Penalización frecuentes:</b> -{pct}% puntos "
+                        f"({cant} rol{'es' if cant != 1 else ''} previo{'s' if cant != 1 else ''} este mes)\n"
+                    )
+
                 texto = (
                     f"✅ <b>Rol #{rol_id} finalizado</b>\n\n"
                     f"⏱️ Duración: {h}h {mins}m {s}s\n"
                     f"🏆 Puntos ganados: <b>{puntos_ganados}</b>\n"
+                    f"{lineas_extra}"
                     f"Cuenta para rol del mes: {icono_tipo}\n"
                     f"✨ Cosmos obtenidos: <b>{cosmos_ganados}</b>\n\n"
                     f"¡Gracias por disfrutar de nuestros servicios! 💋"

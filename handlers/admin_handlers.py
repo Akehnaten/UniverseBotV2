@@ -735,6 +735,11 @@ class AdminHandlers:
             db_manager.execute_update(
                 "UPDATE USUARIOS SET jugando=0, puntos=0, nickname='Normal'"
             )
+            # Resetear tabla de frecuentes del mes anterior
+            mes_actual = datetime.now().strftime("%Y-%m")
+            db_manager.execute_update(
+                "DELETE FROM ROL_FRECUENTES WHERE mes != ?", (mes_actual,)
+            )
             reset_ok = True
         except Exception as exc:
             logger.error("[NUEVOMES] Error reseteando: %s", exc)
