@@ -183,6 +183,16 @@ class PhotocardsHandlers:
                 carta_id = int(partes[2]) if len(partes) > 2 else 0
                 self._intercambiar(call, owner_id, carta_id)
 
+            elif accion == "pc_vrep_alb":
+                # pc_vrep_alb:<owner>:<album_key>
+                album_key = partes[2] if len(partes) > 2 else ""
+                self._vender_repetidas_album(call, owner_id, album_key, incluir_legendarias=True)
+
+            elif accion == "pc_vrep_nleg":
+                # pc_vrep_nleg:<owner>:<album_key>
+                album_key = partes[2] if len(partes) > 2 else ""
+                self._vender_repetidas_album(call, owner_id, album_key, incluir_legendarias=False)
+
         except Exception as exc:
             logger.error(f"handle_callback ({call.data}): {exc}", exc_info=True)
             self._answer(call, "❌ Error inesperado.", alert=True)
@@ -370,6 +380,8 @@ class PhotocardsHandlers:
         if nav:
             markup.row(*nav)
 
+        markup.add(types.InlineKeyboardButton("💸 Vender todas las repetidas",      callback_data=f"pc_vrep_alb:{uid}:{album_key}"))
+        markup.add(types.InlineKeyboardButton("💸 Vender repetidas no legendarias", callback_data=f"pc_vrep_nleg:{uid}:{album_key}"))
         markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_coleccion:{uid}"))
 
         nombre_u = self._nombre_usuario(call)
@@ -591,6 +603,88 @@ class PhotocardsHandlers:
             )
         else:
             self._send_text(call, f"❌ {msg}", markup)
+
+    def _vender_repetidas_album(
+        self,
+        call: types.CallbackQuery,
+        uid: int,
+        album_key: str,
+        incluir_legendarias: bool,
+    ) -> None:
+        """
+        Vende todas las copias extra (cantidad - 1) de las cartas repetidas
+        del usuario en el álbum dado.
+
+        Args:
+            incluir_legendarias: Si False, omite las cartas de rareza 'legendaria'.
+        """
+        self._answer(call)
+
+        cartas       = photocards_service.get_cartas_usuario_en_album(uid, album_key)
+        nombre_album = photocards_service.config_albums.get(album_key, {}).get("name", album_key)
+
+        vendidas_count = 0
+        cosmos_total   = 0
+        omitidas_leg   = 0
+
+        for carta_id, cantidad in cartas.items():
+            if cantidad <= 1:
+                continue  # solo 1 copia → no hay repetidas
+
+            pc = photocards_service.get_carta_by_id(carta_id)
+
+            if not incluir_legendarias and pc and pc.rareza == "legendaria":
+                omitidas_leg += 1
+                continue
+
+            a_vender = cantidad - 1
+            exito, _, cosmos = photocards_service.vender_photocard(uid, carta_id, a_vender)
+            if exito:
+                vendidas_count += a_vender
+                cosmos_total   += cosmos
+
+        saldo  = economy_service.get_balance(uid)
+        markup = types.InlineKeyboardMarkup(row_width=1)
+        markup.add(
+            types.InlineKeyboardButton(
+                "📂 Volver al álbum",
+                callback_data=f"pc_album:{uid}:{album_key}:0",
+            ),
+            types.InlineKeyboardButton("🗂️ Mi Colección", callback_data=f"pc_coleccion:{uid}"),
+        )
+        nombre_u = self._nombre_usuario(call)
+
+        if vendidas_count == 0:
+            nota_vacia = (
+                f" (tenés {omitidas_leg} legendaria(s) repetida(s) no incluidas)"
+                if not incluir_legendarias and omitidas_leg > 0
+                else ""
+            )
+            self._edit(
+                call,
+                f"👤 <b>Menú de {nombre_u}</b>\n\n"
+                f"ℹ️ No había copias repetidas para vender en <b>{nombre_album}</b>{nota_vacia}.",
+                markup,
+            )
+            return
+
+        tipo_venta = "Todas las repetidas" if incluir_legendarias else "Repetidas no legendarias"
+        nota_leg   = (
+            f"\n⚠️ <i>{omitidas_leg} carta(s) legendaria(s) no vendida(s)</i>"
+            if not incluir_legendarias and omitidas_leg > 0
+            else ""
+        )
+
+        self._edit(
+            call,
+            f"👤 <b>Menú de {nombre_u}</b>\n\n"
+            f"💸 <b>Venta masiva — {nombre_album}</b>\n\n"
+            f"🗃️ Tipo: <i>{tipo_venta}</i>\n"
+            f"🃏 Copias vendidas: <b>×{vendidas_count}</b>\n"
+            f"💰 Total ganado: <b>+{cosmos_total} cosmos</b>\n"
+            f"💳 Saldo actual: <b>{saldo} cosmos</b>{nota_leg}",
+            markup,
+        )
 
     # ── intercambiar ──────────────────────────────────────────────────────────
 
