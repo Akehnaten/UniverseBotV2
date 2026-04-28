@@ -143,9 +143,25 @@ def _eliminar_mensaje_seguro(bot, chat_id, message_id):
 
 @bot.middleware_handler(update_types=['message'])
 def check_user_and_channel(bot_instance, message):
-    # Ignorar mensajes de canales/sistema sin usuario real
     if message.from_user is None:
         return
+
+    chat_type = message.chat.type
+    chat_id   = message.chat.id
+
+    # ── Bloqueo de grupo FUERA del try/except — debe ser incondicional ────────
+    #if chat_type in ("group", "supergroup") and chat_id != CANAL_ID:
+     #   bot_instance.stop_message_propagation()
+     #   return
+    # LOG TEMPORAL DE DIAGNÓSTICO
+    logger.info(
+        "[MW-DIAG] chat=%s type=%s user=%s thread=%s cmd=%r",
+        message.chat.id,
+        message.chat.type,
+        message.from_user.id,
+        getattr(message, "message_thread_id", "N/A"),
+        (message.text or "")[:40],
+    )
 
     try:
         import threading
@@ -158,11 +174,9 @@ def check_user_and_channel(bot_instance, message):
         )
         from funciones import economy_service
 
-        user_id   = message.from_user.id
-        chat_id   = message.chat.id
-        chat_type = message.chat.type
+        user_id = message.from_user.id
 
-        # ── 1. Sincronización silenciosa de datos de perfil ───────────────────────
+        # ── 1. Sincronización silenciosa de datos de perfil ───────────────────
         try:
             from funciones.user_service import user_service as _us
             _username = message.from_user.username or ""
@@ -174,16 +188,13 @@ def check_user_and_channel(bot_instance, message):
         except Exception as _sync_err:
             logger.warning(f"[MIDDLEWARE] Error en sync_user_data: {_sync_err}")
 
-        # ── Solo aplicar filtros de canal en grupos ───────────────────────────────
+        # Mensajes privados: sin filtros de canal
         if chat_type not in ("group", "supergroup"):
-            return  # Mensajes privados: no aplicar ningún filtro
-        # Solo procesar mensajes del canal configurado
-        if chat_id != CANAL_ID:
-            bot_instance.stop_message_propagation()
             return
+
         thread_id = _get_thread_id(message)
 
-        # ── 2. Filtro ROLES: solo idols y admins ──────────────────────────────────
+        # ── 2. Filtro ROLES ───────────────────────────────────────────────────
         if thread_id == ROLES:
             if _es_admin_grupo(bot_instance, chat_id, user_id):
                 return
@@ -201,7 +212,7 @@ def check_user_and_channel(bot_instance, message):
                 pass
             return
 
-        # ── 3. Filtro ENTREVISTAS ─────────────────────────────────────────────────
+        # ── 3. Filtro ENTREVISTAS ─────────────────────────────────────────────
         if CANAL_ENTREVISTAS and thread_id == CANAL_ENTREVISTAS:
             if (user_id not in ENTREVISTADORES
                     and user_id not in INVITADOS_TEMPORALES):
@@ -211,8 +222,8 @@ def check_user_and_channel(bot_instance, message):
                     pass
                 return
 
-        # ── 4. Registro obligatorio ───────────────────────────────────────────────
-        message_text      = message.text or message.caption or ""
+        # ── 4. Registro obligatorio ───────────────────────────────────────────
+        message_text = message.text or message.caption or ""
         sin_registro_cmds = ("/registrar", "/start", "/help")
         if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
             return
@@ -238,7 +249,7 @@ def check_user_and_channel(bot_instance, message):
                 pass
             return
 
-        # ── 5. Caja misteriosa ────────────────────────────────────────────────────
+        # ── 5. Caja misteriosa ────────────────────────────────────────────────
         import random
         if random.random() <= PROBABILIDAD_CAJA_MISTERIOSA:
             try:
@@ -246,10 +257,10 @@ def check_user_and_channel(bot_instance, message):
             except Exception:
                 pass
 
-        # ── 6. Recompensa diaria ──────────────────────────────────────────────────
+        # ── 6. Recompensa diaria ──────────────────────────────────────────────
         if message.content_type in ("text", "photo", "video"):
             try:
-                hoy       = str(date.today())
+                hoy = str(date.today())
                 resultado = db_manager.execute_query(
                     "SELECT ultima_recompensa_diaria FROM USUARIOS WHERE userID = ?",
                     (user_id,),
@@ -257,9 +268,7 @@ def check_user_and_channel(bot_instance, message):
                 if resultado:
                     ultima = resultado[0].get("ultima_recompensa_diaria")
                     if ultima != hoy:
-                        economy_service.add_credits(
-                            user_id, RECOMPENSA_DIARIA, "Recompensa diaria"
-                        )
+                        economy_service.add_credits(user_id, RECOMPENSA_DIARIA, "Recompensa diaria")
                         db_manager.execute_update(
                             "UPDATE USUARIOS SET puntos = puntos + ? WHERE userID = ?",
                             (RECOMPENSA_DIARIA_P, user_id),
@@ -279,11 +288,9 @@ def check_user_and_channel(bot_instance, message):
 
     except Exception as _mw_err:
         logger.error(
-            f"[MIDDLEWARE] Error inesperado user="
-            f"{getattr(message.from_user, 'id', '?')}: {_mw_err}",
+            f"[MIDDLEWARE] Error inesperado user={getattr(message.from_user, 'id', '?')}: {_mw_err}",
             exc_info=True,
         )
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CALLBACKS Y COMANDOS DE ENTREVISTAS
