@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """
-Handlers del Bot
-Configura todos los manejadores de comandos
+handlers/__init__.py
+Configura todos los manejadores de comandos en orden determinístico.
 """
 
 import logging
@@ -11,20 +11,19 @@ logger = logging.getLogger(__name__)
 
 def setup_all_handlers(bot):
     """
-    Configura todos los handlers del bot
-    
-    Args:
-        bot: Instancia del bot de Telegram
+    Configura todos los handlers del bot.
+
+    ORDEN IMPORTA en pyTelegramBotAPI:
+      - Los handlers se recorren en orden de registro.
+      - juan_handler usa @bot.message_handler con content_types amplios y
+        debe ir al FINAL para no interferir con handlers de comandos.
+      - ForwarderHandler debe ir temprano para capturar media antes de que
+        cualquier handler de texto lo procese.
     """
     handlers_initialized = []
 
-    try:
-        from handlers.juan_handler import setup_juan_handler
-        setup_juan_handler(bot)
-        logger.info("✅ Juan (el caballo) cargado")
-    except Exception as e:
-        logger.error(f"❌ Juan handler: {e}", exc_info=True)
-        
+    # ── Handlers de comandos/funcionalidad primero ────────────────────────────
+
     try:
         from handlers.basic_handlers import BasicUserHandlers
         BasicUserHandlers(bot)
@@ -32,7 +31,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Basic handlers configurados")
     except Exception as e:
         logger.error(f"❌ Basic handlers: {e}", exc_info=True)
-    
+
     try:
         from handlers.pokemon_handlers import PokemonHandlers
         PokemonHandlers(bot)
@@ -40,7 +39,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Pokemon handlers configurados")
     except Exception as e:
         logger.error(f"❌ Pokemon handlers: {e}", exc_info=True)
-    
+
     try:
         from handlers.economy_handlers import EconomyHandlers
         EconomyHandlers(bot)
@@ -48,7 +47,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Economy handlers configurados")
     except Exception as e:
         logger.error(f"❌ Economy handlers: {e}", exc_info=True)
-    
+
     try:
         from handlers.casino_handlers import CasinoHandlers
         CasinoHandlers(bot)
@@ -56,7 +55,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Casino handlers configurados")
     except Exception as e:
         logger.error(f"❌ Casino handlers: {e}", exc_info=True)
-    
+
     try:
         from handlers.admin_handlers import AdminHandlers
         AdminHandlers(bot)
@@ -64,7 +63,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Admin handlers configurados")
     except Exception as e:
         logger.error(f"❌ Admin handlers: {e}", exc_info=True)
-    
+
     try:
         from handlers.role_handlers import RoleHandlers
         RoleHandlers(bot)
@@ -73,6 +72,7 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Role handlers: {e}", exc_info=True)
 
+    # ── Forwarder: antes de roulette/photocards para no perder media ──────────
     try:
         from handlers.forwarder_handler import setup as setup_forwarder
         setup_forwarder(bot)
@@ -80,15 +80,15 @@ def setup_all_handlers(bot):
         logger.info("✅ Forwarder handler configurado")
     except Exception as e:
         logger.error(f"❌ Forwarder handler: {e}", exc_info=True)
-        
+
     try:
         from handlers.roulette_handlers import RouletteHandlers
         RouletteHandlers(bot)
         handlers_initialized.append("Roulette")
         logger.info("✅ Roulette handlers configurados")
     except Exception as e:
-        logger.error("❌ Roulette handlers: %s", e, exc_info=True)
-        
+        logger.error(f"❌ Roulette handlers: {e}", exc_info=True)
+
     try:
         from handlers.photocards_handlers import PhotocardsHandlers
         PhotocardsHandlers(bot)
@@ -104,7 +104,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Betting handlers configurados")
     except Exception as e:
         logger.error(f"❌ Betting handlers: {e}", exc_info=True)
-    
+
     try:
         from handlers.event_handlers import EventHandlers
         EventHandlers(bot)
@@ -112,7 +112,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Event handlers configurados")
     except Exception as e:
         logger.error(f"❌ Event handlers: {e}", exc_info=True)
-        
+
     try:
         from pokemon.level_up_handler import registrar_callbacks
         registrar_callbacks(bot)
@@ -136,7 +136,7 @@ def setup_all_handlers(bot):
         logger.info("✅ Trade handler configurado")
     except Exception as e:
         logger.error(f"❌ Trade handler: {e}", exc_info=True)
-    
+
     try:
         from pokemon.gym_battle_system import gym_cmd
         gym_cmd.register(bot)
@@ -152,7 +152,7 @@ def setup_all_handlers(bot):
         logger.info("✅ ItemUse callbacks configurados")
     except Exception as e:
         logger.error(f"❌ ItemUse callbacks: {e}", exc_info=True)
-        
+
     try:
         from handlers.apodo_handler import ApodoHandler
         ApodoHandler(bot)
@@ -160,8 +160,24 @@ def setup_all_handlers(bot):
         logger.info("✅ Apodo handler configurado")
     except Exception as e:
         logger.error(f"❌ Apodo handler: {e}", exc_info=True)
-    
-    logger.info(f"[HANDLERS] {len(handlers_initialized)} módulos configurados: {', '.join(handlers_initialized)}")
+
+    # ── Juan AL FINAL: usa content_types amplios sin filtro de chat/comando ───
+    # Si va primero, sus handlers de photo/video/document se registran antes
+    # que los de betting/forwarder y pueden interrumpir la cadena ante
+    # excepción interna (llamada a Groq fallida, etc.).
+    try:
+        from handlers.juan_handler import setup_juan_handler
+        setup_juan_handler(bot)
+        handlers_initialized.append("Juan")
+        logger.info("✅ Juan (el caballo) cargado")
+    except Exception as e:
+        logger.error(f"❌ Juan handler: {e}", exc_info=True)
+
+    logger.info(
+        "[HANDLERS] %d módulos configurados: %s",
+        len(handlers_initialized),
+        ", ".join(handlers_initialized),
+    )
 
 
-__all__ = ['setup_all_handlers']
+__all__ = ["setup_all_handlers"]
