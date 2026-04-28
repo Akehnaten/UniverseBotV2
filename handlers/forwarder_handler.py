@@ -64,7 +64,7 @@ def _get_thread(message: types.Message) -> Optional[int]:
 
 
 def _es_video(message: types.Message) -> bool:
-    return message.video is not None or message.video_note is not None
+    return message.video is not None or message.video_note is not None or message.animation is not None
 
 
 def _resolver_destino(thread_origen: int, message: types.Message) -> Optional[int]:
