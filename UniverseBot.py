@@ -31,6 +31,7 @@ from config import (
     TELEGRAM_TOKEN,
     ENTREVISTADORES,
     INVITADOS_TEMPORALES,
+    CANAL_ID,
 )
 
 logger.info("="*60)
@@ -176,7 +177,10 @@ def check_user_and_channel(bot_instance, message):
         # ── Solo aplicar filtros de canal en grupos ───────────────────────────────
         if chat_type not in ("group", "supergroup"):
             return  # Mensajes privados: no aplicar ningún filtro
-
+        # Solo procesar mensajes del canal configurado
+        if chat_id != CANAL_ID:
+            bot_instance.stop_message_propagation()
+            return
         thread_id = _get_thread_id(message)
 
         # ── 2. Filtro ROLES: solo idols y admins ──────────────────────────────────
