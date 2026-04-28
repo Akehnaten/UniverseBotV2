@@ -151,18 +151,8 @@ def check_user_and_channel(bot_instance, message):
 
     # ── Bloqueo de grupo FUERA del try/except — debe ser incondicional ────────
     if chat_type in ("group", "supergroup") and chat_id != CANAL_ID:
-        logger.info("[MW-DIAG] chat incorrecto → stop")
         bot_instance.stop_message_propagation()
         return
-    # LOG TEMPORAL DE DIAGNÓSTICO
-    logger.info(
-        "[MW-DIAG] chat=%s type=%s user=%s thread=%s cmd=%r",
-        message.chat.id,
-        message.chat.type,
-        message.from_user.id,
-        getattr(message, "message_thread_id", "N/A"),
-        (message.text or "")[:40],
-    )
 
     try:
         import threading
@@ -191,14 +181,12 @@ def check_user_and_channel(bot_instance, message):
 
         # Mensajes privados: sin filtros de canal
         if chat_type not in ("group", "supergroup"):
-            logger.info("[MW-DIAG] privado → pass")
             return
-        logger.info("[MW-DIAG] pasó canal OK")
+
         thread_id = _get_thread_id(message)
 
         # ── 2. Filtro ROLES ───────────────────────────────────────────────────
         if thread_id == ROLES:
-            logger.info("[MW-DIAG] es thread ROLES")
             if _es_admin_grupo(bot_instance, chat_id, user_id):
                 return
             if user_id in ADMIN_IDS:
@@ -217,7 +205,6 @@ def check_user_and_channel(bot_instance, message):
 
         # ── 3. Filtro ENTREVISTAS ─────────────────────────────────────────────
         if CANAL_ENTREVISTAS and thread_id == CANAL_ENTREVISTAS:
-            logger.info("[MW-DIAG] es thread ENTREVISTAS")
             if (user_id not in ENTREVISTADORES
                     and user_id not in INVITADOS_TEMPORALES):
                 try:
@@ -230,14 +217,12 @@ def check_user_and_channel(bot_instance, message):
         message_text = message.text or message.caption or ""
         sin_registro_cmds = ("/registrar", "/start", "/help")
         if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
-            logger.info("[MW-DIAG] cmd sin registro → pass")
             return
 
         if getattr(message.from_user, "is_bot", False):
             return
 
         if not db_manager.user_exists(user_id):
-            logger.info("[MW-DIAG] usuario no registrado → bloqueado")
             try:
                 bot_instance.delete_message(chat_id, message.message_id)
                 warning = bot_instance.send_message(
@@ -254,7 +239,7 @@ def check_user_and_channel(bot_instance, message):
             except Exception:
                 pass
             return
-        logger.info("[MW-DIAG] pasó registro OK → llegando a handlers")
+      
         # ── 5. Caja misteriosa ────────────────────────────────────────────────
         import random
         if random.random() <= PROBABILIDAD_CAJA_MISTERIOSA:

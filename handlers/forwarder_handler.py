@@ -108,6 +108,11 @@ class ForwarderHandler:
     # ── Entrada principal ─────────────────────────────────────────────────────
 
     def _on_message(self, message: types.Message) -> None:
+
+        # Ignorar comandos — los manejan sus propios handlers
+        if message.text and message.text.startswith("/"):
+            return
+        
         # Guard 1: solo el canal configurado
         if message.chat.id != CANAL_ID:
             return
