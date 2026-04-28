@@ -74,6 +74,14 @@ def setup_all_handlers(bot):
 
     # ── Forwarder: antes de roulette/photocards para no perder media ──────────
     try:
+        from handlers.betting_handlers import BettingHandlers
+        BettingHandlers(bot)
+        handlers_initialized.append("Betting")
+        logger.info("✅ Betting handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Betting handlers: {e}", exc_info=True)
+    
+    try:
         from handlers.forwarder_handler import setup as setup_forwarder
         setup_forwarder(bot)
         handlers_initialized.append("Forwarder")
@@ -96,14 +104,6 @@ def setup_all_handlers(bot):
         logger.info("✅ Photocards handlers configurados")
     except Exception as e:
         logger.error(f"❌ Photocard handlers: {e}", exc_info=True)
-
-    try:
-        from handlers.betting_handlers import BettingHandlers
-        BettingHandlers(bot)
-        handlers_initialized.append("Betting")
-        logger.info("✅ Betting handlers configurados")
-    except Exception as e:
-        logger.error(f"❌ Betting handlers: {e}", exc_info=True)
 
     try:
         from handlers.event_handlers import EventHandlers
