@@ -359,6 +359,8 @@ class BettingHandlers:
 
     def cmd_apuestas(self, message: telebot.types.Message) -> None:
         """Muestra las mesas en las que todavía se puede apostar."""
+        logger.info("[BET-DIAG] /apuestas ENTRÓ AL HANDLER — uid=%s chat=%s thread=%s",
+        message.from_user.id, message.chat.id, _thread_id(message))
         cid = message.chat.id
         tid = _thread_id(message)
 
