@@ -74,6 +74,14 @@ def setup_all_handlers(bot):
         logger.error(f"❌ Role handlers: {e}", exc_info=True)
 
     try:
+        from handlers.forwarder_handler import setup as setup_forwarder
+        setup_forwarder(bot)
+        handlers_initialized.append("Forwarder")
+        logger.info("✅ Forwarder handler configurado")
+    except Exception as e:
+        logger.error(f"❌ Forwarder handler: {e}", exc_info=True)
+        
+    try:
         from handlers.roulette_handlers import RouletteHandlers
         RouletteHandlers(bot)
         handlers_initialized.append("Roulette")
