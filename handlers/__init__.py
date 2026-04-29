@@ -2,6 +2,15 @@
 """
 handlers/__init__.py
 Configura todos los manejadores de comandos en orden determinístico.
+
+ORDEN DE REGISTRO (importa en pyTelegramBotAPI):
+  1. Handlers de comandos específicos (commands=[...]) — primero siempre.
+  2. Juan — tiene func=lambda que excluye "/" así que no chupa comandos,
+     pero debe ir ANTES de cualquier handler con content_types=["text"] sin
+     filtro (Forwarder, EventHandlers) para recibir texto normal primero.
+  3. Forwarder — captura media antes de roulette/photocards.
+  4. Resto de handlers de contenido.
+  5. Juan ya no va al final.
 """
 
 import logging
@@ -10,19 +19,9 @@ logger = logging.getLogger(__name__)
 
 
 def setup_all_handlers(bot):
-    """
-    Configura todos los handlers del bot.
-
-    ORDEN IMPORTA en pyTelegramBotAPI:
-      - Los handlers se recorren en orden de registro.
-      - juan_handler usa @bot.message_handler con content_types amplios y
-        debe ir al FINAL para no interferir con handlers de comandos.
-      - ForwarderHandler debe ir temprano para capturar media antes de que
-        cualquier handler de texto lo procese.
-    """
     handlers_initialized = []
 
-    # ── Handlers de comandos/funcionalidad primero ────────────────────────────
+    # ── 1. Handlers de comandos específicos ──────────────────────────────────
 
     try:
         from handlers.basic_handlers import BasicUserHandlers
@@ -72,7 +71,6 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Role handlers: {e}", exc_info=True)
 
-    # ── Forwarder: antes de roulette/photocards para no perder media ──────────
     try:
         from handlers.betting_handlers import BettingHandlers
         BettingHandlers(bot)
@@ -80,14 +78,6 @@ def setup_all_handlers(bot):
         logger.info("✅ Betting handlers configurados")
     except Exception as e:
         logger.error(f"❌ Betting handlers: {e}", exc_info=True)
-    
-    try:
-        from handlers.forwarder_handler import setup as setup_forwarder
-        setup_forwarder(bot)
-        handlers_initialized.append("Forwarder")
-        logger.info("✅ Forwarder handler configurado")
-    except Exception as e:
-        logger.error(f"❌ Forwarder handler: {e}", exc_info=True)
 
     try:
         from handlers.roulette_handlers import RouletteHandlers
@@ -104,22 +94,6 @@ def setup_all_handlers(bot):
         logger.info("✅ Photocards handlers configurados")
     except Exception as e:
         logger.error(f"❌ Photocard handlers: {e}", exc_info=True)
-
-    try:
-        from handlers.event_handlers import EventHandlers
-        EventHandlers(bot)
-        handlers_initialized.append("Event")
-        logger.info("✅ Event handlers configurados")
-    except Exception as e:
-        logger.error(f"❌ Event handlers: {e}", exc_info=True)
-
-    try:
-        from pokemon.level_up_handler import registrar_callbacks
-        registrar_callbacks(bot)
-        handlers_initialized.append("LevelUp")
-        logger.info("✅ LevelUp callbacks configurados")
-    except Exception as e:
-        logger.error(f"❌ LevelUp callbacks: {e}", exc_info=True)
 
     try:
         from handlers.intercambio_handler import IntercambioHandler
@@ -161,10 +135,17 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Apodo handler: {e}", exc_info=True)
 
-    # ── Juan AL FINAL: usa content_types amplios sin filtro de chat/comando ───
-    # Si va primero, sus handlers de photo/video/document se registran antes
-    # que los de betting/forwarder y pueden interrumpir la cadena ante
-    # excepción interna (llamada a Groq fallida, etc.).
+    try:
+        from pokemon.level_up_handler import registrar_callbacks
+        registrar_callbacks(bot)
+        handlers_initialized.append("LevelUp")
+        logger.info("✅ LevelUp callbacks configurados")
+    except Exception as e:
+        logger.error(f"❌ LevelUp callbacks: {e}", exc_info=True)
+
+    # ── 2. Juan — ANTES de Forwarder y Event para capturar texto normal ───────
+    # Su func=lambda excluye comandos ("/"), así que no interfiere con
+    # ningún handler de commands=[...] registrado arriba.
     try:
         from handlers.juan_handler import setup_juan_handler
         setup_juan_handler(bot)
@@ -172,6 +153,23 @@ def setup_all_handlers(bot):
         logger.info("✅ Juan (el caballo) cargado")
     except Exception as e:
         logger.error(f"❌ Juan handler: {e}", exc_info=True)
+
+    # ── 3. Forwarder y Event — content_types amplios, van después de Juan ─────
+    try:
+        from handlers.forwarder_handler import setup as setup_forwarder
+        setup_forwarder(bot)
+        handlers_initialized.append("Forwarder")
+        logger.info("✅ Forwarder handler configurado")
+    except Exception as e:
+        logger.error(f"❌ Forwarder handler: {e}", exc_info=True)
+
+    try:
+        from handlers.event_handlers import EventHandlers
+        EventHandlers(bot)
+        handlers_initialized.append("Event")
+        logger.info("✅ Event handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Event handlers: {e}", exc_info=True)
 
     logger.info(
         "[HANDLERS] %d módulos configurados: %s",
