@@ -21,6 +21,15 @@ logger = logging.getLogger(__name__)
 def setup_all_handlers(bot):
     handlers_initialized = []
 
+    # ── 0. Juan PRIMERO — su func excluye "/" así que nunca chupa comandos ───
+    try:
+        from handlers.juan_handler import setup_juan_handler
+        setup_juan_handler(bot)
+        handlers_initialized.append("Juan")
+        logger.info("✅ Juan (el caballo) cargado")
+    except Exception as e:
+        logger.error(f"❌ Juan handler: {e}", exc_info=True)
+
     # ── 1. Handlers de comandos específicos ──────────────────────────────────
 
     try:
@@ -143,18 +152,7 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ LevelUp callbacks: {e}", exc_info=True)
 
-    # ── 2. Juan — ANTES de Forwarder y Event para capturar texto normal ───────
-    # Su func=lambda excluye comandos ("/"), así que no interfiere con
-    # ningún handler de commands=[...] registrado arriba.
-    try:
-        from handlers.juan_handler import setup_juan_handler
-        setup_juan_handler(bot)
-        handlers_initialized.append("Juan")
-        logger.info("✅ Juan (el caballo) cargado")
-    except Exception as e:
-        logger.error(f"❌ Juan handler: {e}", exc_info=True)
-
-    # ── 3. Forwarder y Event — content_types amplios, van después de Juan ─────
+    # ── 2. Forwarder y Event — content_types amplios, van después de Juan ─────
     try:
         from handlers.forwarder_handler import setup as setup_forwarder
         setup_forwarder(bot)
