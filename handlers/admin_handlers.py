@@ -523,9 +523,9 @@ class AdminHandlers:
         errores_migracion: list = []
 
         for fila in usuarios:
-            user_id_fila   = fila["userID"]   if isinstance(fila, dict) else fila[0]
-            nombre_fila    = fila["nombre"]    if isinstance(fila, dict) else fila[1]
-            username_fila  = fila["nombre_usuario"] if isinstance(fila, dict) else fila[2]
+            user_id_fila  = fila["userID"]        if isinstance(fila, dict) else fila[0]
+            nombre_fila   = fila["nombre"]        if isinstance(fila, dict) else fila[1]
+            username_fila = fila["nombre_usuario"] if isinstance(fila, dict) else fila[2]
 
             debe_migrar      = False
             motivo_migracion = ""
@@ -535,37 +535,38 @@ class AdminHandlers:
                 if miembro.status in ("left", "kicked"):
                     debe_migrar      = True
                     motivo_migracion = f"Salió/expulsado del grupo (status={miembro.status})"
+                # Cualquier otro status (member, administrator, creator, restricted)
+                # → sigue en el grupo → NO migrar
             except Exception as api_exc:
-                debe_migrar      = True
-                motivo_migracion = f"No encontrado en el chat ({type(api_exc).__name__})"
-                logger.info(
-                    f"[LIMPIAR] Error API para {user_id_fila} ({nombre_fila}): {api_exc}"
+                # ── NUNCA migrar por excepción ────────────────────────────────────────
+                # La API puede fallar por: timeout, rate limit, privacidad del usuario,
+                # bot sin permisos de admin suficientes, etc.
+                # Migrar en estos casos fue lo que causó la pérdida de datos.
+                # Solo logueamos y continuamos con el siguiente usuario.
+                logger.warning(
+                    "[LIMPIAR] No se pudo verificar %s (%s): %s — OMITIDO (no se migra).",
+                    user_id_fila, nombre_fila, api_exc,
                 )
+                continue  # ← saltar este usuario, no tocarlo
 
             if debe_migrar:
                 try:
                     from handlers.member_handlers import _mover_a_exmiembros
                     ok = _mover_a_exmiembros(user_id_fila, motivo_migracion)
                     if ok:
-                        display = f"{nombre_fila}"
+                        display = nombre_fila
                         if username_fila:
                             display += f" (@{username_fila})"
                         migrados.append(display)
                         logger.info(
-                            f"[LIMPIAR] Migrado a EXMIEMBROS: {user_id_fila} "
-                            f"({nombre_fila}) — Motivo: {motivo_migracion}"
+                            "[LIMPIAR] Migrado a EXMIEMBROS: %s (%s) — %s",
+                            user_id_fila, nombre_fila, motivo_migracion,
                         )
                     else:
                         errores_migracion.append(f"{nombre_fila} (error al migrar)")
-                        logger.warning(
-                            f"[LIMPIAR] Falló la migración de {user_id_fila} ({nombre_fila})"
-                        )
                 except Exception as mig_exc:
                     errores_migracion.append(f"{nombre_fila} (excepción: {mig_exc})")
-                    logger.error(
-                        f"[LIMPIAR] Excepción migrando {user_id_fila}: {mig_exc}",
-                        exc_info=True,
-                    )
+                    logger.error("[LIMPIAR] Excepción migrando %s: %s", user_id_fila, mig_exc, exc_info=True)
 
         # ── Borrar el aviso de "limpiando..." ────────────────────────────────
         if aviso:

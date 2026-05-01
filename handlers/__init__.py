@@ -152,15 +152,6 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ LevelUp callbacks: {e}", exc_info=True)
 
-    # ── 2. Forwarder y Event — content_types amplios, van después de Juan ─────
-    try:
-        from handlers.forwarder_handler import setup as setup_forwarder
-        setup_forwarder(bot)
-        handlers_initialized.append("Forwarder")
-        logger.info("✅ Forwarder handler configurado")
-    except Exception as e:
-        logger.error(f"❌ Forwarder handler: {e}", exc_info=True)
-
     try:
         from handlers.event_handlers import EventHandlers
         EventHandlers(bot)

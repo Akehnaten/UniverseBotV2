@@ -185,6 +185,13 @@ def check_user_and_channel(bot_instance, message):
 
         thread_id = _get_thread_id(message)
 
+        # ── FORWARDER — corre aquí, antes de todo, sin tocar los handlers ────
+        try:
+            from handlers.forwarder_handler import ForwarderHandler
+            ForwarderHandler.forward_if_needed(message, bot_instance)
+        except Exception as _fwd_err:
+            logger.warning("[MIDDLEWARE] Forwarder error: %s", _fwd_err)
+
         # ── 2. Filtro ROLES ───────────────────────────────────────────────────
         if thread_id == ROLES:
             if _es_admin_grupo(bot_instance, chat_id, user_id):
@@ -213,7 +220,7 @@ def check_user_and_channel(bot_instance, message):
                     pass
                 return
 
-        # ── 4. Registro obligatorio ───────────────────────────────────────────
+        # ── 4. Registro obligatorio ───────────────────────────────────────────────
         message_text = message.text or message.caption or ""
         sin_registro_cmds = ("/registrar", "/start", "/help")
         if any(message_text.startswith(cmd) for cmd in sin_registro_cmds):
@@ -223,6 +230,56 @@ def check_user_and_channel(bot_instance, message):
             return
 
         if not db_manager.user_exists(user_id):
+            # ── Verificar si es un exmiembro que volvió ───────────────────────────
+            try:
+                exmiembro = db_manager.execute_query(
+                    "SELECT * FROM EXMIEMBROS WHERE userID = ?", (user_id,)
+                )
+                if exmiembro:
+                    fila = exmiembro[0]
+                    # Restaurar a USUARIOS
+                    db_manager.execute_update(
+                        """INSERT OR REPLACE INTO USUARIOS (
+                            userID, nombre_usuario, nombre, clase, idol,
+                            puntos, material, registro, wallet, jugando,
+                            encola, enrol, nickname, passwd, rol_hist,
+                            nivel, experiencia, pasos_guarderia, ultima_recompensa_diaria
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        (
+                            fila["userID"],
+                            fila.get("nombre_usuario"),
+                            fila.get("nombre"),
+                            fila.get("clase"),
+                            fila.get("idol"),
+                            fila.get("puntos", 0),
+                            fila.get("material"),
+                            fila.get("registro"),
+                            fila.get("wallet", 0),
+                            0,  # jugando → reset
+                            0,  # encola → reset
+                            0,  # enrol → reset
+                            fila.get("nickname"),
+                            fila.get("passwd"),
+                            fila.get("rol_hist", 0),
+                            fila.get("nivel", 1),
+                            fila.get("experiencia", 0),
+                            fila.get("pasos_guarderia", 0),
+                            fila.get("ultima_recompensa_diaria"),
+                        ),
+                    )
+                    db_manager.execute_update(
+                        "DELETE FROM EXMIEMBROS WHERE userID = ?", (user_id,)
+                    )
+                    logger.info(
+                        "[MIDDLEWARE] Exmiembro %s restaurado a USUARIOS automáticamente.",
+                        user_id,
+                    )
+                    # Dejar que el mensaje pase normalmente, ya está registrado
+                    return
+            except Exception as _ex_err:
+                logger.warning("[MIDDLEWARE] Error restaurando exmiembro %s: %s", user_id, _ex_err)
+
+            # No está en ninguna tabla → borrar mensaje y avisar
             try:
                 bot_instance.delete_message(chat_id, message.message_id)
                 warning = bot_instance.send_message(
