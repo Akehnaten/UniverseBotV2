@@ -187,8 +187,8 @@ def check_user_and_channel(bot_instance, message):
 
         # ── FORWARDER — corre aquí, antes de todo, sin tocar los handlers ────
         try:
-            from handlers.forwarder_handler import ForwarderHandler
-            ForwarderHandler.forward_if_needed(message, bot_instance)
+            from handlers.forwarder_handler import forward_if_needed
+            forward_if_needed(message, bot_instance)
         except Exception as _fwd_err:
             logger.warning("[MIDDLEWARE] Forwarder error: %s", _fwd_err)
 
