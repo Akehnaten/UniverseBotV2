@@ -191,6 +191,29 @@ class RoleService:
 
             puntos_ganados = max(1, round(puntos_cazadora * mult_frecuentes))
 
+            # ── Ajustar DB con la diferencia real ────────────────────────────
+            # calculate_points ya cargó puntos_base en la DB.
+            # Si cazadora o frecuentes modifican el total, hay que ajustar.
+            diferencia = puntos_ganados - puntos_base
+            if diferencia > 0:
+                self.db.execute_update(
+                    "UPDATE USUARIOS SET puntos = puntos + ? WHERE userID = ?",
+                    (diferencia, idol_id),
+                )
+                logger.info(
+                    "[ROL] #%s ajuste DB: +%s pts por cazadora/bonus (base=%s → final=%s)",
+                    rol_id, diferencia, puntos_base, puntos_ganados,
+                )
+            elif diferencia < 0:
+                self.db.execute_update(
+                    "UPDATE USUARIOS SET puntos = MAX(0, puntos + ?) WHERE userID = ?",
+                    (diferencia, idol_id),
+                )
+                logger.info(
+                    "[ROL] #%s ajuste DB: %s pts por penalización frecuentes (base=%s → final=%s)",
+                    rol_id, diferencia, puntos_base, puntos_ganados,
+                )
+
             logger.info(
                 "[ROL] #%s finalizado — base=%s cazadora=%s mult_freq=%.2f final=%s",
                 rol_id, puntos_base, cazadora, mult_frecuentes, puntos_ganados,
