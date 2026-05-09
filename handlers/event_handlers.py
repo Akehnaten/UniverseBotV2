@@ -1,35 +1,27 @@
 # -*- coding: utf-8 -*-
 """
 handlers/event_handlers.py
-════════════════════════════════════════════════════════════════════════════════
 Sistema de Verdad o Reto para UniverseBot V2.0
 
 Comandos (thread EVENTOS):
-  /participar      — Te une a la lista del juego.
-  /verdadoreto     — (solo admins) Sortea 2 jugadores. Si hay turno activo,
-                     lo cancela y lanza uno nuevo (útil para saltear AFK).
-  /participando    — Muestra quién está en la lista.
-  /salir           — Te quita de la lista.
-  /expulsar        — (solo admins) Expulsa a un usuario de la lista por
-                     username o respondiendo a su mensaje. Cancela el turno
-                     si el expulsado era parte de él.
-  /terminarjuego   — (solo admins) Termina el juego activo y resetea todo.
+  /participar      - Te une a la lista del juego.
+  /verdadoreto     - (solo admins) Sortea 2 jugadores usando el sistema de
+                     dos colas para evitar repetidos.
+  /participando    - Muestra quien esta en cada cola.
+  /salir           - Te quita del juego.
+  /expulsar        - (solo admins) Expulsa a un jugador de la lista.
+  /terminarjuego   - (solo admins) Termina el juego y resetea todo.
 
-Flujo de una ronda:
-  1. Admin usa /verdadoreto → bot sortea jugador A (pregunta) y B (responde).
-     Si había un turno activo, lo cancela y arranca el nuevo sin bloquear.
-  2. Bot publica: "A le toca preguntarle a B — ¿qué le ponés?"
-     con botones [🗣️ Verdad automática] [🎯 Reto automático] [✏️ Escribir la mía]
-  3a. Si A elige automático → se publica aleatoriamente del banco.
-  3b. Si A elige escribir   → bot edita el mensaje y espera que A escriba
-      su texto en el canal. El siguiente mensaje de A en ese thread se
-      publica formateado para todos.
-  4. Los botones se reemplazan con el contenido final.
-  5. El turno se libera — listo para el próximo /verdadoreto.
+Sistema de dos colas (sin repetidos):
+  _sin_participar  - Jugadores que aun no fueron sorteados en este ciclo.
+  _participaron    - Jugadores que ya fueron sorteados en este ciclo.
 
-Nota: /salir también es capturado por role_handlers en el thread ROLES.
-      Este handler ignora silenciosamente los mensajes de otros threads.
-════════════════════════════════════════════════════════════════════════════════
+  Sorteo normal   -> se eligen 2 de _sin_participar y pasan a _participaron.
+  Ultimo restante -> si queda 1 en _sin_participar, se toma 1 al azar de
+                     _participaron como pareja. Esos 2 quedan solos en
+                     _participaron y todos los demas vuelven a _sin_participar.
+  Ciclo completo  -> si _sin_participar queda vacia entre rondas (por
+                     expulsiones), se reinicia el ciclo con _participaron.
 """
 
 import random
@@ -47,81 +39,96 @@ from funciones import user_service
 logger = logging.getLogger(__name__)
 
 
-# ─── Banco de preguntas y retos ───────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Banco de preguntas y retos
+# ---------------------------------------------------------------------------
 
 _VERDADES: list[str] = [
-    "¿Cuál es la cosa más vergonzosa que te ha pasado?",
-    "¿A quién del grupo le mandarías un mensaje a las 3am?",
-    "¿Cuál es tu crush secreto dentro del servidor?",
-    "¿Qué es lo peor que has hecho y nunca confesaste?",
-    "¿Con quién del grupo no te llevarías bien en la vida real?",
-    "¿Cuál fue la mentira más grande que dijiste este mes?",
-    "¿Qué canción escuchás en secreto pero jamás admitirías?",
-    "¿A quién del servidor bloquerías si pudieras sin consecuencias?",
-    "¿Cuál es el pensamiento más raro que tuviste hoy?",
-    "¿Qué es lo primero que notás cuando conocés a alguien?",
-    "¿Alguna vez le hablaste mal de alguien del servidor a otra persona?",
-    "¿Cuál es tu mayor inseguridad?",
-    "¿Qué harías si tuvieras un día invisible?",
-    "¿Cuál fue tu peor cita o situación romántica?",
-    "¿A quién del servidor le pedirías consejos de amor?",
-    "¿Qué aplicación usás más y no admitirías públicamente?",
-    "¿Cuántas veces al día revisás el celular sin motivo?",
-    "¿Qué es lo más atrevido que hiciste por llamar la atención?",
-    "¿Alguna vez mandaste un mensaje al destinatario equivocado?",
-    "¿Cuál es el peor regalo que recibiste y fingiste que te gustó?",
+    "Cual es la cosa mas vergonzosa que te ha pasado?",
+    "A quien del grupo le mandarias un mensaje a las 3am?",
+    "Cual es tu crush secreto dentro del servidor?",
+    "Que es lo peor que has hecho y nunca confesaste?",
+    "Con quien del grupo no te llevarias bien en la vida real?",
+    "Cual fue la mentira mas grande que dijiste este mes?",
+    "Que cancion escuchas en secreto pero jamas admitiras?",
+    "A quien del servidor bloquearias si pudieras sin consecuencias?",
+    "Cual es el pensamiento mas raro que tuviste hoy?",
+    "Que es lo primero que notas cuando conoces a alguien?",
+    "Alguna vez le hablaste mal de alguien del servidor a otra persona?",
+    "Cual es tu mayor inseguridad?",
+    "Que harias si tuvieras un dia invisible?",
+    "Cual fue tu peor cita o situacion romantica?",
+    "A quien del servidor le pediras consejos de amor?",
+    "Que aplicacion usas mas y no admitiras publicamente?",
+    "Cuantas veces al dia revisas el celular sin motivo?",
+    "Que es lo mas atrevido que hiciste por llamar la atencion?",
+    "Alguna vez mandaste un mensaje al destinatario equivocado?",
+    "Cual es el peor regalo que recibiste y fingiste que te gusto?",
 ]
 
 _RETOS: list[str] = [
-    "Mandá un audio cantando los primeros 10 segundos de una canción.",
-    "Escribí 'Te amo' al último contacto de tu lista de chats.",
-    "Enviá el último meme que guardaste en tu galería.",
-    "Hacé una imitación de texto del admin más estricto del servidor.",
-    "Describí a la persona de tu derecha usando solo emojis (3 máx.).",
-    "Escribí un mensaje de amor a un personaje ficticio de tu elección.",
-    "Contá un chiste en menos de 2 líneas. Si nadie se ríe, contá otro.",
-    "Enviá una selfie con la cara más ridícula que puedas hacer.",
-    "Cambiá tu nombre en el servidor por 'Patito de Goma' durante 5 minutos.",
-    "Escribí un poema de 4 versos sobre el servidor.",
-    "Mandá el último sticker que usaste con una frase explicando cuándo lo usarías.",
-    "Copiá exactamente el último mensaje que mandaste en otro chat y enviálo aquí.",
-    "Hacé una predicción del próximo evento del servidor.",
-    "Describí tu día de hoy usando solo palabras de 4 letras.",
-    "Enviá una recomendación de algo (canción, serie, lugar) en menos de 20 palabras.",
-    "Escribí el nombre de 5 miembros del servidor al revés.",
-    "Mandá un mensaje de voz diciendo el abecedario en 10 segundos.",
-    "Escribí un trabalenguas inventado sobre algún miembro del servidor.",
-    "Adiviná de quién es este mensaje (el admin elige uno antiguo del canal).",
-    "Enviá una foto de lo que tenés en la mesa ahora mismo.",
+    "Manda un audio cantando los primeros 10 segundos de una cancion.",
+    "Escribi 'Te amo' al ultimo contacto de tu lista de chats.",
+    "Envia el ultimo meme que guardaste en tu galeria.",
+    "Haz una imitacion de texto del admin mas estricto del servidor.",
+    "Describe a la persona de tu derecha usando solo emojis (3 max.).",
+    "Escribi un mensaje de amor a un personaje ficticio de tu eleccion.",
+    "Conta un chiste en menos de 2 lineas. Si nadie se rie, conta otro.",
+    "Envia una selfie con la cara mas ridicula que puedas hacer.",
+    "Cambia tu nombre en el servidor por 'Patito de Goma' durante 5 minutos.",
+    "Escribi un poema de 4 versos sobre el servidor.",
+    "Manda el ultimo sticker que usaste con una frase explicando cuando lo usarias.",
+    "Copia exactamente el ultimo mensaje que mandaste en otro chat y envialo aqui.",
+    "Haz una prediccion del proximo evento del servidor.",
+    "Describe tu dia de hoy usando solo palabras de 4 letras.",
+    "Envia una recomendacion de algo (cancion, serie, lugar) en menos de 20 palabras.",
+    "Escribi el nombre de 5 miembros del servidor al reves.",
+    "Manda un mensaje de voz diciendo el abecedario en 10 segundos.",
+    "Escribi un trabalenguas inventado sobre algun miembro del servidor.",
+    "Adivina de quien es este mensaje (el admin elige uno antiguo del canal).",
+    "Envia una foto de lo que tenes en la mesa ahora mismo.",
 ]
 
 
-# ─── Clase principal ──────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
+# Clase principal
+# ---------------------------------------------------------------------------
 
 class EventHandlers:
     """
-    Handlers para el sistema de Verdad o Reto y el canal de Eventos.
+    Handlers para el sistema de Verdad o Reto.
 
-    Estado en memoria por turno activo (_turno: dict | None):
-        preguntador    : dict   — jugador que elige y pone la verdad/reto.
-        respondedor    : dict   — jugador que responde o cumple.
+    Estado de listas:
+        _lista          - Todos los jugadores registrados. Fuente de verdad.
+        _sin_participar - Jugadores que aun no salieron sorteados en el ciclo.
+        _participaron   - Jugadores ya sorteados en el ciclo actual.
+
+        Invariante: _sin_participar U _participaron == _lista (por uid)
+
+    Estado del turno activo (_turno):
+        preguntador    : dict
+        respondedor    : dict
         chat_id        : int
         tid            : int | None
-        msg_id         : int    — message_id del mensaje con botones.
-        esperando_texto: bool   — True cuando se espera texto del preguntador.
+        msg_id         : int
+        esperando_texto: bool
     """
 
     def __init__(self, bot: telebot.TeleBot) -> None:
-        self.bot    = bot
-        self._lista: list[dict]     = []    # {"uid", "nombre", "mencion"}
-        self._turno: Optional[dict] = None  # turno activo o None
+        self.bot = bot
+        self._lista:          list[dict]     = []
+        self._sin_participar: list[dict]     = []
+        self._participaron:   list[dict]     = []
+        self._turno:          Optional[dict] = None
         self._register_handlers()
 
-    # ── Registro de handlers ──────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # Registro de handlers
+    # -----------------------------------------------------------------------
 
     def _register_handlers(self) -> None:
-        # IMPORTANTE: el handler de texto personalizado se registra PRIMERO
-        # para que tenga prioridad sobre cualquier catch-all de texto de otros módulos.
+        # El handler de texto personalizado va PRIMERO para ganar la carrera
+        # contra cualquier catch-all de texto de otros modulos.
         self.bot.register_message_handler(
             self.capturar_texto_personalizado,
             func=self._es_texto_del_preguntador,
@@ -138,7 +145,84 @@ class EventHandlers:
             func=lambda c: c.data.startswith("vor:"),
         )
 
-    # ── Helpers privados ─────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # Helpers de cola
+    # -----------------------------------------------------------------------
+
+    def _agregar_jugador(self, jugador: dict) -> None:
+        """Agrega un jugador a _lista y a _sin_participar (aun no jugo)."""
+        self._lista.append(jugador)
+        self._sin_participar.append(jugador)
+
+    def _quitar_jugador(self, uid: int) -> None:
+        """Quita un jugador de todas las listas y re-sincroniza las colas."""
+        self._lista          = [p for p in self._lista          if p["uid"] != uid]
+        self._sin_participar = [p for p in self._sin_participar if p["uid"] != uid]
+        self._participaron   = [p for p in self._participaron   if p["uid"] != uid]
+        self._sincronizar_colas()
+
+    def _sincronizar_colas(self) -> None:
+        """
+        Si _sin_participar quedo vacia pero aun hay jugadores en _participaron,
+        reinicia el ciclo: todos vuelven a _sin_participar.
+        Llamar siempre despues de modificar las listas.
+        """
+        if not self._sin_participar and self._participaron:
+            logger.info(
+                "[VoR] _sin_participar vacia - reiniciando ciclo con %s jugadores.",
+                len(self._participaron),
+            )
+            self._sin_participar = list(self._participaron)
+            self._participaron   = []
+
+    def _sortear_dos(self) -> tuple:
+        """
+        Aplica la logica de las dos colas y devuelve (preguntador, respondedor).
+
+        Caso A - Quedan >= 2 en _sin_participar:
+            Elige 2 al azar y los pasa a _participaron.
+
+        Caso B - Queda exactamente 1 en _sin_participar:
+            Toma al unico restante y elige 1 al azar de _participaron como pareja.
+            Esos 2 quedan solos en _participaron.
+            Todos los demas de _participaron vuelven a _sin_participar.
+            => Comienza un nuevo ciclo.
+        """
+        if len(self._sin_participar) >= 2:
+            # Caso A: sorteo normal
+            elegidos = random.sample(self._sin_participar, 2)
+            for p in elegidos:
+                self._sin_participar.remove(p)
+                self._participaron.append(p)
+            logger.info(
+                "[VoR] Sorteo normal - sin_participar: %s | participaron: %s",
+                len(self._sin_participar), len(self._participaron),
+            )
+        else:
+            # Caso B: ultimo restante, reinicio de ciclo
+            ultimo    = self._sin_participar[0]
+            companero = random.choice(self._participaron)
+
+            # Todos excepto el companero elegido vuelven a la cola de espera
+            self._sin_participar = [
+                p for p in self._participaron if p["uid"] != companero["uid"]
+            ]
+            # Los 2 elegidos quedan solos en _participaron
+            self._participaron = [ultimo, companero]
+            elegidos = [ultimo, companero]
+
+            logger.info(
+                "[VoR] Ciclo reiniciado - ultimo: %s + companero: %s | "
+                "sin_participar: %s | participaron: 2",
+                ultimo["nombre"], companero["nombre"], len(self._sin_participar),
+            )
+
+        random.shuffle(elegidos)  # quien pregunta y quien responde es aleatorio
+        return elegidos[0], elegidos[1]
+
+    # -----------------------------------------------------------------------
+    # Helpers generales
+    # -----------------------------------------------------------------------
 
     def _borrar_seguro(self, chat_id: int, message_id: int) -> None:
         try:
@@ -154,7 +238,6 @@ class EventHandlers:
         delay: float = 7.0,
         parse_mode: str = "HTML",
     ) -> None:
-        """Envía un mensaje temporal que se borra automáticamente."""
         try:
             m = self.bot.send_message(
                 chat_id, texto,
@@ -169,7 +252,6 @@ class EventHandlers:
             logger.error("[EVENTOS] Error enviando mensaje temporal: %s", e)
 
     def _verificar_canal_eventos(self, message: telebot.types.Message) -> bool:
-        """Devuelve True solo si el mensaje proviene del thread EVENTOS."""
         if message.chat.id != CANAL_ID or get_thread_id(message) != EVENTOS:
             try:
                 self.bot.delete_message(message.chat.id, message.message_id)
@@ -179,61 +261,52 @@ class EventHandlers:
         return True
 
     def _es_admin(self, message: telebot.types.Message) -> bool:
-        """Devuelve True si el remitente es admin del chat."""
         try:
             member = self.bot.get_chat_member(message.chat.id, message.from_user.id)
             return member.status in ("administrator", "creator")
         except Exception:
             return False
 
-    def _nombre_display(
-        self, message: telebot.types.Message, user_info: dict
-    ) -> str:
-        """Devuelve una mención HTML para el usuario."""
+    def _nombre_display(self, message: telebot.types.Message, user_info: dict) -> str:
         uid    = message.from_user.id
         nombre = user_info.get("nombre") or message.from_user.first_name or "Jugador"
         return f'<a href="tg://user?id={uid}">{nombre}</a>'
 
     def _kb_eleccion(self, uid_preguntador: int) -> types.InlineKeyboardMarkup:
-        """Teclado inline con las tres opciones para el preguntador."""
         kb = types.InlineKeyboardMarkup(row_width=2)
         kb.add(
             types.InlineKeyboardButton(
-                "🗣️ Verdad automática",
+                "Verdad automatica",
                 callback_data=f"vor:auto_verdad:{uid_preguntador}",
             ),
             types.InlineKeyboardButton(
-                "🎯 Reto automático",
+                "Reto automatico",
                 callback_data=f"vor:auto_reto:{uid_preguntador}",
             ),
         )
         kb.add(
             types.InlineKeyboardButton(
-                "✏️ Escribir la mía",
+                "Escribir la mia",
                 callback_data=f"vor:escribir:{uid_preguntador}",
             )
         )
         return kb
 
     def _cancelar_turno_activo(self) -> None:
-        """
-        Cancela el turno activo en memoria y elimina el mensaje con botones
-        si todavía existe. No lanza excepciones hacia afuera.
-        """
+        """Cancela el turno en memoria y edita el mensaje para avisar."""
         if self._turno is None:
             return
         t = self._turno
         self._turno = None
         try:
             self.bot.edit_message_text(
-                "⏭️ <i>Turno cancelado por el administrador.</i>",
+                "<i>Turno cancelado por el administrador.</i>",
                 chat_id=t["chat_id"],
                 message_id=t["msg_id"],
                 parse_mode="HTML",
                 reply_markup=None,
             )
         except Exception:
-            # Si ya fue editado o borrado, no importa
             pass
 
     def _publicar_resultado(
@@ -246,13 +319,12 @@ class EventHandlers:
         mencion_preguntador: str,
         mencion_respondedor: str,
     ) -> None:
-        """Edita el mensaje de la ronda con el resultado final."""
-        encabezado = "🗣️ <b>VERDAD</b>" if tipo == "verdad" else "🎯 <b>RETO</b>"
-        emoji      = "❓" if tipo == "verdad" else "⚡"
+        encabezado = "<b>VERDAD</b>" if tipo == "verdad" else "<b>RETO</b>"
+        emoji      = "" if tipo == "verdad" else ""
         texto = (
             f"{encabezado}\n\n"
-            f"👤 Le toca a: {mencion_respondedor}\n"
-            f"📝 Puesto por: {mencion_preguntador}\n\n"
+            f"Le toca a: {mencion_respondedor}\n"
+            f"Puesto por: {mencion_preguntador}\n\n"
             f"{emoji} {contenido}"
         )
         try:
@@ -275,14 +347,9 @@ class EventHandlers:
 
     def _es_texto_del_preguntador(self, message: telebot.types.Message) -> bool:
         """
-        Filtro para el handler de texto personalizado.
-        Activa SOLO si:
-          - Hay un turno activo esperando texto.
-          - El mensaje viene del preguntador correcto.
-          - El mensaje está en el thread EVENTOS del canal correcto.
-          - El mensaje no es un comando.
-        Registrado primero en _register_handlers para tener prioridad
-        sobre cualquier catch-all de texto de otros módulos.
+        Filtro de maxima especificidad para capturar el texto personalizado.
+        Registrado primero en _register_handlers para ganar la carrera
+        contra catch-alls de texto de otros modulos.
         """
         if self._turno is None:
             return False
@@ -298,10 +365,11 @@ class EventHandlers:
             return False
         return True
 
-    # ── /participar ───────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # /participar
+    # -----------------------------------------------------------------------
 
     def cmd_participar(self, message: telebot.types.Message) -> None:
-        """Te une a la lista del juego activo."""
         if not self._verificar_canal_eventos(message):
             return
 
@@ -322,24 +390,29 @@ class EventHandlers:
         if any(p["uid"] == uid for p in self._lista):
             self._temp(
                 cid,
-                "⚠️ Ya estás en la lista del juego.\nUsá /salir para abandonar.",
+                "Ya estas en la lista del juego.\nUsa /salir para abandonar.",
                 tid,
             )
             return
 
-        nombre     = user_info.get("nombre") or message.from_user.first_name
-        mencion    = self._nombre_display(message, user_info)
+        nombre    = user_info.get("nombre") or message.from_user.first_name
+        mencion   = self._nombre_display(message, user_info)
+        jugador   = {"uid": uid, "nombre": nombre, "mencion": mencion}
         es_primero = len(self._lista) == 0
 
-        self._lista.append({"uid": uid, "nombre": nombre, "mencion": mencion})
-        logger.info("[VoR] %s (%s) se unió. Total: %s", nombre, uid, len(self._lista))
+        self._agregar_jugador(jugador)
+        logger.info(
+            "[VoR] %s (%s) se unio. Total: %s | sin_p: %s | part: %s",
+            nombre, uid,
+            len(self._lista), len(self._sin_participar), len(self._participaron),
+        )
 
         if es_primero:
             self.bot.send_message(
                 cid,
-                "🎲 <b>¡Nuevo juego de Verdad o Reto!</b>\n\n"
-                f"👤 {mencion} ha iniciado la partida.\n\n"
-                "¿Querés participar? Usá <code>/participar</code>\n"
+                "<b>Nuevo juego de Verdad o Reto!</b>\n\n"
+                f"{mencion} ha iniciado la partida.\n\n"
+                "Queres participar? Usa <code>/participar</code>\n"
                 "Cuando haya al menos 2 jugadores, un admin lanza "
                 "<code>/verdadoreto</code>.",
                 parse_mode="HTML",
@@ -348,20 +421,21 @@ class EventHandlers:
         else:
             self._temp(
                 cid,
-                f"✅ {mencion} se unió al juego.\n"
-                f"👥 Participantes: <b>{len(self._lista)}</b>",
+                f"{mencion} se unio al juego.\n"
+                f"Participantes: <b>{len(self._lista)}</b>",
                 tid,
                 delay=10.0,
             )
 
-    # ── /verdadoreto ──────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # /verdadoreto
+    # -----------------------------------------------------------------------
 
     def cmd_verdadoreto(self, message: telebot.types.Message) -> None:
         """
-        Sortea 2 jugadores e inicia una ronda. Solo admins pueden ejecutarlo.
-
-        Si hay un turno activo (ej: el preguntador está AFK), lo CANCELA
-        automáticamente y lanza una ronda nueva sin bloquear.
+        Sortea 2 jugadores usando el sistema de dos colas.
+        Si hay turno activo, lo cancela y arranca uno nuevo (salteo de AFK).
+        Solo admins.
         """
         if not self._verificar_canal_eventos(message):
             return
@@ -375,37 +449,47 @@ class EventHandlers:
             pass
 
         if not self._es_admin(message):
-            self._temp(cid, "❌ Solo los administradores pueden iniciar el sorteo.", tid)
+            self._temp(cid, "Solo los administradores pueden iniciar el sorteo.", tid)
             return
 
         if len(self._lista) < 2:
             self._temp(
                 cid,
-                "⚠️ Se necesitan al menos <b>2 participantes</b> para jugar.\n"
+                "Se necesitan al menos <b>2 participantes</b> para jugar.\n"
                 "Pedile a la gente que use <code>/participar</code>.",
                 tid,
             )
             return
 
-        # Si hay un turno activo lo cancelamos antes de arrancar uno nuevo.
-        # Esto permite saltear a alguien que esté AFK sin quedarse trabado.
+        # Cancelar turno activo si existe (permite saltear AFK)
         if self._turno is not None:
-            pname = self._turno["preguntador"]["mencion"]
-            logger.info("[VoR] Admin canceló turno de %s para lanzar uno nuevo.", pname)
-            self._cancelar_turno_activo()  # limpia self._turno y edita el mensaje
+            logger.info(
+                "[VoR] Admin salto el turno de %s.",
+                self._turno["preguntador"]["nombre"],
+            )
+            self._cancelar_turno_activo()
 
-        # Sortear 2 jugadores distintos al azar
-        elegidos    = random.sample(self._lista, 2)
-        preguntador = elegidos[0]
-        respondedor = elegidos[1]
+        # Garantizar que las colas esten en estado consistente
+        self._sincronizar_colas()
+
+        # Sortear usando la logica de dos colas
+        preguntador, respondedor = self._sortear_dos()
+
+        # Texto informativo del estado de las colas
+        sin_p = len(self._sin_participar)
+        if sin_p == 0:
+            estado_cola = "<i>Todos participaron! Nuevo ciclo iniciado.</i>"
+        else:
+            estado_cola = f"<i>Quedan {sin_p} jugador(es) sin participar en este ciclo.</i>"
 
         try:
             msg = self.bot.send_message(
                 cid,
-                f"🎲 <b>¡Nueva ronda!</b>\n\n"
-                f"🎤 {preguntador['mencion']} le pone una verdad o reto "
+                f"<b>Nueva ronda!</b>\n\n"
+                f"{preguntador['mencion']} le pone una verdad o reto "
                 f"a {respondedor['mencion']}\n\n"
-                f"{preguntador['mencion']}, ¿qué le ponés?",
+                f"{preguntador['mencion']}, que le pones?\n\n"
+                f"{estado_cola}",
                 parse_mode="HTML",
                 reply_markup=self._kb_eleccion(preguntador["uid"]),
                 message_thread_id=tid,
@@ -423,23 +507,19 @@ class EventHandlers:
             "esperando_texto": False,
         }
         logger.info(
-            "[VoR] Ronda iniciada — pregunta: %s (%s) → responde: %s (%s)",
+            "[VoR] Ronda - pregunta: %s (%s) -> responde: %s (%s)",
             preguntador["nombre"], preguntador["uid"],
             respondedor["nombre"], respondedor["uid"],
         )
 
-    # ── /expulsar ─────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # /expulsar
+    # -----------------------------------------------------------------------
 
     def cmd_expulsar(self, message: telebot.types.Message) -> None:
         """
-        /expulsar — (solo admins) Quita a un jugador de la lista.
-
-        Formas de uso:
-          • Responder al mensaje del usuario: /expulsar
-          • Por @username:                    /expulsar @username
-          • Por nombre de display:            /expulsar Nombre
-
-        Si el expulsado forma parte del turno activo, el turno se cancela.
+        /expulsar - (solo admins) Quita a un jugador de todas las listas.
+        Uso: responder al mensaje del jugador, o /expulsar @username / Nombre.
         """
         if not self._verificar_canal_eventos(message):
             return
@@ -453,40 +533,31 @@ class EventHandlers:
             pass
 
         if not self._es_admin(message):
-            self._temp(cid, "❌ Solo los administradores pueden expulsar jugadores.", tid)
+            self._temp(cid, "Solo los administradores pueden expulsar jugadores.", tid)
             return
 
-        # ── Determinar el UID objetivo ────────────────────────────────────────
-        uid_objetivo: Optional[int] = None
-        nombre_objetivo: str        = ""
+        uid_objetivo:    Optional[int] = None
+        nombre_objetivo: str           = ""
 
-        # Caso 1: respuesta a un mensaje
         if message.reply_to_message and message.reply_to_message.from_user:
-            uid_objetivo     = message.reply_to_message.from_user.id
-            nombre_objetivo  = (
+            uid_objetivo    = message.reply_to_message.from_user.id
+            nombre_objetivo = (
                 message.reply_to_message.from_user.first_name or str(uid_objetivo)
             )
-
-        # Caso 2: argumento de texto (@username o nombre)
         else:
             partes = (message.text or "").split(maxsplit=1)
             if len(partes) < 2 or not partes[1].strip():
                 self._temp(
                     cid,
-                    "⚠️ Uso: <code>/expulsar @username</code> o respondé al mensaje "
+                    "Uso: <code>/expulsar @username</code> o responde al mensaje "
                     "del jugador con <code>/expulsar</code>.",
                     tid,
                 )
                 return
 
             termino = partes[1].strip().lstrip("@").lower()
-
-            # Buscar en la lista por username o nombre
             for p in self._lista:
-                nombre_lower = p["nombre"].lower()
-                # Intentar también contra el username si lo tenemos guardado
-                username_lower = p.get("username", "").lower()
-                if termino in (nombre_lower, username_lower):
+                if termino in (p["nombre"].lower(), p.get("username", "").lower()):
                     uid_objetivo    = p["uid"]
                     nombre_objetivo = p["nombre"]
                     break
@@ -494,22 +565,16 @@ class EventHandlers:
             if uid_objetivo is None:
                 self._temp(
                     cid,
-                    f"❌ No encontré a <b>{partes[1].strip()}</b> en la lista de jugadores.\n"
-                    "Verificá el nombre o respondé a su mensaje con <code>/expulsar</code>.",
+                    f"No encontre a <b>{partes[1].strip()}</b> en la lista.\n"
+                    "Verifica el nombre o responde a su mensaje con <code>/expulsar</code>.",
                     tid,
                 )
                 return
 
-        # ── Verificar que está en la lista ────────────────────────────────────
         if not any(p["uid"] == uid_objetivo for p in self._lista):
-            self._temp(
-                cid,
-                f"⚠️ Ese usuario no está en la lista del juego.",
-                tid,
-            )
+            self._temp(cid, "Ese usuario no esta en la lista del juego.", tid)
             return
 
-        # ── Si el expulsado es parte del turno activo, cancelar el turno ─────
         turno_cancelado = False
         if self._turno is not None:
             uids_en_turno = {
@@ -520,25 +585,29 @@ class EventHandlers:
                 self._cancelar_turno_activo()
                 turno_cancelado = True
 
-        # ── Quitar de la lista ────────────────────────────────────────────────
-        self._lista = [p for p in self._lista if p["uid"] != uid_objetivo]
-        logger.info("[VoR] Expulsado uid %s (%s). Quedan %s.", uid_objetivo, nombre_objetivo, len(self._lista))
+        self._quitar_jugador(uid_objetivo)
+        logger.info(
+            "[VoR] Expulsado uid %s (%s). Total: %s | sin_p: %s | part: %s",
+            uid_objetivo, nombre_objetivo,
+            len(self._lista), len(self._sin_participar), len(self._participaron),
+        )
 
-        extra = "\n⏭️ El turno activo fue cancelado." if turno_cancelado else ""
+        extra = "\nEl turno activo fue cancelado." if turno_cancelado else ""
         self._temp(
             cid,
-            f"🚪 <b>{nombre_objetivo}</b> fue expulsado/a del juego.{extra}\n"
-            f"👥 Participantes restantes: <b>{len(self._lista)}</b>",
+            f"<b>{nombre_objetivo}</b> fue expulsado/a del juego.{extra}\n"
+            f"Participantes restantes: <b>{len(self._lista)}</b>",
             tid,
             delay=10.0,
         )
 
-    # ── /terminarjuego ────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # /terminarjuego
+    # -----------------------------------------------------------------------
 
     def cmd_terminar_juego(self, message: telebot.types.Message) -> None:
         """
-        /terminarjuego — (solo admins) Finaliza el juego, cancela el turno
-        activo y vacía la lista de participantes.
+        /terminarjuego - (solo admins) Finaliza el juego y resetea todo.
         """
         if not self._verificar_canal_eventos(message):
             return
@@ -552,40 +621,40 @@ class EventHandlers:
             pass
 
         if not self._es_admin(message):
-            self._temp(cid, "❌ Solo los administradores pueden terminar el juego.", tid)
+            self._temp(cid, "Solo los administradores pueden terminar el juego.", tid)
             return
 
         if not self._lista and self._turno is None:
-            self._temp(cid, "ℹ️ No hay ningún juego activo en este momento.", tid)
+            self._temp(cid, "No hay ningun juego activo en este momento.", tid)
             return
 
         jugadores = len(self._lista)
-
-        # Cancelar turno activo si existe
         self._cancelar_turno_activo()
+        self._lista          = []
+        self._sin_participar = []
+        self._participaron   = []
+        self._turno          = None
 
-        # Vaciar todo
-        self._lista  = []
-        self._turno  = None
-
-        logger.info("[VoR] Juego terminado por admin. Había %s jugadores.", jugadores)
+        logger.info("[VoR] Juego terminado por admin. Habia %s jugadores.", jugadores)
 
         try:
             self.bot.send_message(
                 cid,
-                "🏁 <b>¡Juego terminado!</b>\n\n"
-                f"Se cerró la partida con <b>{jugadores}</b> participante(s).\n"
-                "Usá <code>/participar</code> para arrancar uno nuevo cuando quieran.",
+                "<b>Juego terminado!</b>\n\n"
+                f"Se cerro la partida con <b>{jugadores}</b> participante(s).\n"
+                "Usa <code>/participar</code> para arrancar uno nuevo cuando quieran.",
                 parse_mode="HTML",
                 message_thread_id=tid,
             )
         except Exception as e:
             logger.error("[VoR] Error anunciando fin de juego: %s", e)
 
-    # ── /participando ─────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # /participando
+    # -----------------------------------------------------------------------
 
     def cmd_participando(self, message: telebot.types.Message) -> None:
-        """Muestra quiénes están en la lista y el estado del turno activo."""
+        """Muestra las dos colas y el estado del turno activo."""
         if not self._verificar_canal_eventos(message):
             return
 
@@ -600,8 +669,8 @@ class EventHandlers:
         if not self._lista:
             self._temp(
                 cid,
-                "📋 No hay ningún juego activo.\n"
-                "Usá <code>/participar</code> para iniciar uno.",
+                "No hay ningun juego activo.\n"
+                "Usa <code>/participar</code> para iniciar uno.",
                 tid,
             )
             return
@@ -609,28 +678,35 @@ class EventHandlers:
         uid_preg = self._turno["preguntador"]["uid"] if self._turno else None
         uid_resp = self._turno["respondedor"]["uid"] if self._turno else None
 
-        lineas = []
-        for i, p in enumerate(self._lista, 1):
-            if p["uid"] == uid_preg:
-                marca = " 🎤"
-            elif p["uid"] == uid_resp:
-                marca = " ⏳"
-            else:
-                marca = ""
-            lineas.append(f"  {i}. {p['mencion']}{marca}")
+        def _formatear_fila(jugadores: list) -> str:
+            if not jugadores:
+                return "  <i>(vacia)</i>"
+            lineas = []
+            for p in jugadores:
+                if p["uid"] == uid_preg:
+                    marca = " (preguntando)"
+                elif p["uid"] == uid_resp:
+                    marca = " (respondiendo)"
+                else:
+                    marca = ""
+                lineas.append(f"  - {p['mencion']}{marca}")
+            return "\n".join(lineas)
 
-        estado = ""
+        estado_turno = ""
         if self._turno:
             if self._turno.get("esperando_texto"):
-                estado = "\n\n✏️ Esperando que el preguntador escriba su consigna..."
+                estado_turno = "\n<i>Esperando que el preguntador escriba su consigna...</i>"
             else:
-                estado = "\n\n🎤 Turno activo — esperando elección del preguntador."
+                estado_turno = "\n<i>Turno activo - esperando eleccion del preguntador.</i>"
 
         texto = (
-            f"🎲 <b>Verdad o Reto — Participantes</b>\n\n"
-            f"👥 Total: <b>{len(self._lista)}</b>\n\n"
-            + "\n".join(lineas)
-            + estado
+            f"<b>Verdad o Reto - Estado del juego</b>\n"
+            f"Total: <b>{len(self._lista)}</b>"
+            f"{estado_turno}\n\n"
+            f"<b>Sin participar aun ({len(self._sin_participar)}):</b>\n"
+            f"{_formatear_fila(self._sin_participar)}\n\n"
+            f"<b>Ya participaron ({len(self._participaron)}):</b>\n"
+            f"{_formatear_fila(self._participaron)}"
         )
         try:
             m = self.bot.send_message(
@@ -645,15 +721,17 @@ class EventHandlers:
         except Exception as e:
             logger.error("[EVENTOS] Error en /participando: %s", e)
 
-    # ── /salir ────────────────────────────────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # /salir
+    # -----------------------------------------------------------------------
 
     def cmd_salir_evento(self, message: telebot.types.Message) -> None:
         """
-        /salir en EVENTOS — Te quita de la lista de Verdad o Reto.
-        Si el thread no es EVENTOS, ignora silenciosamente.
+        /salir en EVENTOS - Te quita de todas las listas del juego.
+        Si el thread no es EVENTOS, ignora silenciosamente (puede ser /salir de ROLES).
         """
         if message.chat.id != CANAL_ID or get_thread_id(message) != EVENTOS:
-            return  # Silencioso: puede ser /salir de ROLES
+            return
 
         cid = message.chat.id
         tid = get_thread_id(message)
@@ -665,12 +743,12 @@ class EventHandlers:
             pass
 
         if not any(p["uid"] == uid for p in self._lista):
-            self._temp(cid, "⚠️ No estás en la lista del juego.", tid)
+            self._temp(cid, "No estas en la lista del juego.", tid)
             return
 
         nombre = next(p["nombre"] for p in self._lista if p["uid"] == uid)
 
-        # Si el que sale forma parte del turno activo, cancelar el turno
+        turno_cancelado = False
         if self._turno is not None:
             uids_en_turno = {
                 self._turno["preguntador"]["uid"],
@@ -678,34 +756,32 @@ class EventHandlers:
             }
             if uid in uids_en_turno:
                 self._cancelar_turno_activo()
-                self._temp(
-                    cid,
-                    f"👋 {nombre} salió del juego.\n"
-                    "⏭️ El turno activo fue cancelado porque era parte de él.",
-                    tid,
-                    delay=10.0,
-                )
-                self._lista = [p for p in self._lista if p["uid"] != uid]
-                return
+                turno_cancelado = True
 
-        self._lista = [p for p in self._lista if p["uid"] != uid]
-        logger.info("[VoR] %s (%s) salió. Quedan %s.", nombre, uid, len(self._lista))
+        self._quitar_jugador(uid)
+        logger.info(
+            "[VoR] %s (%s) salio. Total: %s | sin_p: %s | part: %s",
+            nombre, uid,
+            len(self._lista), len(self._sin_participar), len(self._participaron),
+        )
 
+        extra = (
+            "\nEl turno activo fue cancelado porque eras parte de el."
+            if turno_cancelado else ""
+        )
         self._temp(
             cid,
-            f"👋 {nombre} salió del juego.\n"
-            f"👥 Participantes: <b>{len(self._lista)}</b>",
+            f"{nombre} salio del juego.{extra}\n"
+            f"Participantes: <b>{len(self._lista)}</b>",
             tid,
             delay=8.0,
         )
 
-    # ── Callback: elección del preguntador ───────────────────────────────────
+    # -----------------------------------------------------------------------
+    # Callback: eleccion del preguntador
+    # -----------------------------------------------------------------------
 
     def callback_vor(self, call: types.CallbackQuery) -> None:
-        """
-        Gestiona vor:auto_verdad, vor:auto_reto y vor:escribir.
-        Solo el preguntador sorteado puede presionar los botones.
-        """
         partes = call.data.split(":")
         if len(partes) != 3:
             self.bot.answer_callback_query(call.id)
@@ -720,19 +796,18 @@ class EventHandlers:
         if uid_caller != uid_preguntador:
             self.bot.answer_callback_query(
                 call.id,
-                "⛔ No sos el preguntador de esta ronda.",
+                "No sos el preguntador de esta ronda.",
                 show_alert=True,
             )
             return
 
         if self._turno is None or self._turno["preguntador"]["uid"] != uid_preguntador:
             self.bot.answer_callback_query(
-                call.id, "⚠️ Este turno ya no está activo.", show_alert=True,
+                call.id, "Este turno ya no esta activo.", show_alert=True,
             )
             return
 
         self.bot.answer_callback_query(call.id)
-
         t = self._turno
 
         if accion == "auto_verdad":
@@ -742,7 +817,7 @@ class EventHandlers:
                 "verdad", contenido,
                 t["preguntador"]["mencion"], t["respondedor"]["mencion"],
             )
-            logger.info("[VoR] Verdad automática publicada.")
+            logger.info("[VoR] Verdad automatica publicada.")
             self._turno = None
 
         elif accion == "auto_reto":
@@ -752,20 +827,17 @@ class EventHandlers:
                 "reto", contenido,
                 t["preguntador"]["mencion"], t["respondedor"]["mencion"],
             )
-            logger.info("[VoR] Reto automático publicado.")
+            logger.info("[VoR] Reto automatico publicado.")
             self._turno = None
 
         elif accion == "escribir":
-            # Marcar que esperamos texto y editar el mensaje quitando botones.
-            # A partir de acá, _es_texto_del_preguntador devolverá True para
-            # el próximo mensaje de texto del preguntador en este chat/thread.
             self._turno["esperando_texto"] = True
             try:
                 self.bot.edit_message_text(
-                    f"🎲 <b>Nueva ronda</b>\n\n"
-                    f"🎤 {t['preguntador']['mencion']} le pone una verdad o reto "
+                    f"<b>Nueva ronda</b>\n\n"
+                    f"{t['preguntador']['mencion']} le pone una verdad o reto "
                     f"a {t['respondedor']['mencion']}\n\n"
-                    f"✏️ {t['preguntador']['mencion']}, escribí tu verdad o reto "
+                    f"{t['preguntador']['mencion']}, escribi tu verdad o reto "
                     f"en el canal ahora:",
                     chat_id=cid,
                     message_id=call.message.message_id,
@@ -773,21 +845,18 @@ class EventHandlers:
                     reply_markup=None,
                 )
             except Exception as e:
-                logger.warning("[VoR] No se pudo editar el mensaje al esperando_texto: %s", e)
+                logger.warning("[VoR] No se pudo editar el mensaje: %s", e)
 
-    # ── Captura del texto personalizado ──────────────────────────────────────
+    # -----------------------------------------------------------------------
+    # Captura del texto personalizado
+    # -----------------------------------------------------------------------
 
     def capturar_texto_personalizado(self, message: telebot.types.Message) -> None:
         """
-        Captura el siguiente mensaje del preguntador cuando eligió
-        "Escribir la mía" y lo publica formateado para todos.
-
-        Este handler es registrado PRIMERO en _register_handlers para tener
-        prioridad sobre cualquier catch-all de texto de otros módulos.
-        El filtro _es_texto_del_preguntador garantiza que solo activa cuando
-        corresponde exactamente.
+        Captura el texto del preguntador cuando eligio "Escribir la mia".
+        Registrado primero en _register_handlers para tener prioridad
+        sobre cualquier catch-all de texto de otros modulos.
         """
-        # Doble-check defensivo por si el estado cambió entre el filtro y acá
         if self._turno is None or not self._turno.get("esperando_texto"):
             return
 
@@ -799,13 +868,11 @@ class EventHandlers:
         if not contenido:
             return
 
-        # Borrar el mensaje del preguntador para no duplicar en el canal
         try:
             self.bot.delete_message(cid, message.message_id)
         except Exception:
             pass
 
-        # Si termina en "?" se clasifica como verdad, si no como reto
         tipo = "verdad" if contenido.endswith("?") else "reto"
 
         self._publicar_resultado(
@@ -814,8 +881,7 @@ class EventHandlers:
             t["preguntador"]["mencion"], t["respondedor"]["mencion"],
         )
         logger.info(
-            "[VoR] Texto personalizado publicado por uid %s: %r",
+            "[VoR] Texto personalizado de uid %s: %r",
             t["preguntador"]["uid"], contenido[:60],
         )
-        # Liberar el turno
         self._turno = None
