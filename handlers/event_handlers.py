@@ -5,14 +5,19 @@ handlers/event_handlers.py
 Sistema de Verdad o Reto para UniverseBot V2.0
 
 Comandos (thread EVENTOS):
-  /participar    — Te une a la lista del juego.
-  /verdadoreto   — (solo admins) Sortea 2 jugadores: uno pregunta/reta,
-                   el otro responde/cumple.
-  /participando  — Muestra quién está en la lista.
-  /salir         — Te quita de la lista.
+  /participar      — Te une a la lista del juego.
+  /verdadoreto     — (solo admins) Sortea 2 jugadores. Si hay turno activo,
+                     lo cancela y lanza uno nuevo (útil para saltear AFK).
+  /participando    — Muestra quién está en la lista.
+  /salir           — Te quita de la lista.
+  /expulsar        — (solo admins) Expulsa a un usuario de la lista por
+                     username o respondiendo a su mensaje. Cancela el turno
+                     si el expulsado era parte de él.
+  /terminarjuego   — (solo admins) Termina el juego activo y resetea todo.
 
 Flujo de una ronda:
   1. Admin usa /verdadoreto → bot sortea jugador A (pregunta) y B (responde).
+     Si había un turno activo, lo cancela y arranca el nuevo sin bloquear.
   2. Bot publica: "A le toca preguntarle a B — ¿qué le ponés?"
      con botones [🗣️ Verdad automática] [🎯 Reto automático] [✏️ Escribir la mía]
   3a. Si A elige automático → se publica aleatoriamente del banco.
@@ -115,19 +120,22 @@ class EventHandlers:
     # ── Registro de handlers ──────────────────────────────────────────────────
 
     def _register_handlers(self) -> None:
-        self.bot.register_message_handler(self.cmd_participar,   commands=["participar"])
-        self.bot.register_message_handler(self.cmd_verdadoreto,  commands=["verdadoreto"])
-        self.bot.register_message_handler(self.cmd_participando, commands=["participando"])
-        self.bot.register_message_handler(self.cmd_salir_evento, commands=["salir"])
-        self.bot.register_callback_query_handler(
-            self.callback_vor,
-            func=lambda c: c.data.startswith("vor:"),
-        )
-        # Captura el texto personalizado cuando el preguntador eligió "Escribir la mía"
+        # IMPORTANTE: el handler de texto personalizado se registra PRIMERO
+        # para que tenga prioridad sobre cualquier catch-all de texto de otros módulos.
         self.bot.register_message_handler(
             self.capturar_texto_personalizado,
             func=self._es_texto_del_preguntador,
             content_types=["text"],
+        )
+        self.bot.register_message_handler(self.cmd_participar,     commands=["participar"])
+        self.bot.register_message_handler(self.cmd_verdadoreto,    commands=["verdadoreto"])
+        self.bot.register_message_handler(self.cmd_participando,   commands=["participando"])
+        self.bot.register_message_handler(self.cmd_salir_evento,   commands=["salir"])
+        self.bot.register_message_handler(self.cmd_expulsar,       commands=["expulsar"])
+        self.bot.register_message_handler(self.cmd_terminar_juego, commands=["terminarjuego"])
+        self.bot.register_callback_query_handler(
+            self.callback_vor,
+            func=lambda c: c.data.startswith("vor:"),
         )
 
     # ── Helpers privados ─────────────────────────────────────────────────────
@@ -162,38 +170,33 @@ class EventHandlers:
 
     def _verificar_canal_eventos(self, message: telebot.types.Message) -> bool:
         """Devuelve True solo si el mensaje proviene del thread EVENTOS."""
-        if get_thread_id(message) == EVENTOS:
-            return True
-        cid = message.chat.id
-        tid = get_thread_id(message)
-        try:
-            self.bot.delete_message(cid, message.message_id)
-        except Exception:
-            pass
-        self._temp(cid, "❌ Este comando solo puede usarse en el canal de eventos.", tid)
-        return False
+        if message.chat.id != CANAL_ID or get_thread_id(message) != EVENTOS:
+            try:
+                self.bot.delete_message(message.chat.id, message.message_id)
+            except Exception:
+                pass
+            return False
+        return True
 
     def _es_admin(self, message: telebot.types.Message) -> bool:
+        """Devuelve True si el remitente es admin del chat."""
         try:
-            status = self.bot.get_chat_member(
-                message.chat.id, message.from_user.id
-            ).status
-            return status in ("creator", "administrator")
+            member = self.bot.get_chat_member(message.chat.id, message.from_user.id)
+            return member.status in ("administrator", "creator")
         except Exception:
             return False
 
-    def _nombre_display(self, message: telebot.types.Message, user_info: dict) -> str:
-        """Devuelve mención HTML del usuario."""
-        username = message.from_user.username
-        if username:
-            return f"@{username}"
-        nombre = user_info.get("nombre") or message.from_user.first_name
+    def _nombre_display(
+        self, message: telebot.types.Message, user_info: dict
+    ) -> str:
+        """Devuelve una mención HTML para el usuario."""
         uid    = message.from_user.id
+        nombre = user_info.get("nombre") or message.from_user.first_name or "Jugador"
         return f'<a href="tg://user?id={uid}">{nombre}</a>'
 
     def _kb_eleccion(self, uid_preguntador: int) -> types.InlineKeyboardMarkup:
-        """Teclado inline con las 3 opciones para el preguntador."""
-        kb = types.InlineKeyboardMarkup(row_width=1)
+        """Teclado inline con las tres opciones para el preguntador."""
+        kb = types.InlineKeyboardMarkup(row_width=2)
         kb.add(
             types.InlineKeyboardButton(
                 "🗣️ Verdad automática",
@@ -203,12 +206,35 @@ class EventHandlers:
                 "🎯 Reto automático",
                 callback_data=f"vor:auto_reto:{uid_preguntador}",
             ),
+        )
+        kb.add(
             types.InlineKeyboardButton(
                 "✏️ Escribir la mía",
                 callback_data=f"vor:escribir:{uid_preguntador}",
-            ),
+            )
         )
         return kb
+
+    def _cancelar_turno_activo(self) -> None:
+        """
+        Cancela el turno activo en memoria y elimina el mensaje con botones
+        si todavía existe. No lanza excepciones hacia afuera.
+        """
+        if self._turno is None:
+            return
+        t = self._turno
+        self._turno = None
+        try:
+            self.bot.edit_message_text(
+                "⏭️ <i>Turno cancelado por el administrador.</i>",
+                chat_id=t["chat_id"],
+                message_id=t["msg_id"],
+                parse_mode="HTML",
+                reply_markup=None,
+            )
+        except Exception:
+            # Si ya fue editado o borrado, no importa
+            pass
 
     def _publicar_resultado(
         self,
@@ -220,7 +246,7 @@ class EventHandlers:
         mencion_preguntador: str,
         mencion_respondedor: str,
     ) -> None:
-        """Edita el mensaje de turno con el resultado final (sin botones)."""
+        """Edita el mensaje de la ronda con el resultado final."""
         encabezado = "🗣️ <b>VERDAD</b>" if tipo == "verdad" else "🎯 <b>RETO</b>"
         emoji      = "❓" if tipo == "verdad" else "⚡"
         texto = (
@@ -238,7 +264,6 @@ class EventHandlers:
                 reply_markup=None,
             )
         except Exception:
-            # Fallback: si el mensaje no se puede editar, enviar uno nuevo
             try:
                 self.bot.send_message(
                     chat_id, texto,
@@ -251,18 +276,24 @@ class EventHandlers:
     def _es_texto_del_preguntador(self, message: telebot.types.Message) -> bool:
         """
         Filtro para el handler de texto personalizado.
-        Activa solo si hay un turno esperando texto, el mensaje viene
-        del preguntador correcto y está en el thread EVENTOS.
+        Activa SOLO si:
+          - Hay un turno activo esperando texto.
+          - El mensaje viene del preguntador correcto.
+          - El mensaje está en el thread EVENTOS del canal correcto.
+          - El mensaje no es un comando.
+        Registrado primero en _register_handlers para tener prioridad
+        sobre cualquier catch-all de texto de otros módulos.
         """
         if self._turno is None:
             return False
         if not self._turno.get("esperando_texto"):
             return False
+        if message.chat.id != self._turno.get("chat_id"):
+            return False
         if get_thread_id(message) != EVENTOS:
             return False
         if message.from_user.id != self._turno["preguntador"]["uid"]:
             return False
-        # No interceptar comandos
         if (message.text or "").startswith("/"):
             return False
         return True
@@ -327,8 +358,10 @@ class EventHandlers:
 
     def cmd_verdadoreto(self, message: telebot.types.Message) -> None:
         """
-        Sortea 2 jugadores e inicia una ronda.
-        Solo admins pueden ejecutarlo.
+        Sortea 2 jugadores e inicia una ronda. Solo admins pueden ejecutarlo.
+
+        Si hay un turno activo (ej: el preguntador está AFK), lo CANCELA
+        automáticamente y lanza una ronda nueva sin bloquear.
         """
         if not self._verificar_canal_eventos(message):
             return
@@ -354,15 +387,12 @@ class EventHandlers:
             )
             return
 
+        # Si hay un turno activo lo cancelamos antes de arrancar uno nuevo.
+        # Esto permite saltear a alguien que esté AFK sin quedarse trabado.
         if self._turno is not None:
             pname = self._turno["preguntador"]["mencion"]
-            self._temp(
-                cid,
-                f"⏳ Todavía está esperando la elección de {pname}.\n"
-                "Esperá a que termine el turno actual.",
-                tid,
-            )
-            return
+            logger.info("[VoR] Admin canceló turno de %s para lanzar uno nuevo.", pname)
+            self._cancelar_turno_activo()  # limpia self._turno y edita el mensaje
 
         # Sortear 2 jugadores distintos al azar
         elegidos    = random.sample(self._lista, 2)
@@ -398,6 +428,277 @@ class EventHandlers:
             respondedor["nombre"], respondedor["uid"],
         )
 
+    # ── /expulsar ─────────────────────────────────────────────────────────────
+
+    def cmd_expulsar(self, message: telebot.types.Message) -> None:
+        """
+        /expulsar — (solo admins) Quita a un jugador de la lista.
+
+        Formas de uso:
+          • Responder al mensaje del usuario: /expulsar
+          • Por @username:                    /expulsar @username
+          • Por nombre de display:            /expulsar Nombre
+
+        Si el expulsado forma parte del turno activo, el turno se cancela.
+        """
+        if not self._verificar_canal_eventos(message):
+            return
+
+        cid = message.chat.id
+        tid = get_thread_id(message)
+
+        try:
+            self.bot.delete_message(cid, message.message_id)
+        except Exception:
+            pass
+
+        if not self._es_admin(message):
+            self._temp(cid, "❌ Solo los administradores pueden expulsar jugadores.", tid)
+            return
+
+        # ── Determinar el UID objetivo ────────────────────────────────────────
+        uid_objetivo: Optional[int] = None
+        nombre_objetivo: str        = ""
+
+        # Caso 1: respuesta a un mensaje
+        if message.reply_to_message and message.reply_to_message.from_user:
+            uid_objetivo     = message.reply_to_message.from_user.id
+            nombre_objetivo  = (
+                message.reply_to_message.from_user.first_name or str(uid_objetivo)
+            )
+
+        # Caso 2: argumento de texto (@username o nombre)
+        else:
+            partes = (message.text or "").split(maxsplit=1)
+            if len(partes) < 2 or not partes[1].strip():
+                self._temp(
+                    cid,
+                    "⚠️ Uso: <code>/expulsar @username</code> o respondé al mensaje "
+                    "del jugador con <code>/expulsar</code>.",
+                    tid,
+                )
+                return
+
+            termino = partes[1].strip().lstrip("@").lower()
+
+            # Buscar en la lista por username o nombre
+            for p in self._lista:
+                nombre_lower = p["nombre"].lower()
+                # Intentar también contra el username si lo tenemos guardado
+                username_lower = p.get("username", "").lower()
+                if termino in (nombre_lower, username_lower):
+                    uid_objetivo    = p["uid"]
+                    nombre_objetivo = p["nombre"]
+                    break
+
+            if uid_objetivo is None:
+                self._temp(
+                    cid,
+                    f"❌ No encontré a <b>{partes[1].strip()}</b> en la lista de jugadores.\n"
+                    "Verificá el nombre o respondé a su mensaje con <code>/expulsar</code>.",
+                    tid,
+                )
+                return
+
+        # ── Verificar que está en la lista ────────────────────────────────────
+        if not any(p["uid"] == uid_objetivo for p in self._lista):
+            self._temp(
+                cid,
+                f"⚠️ Ese usuario no está en la lista del juego.",
+                tid,
+            )
+            return
+
+        # ── Si el expulsado es parte del turno activo, cancelar el turno ─────
+        turno_cancelado = False
+        if self._turno is not None:
+            uids_en_turno = {
+                self._turno["preguntador"]["uid"],
+                self._turno["respondedor"]["uid"],
+            }
+            if uid_objetivo in uids_en_turno:
+                self._cancelar_turno_activo()
+                turno_cancelado = True
+
+        # ── Quitar de la lista ────────────────────────────────────────────────
+        self._lista = [p for p in self._lista if p["uid"] != uid_objetivo]
+        logger.info("[VoR] Expulsado uid %s (%s). Quedan %s.", uid_objetivo, nombre_objetivo, len(self._lista))
+
+        extra = "\n⏭️ El turno activo fue cancelado." if turno_cancelado else ""
+        self._temp(
+            cid,
+            f"🚪 <b>{nombre_objetivo}</b> fue expulsado/a del juego.{extra}\n"
+            f"👥 Participantes restantes: <b>{len(self._lista)}</b>",
+            tid,
+            delay=10.0,
+        )
+
+    # ── /terminarjuego ────────────────────────────────────────────────────────
+
+    def cmd_terminar_juego(self, message: telebot.types.Message) -> None:
+        """
+        /terminarjuego — (solo admins) Finaliza el juego, cancela el turno
+        activo y vacía la lista de participantes.
+        """
+        if not self._verificar_canal_eventos(message):
+            return
+
+        cid = message.chat.id
+        tid = get_thread_id(message)
+
+        try:
+            self.bot.delete_message(cid, message.message_id)
+        except Exception:
+            pass
+
+        if not self._es_admin(message):
+            self._temp(cid, "❌ Solo los administradores pueden terminar el juego.", tid)
+            return
+
+        if not self._lista and self._turno is None:
+            self._temp(cid, "ℹ️ No hay ningún juego activo en este momento.", tid)
+            return
+
+        jugadores = len(self._lista)
+
+        # Cancelar turno activo si existe
+        self._cancelar_turno_activo()
+
+        # Vaciar todo
+        self._lista  = []
+        self._turno  = None
+
+        logger.info("[VoR] Juego terminado por admin. Había %s jugadores.", jugadores)
+
+        try:
+            self.bot.send_message(
+                cid,
+                "🏁 <b>¡Juego terminado!</b>\n\n"
+                f"Se cerró la partida con <b>{jugadores}</b> participante(s).\n"
+                "Usá <code>/participar</code> para arrancar uno nuevo cuando quieran.",
+                parse_mode="HTML",
+                message_thread_id=tid,
+            )
+        except Exception as e:
+            logger.error("[VoR] Error anunciando fin de juego: %s", e)
+
+    # ── /participando ─────────────────────────────────────────────────────────
+
+    def cmd_participando(self, message: telebot.types.Message) -> None:
+        """Muestra quiénes están en la lista y el estado del turno activo."""
+        if not self._verificar_canal_eventos(message):
+            return
+
+        cid = message.chat.id
+        tid = get_thread_id(message)
+
+        try:
+            self.bot.delete_message(cid, message.message_id)
+        except Exception:
+            pass
+
+        if not self._lista:
+            self._temp(
+                cid,
+                "📋 No hay ningún juego activo.\n"
+                "Usá <code>/participar</code> para iniciar uno.",
+                tid,
+            )
+            return
+
+        uid_preg = self._turno["preguntador"]["uid"] if self._turno else None
+        uid_resp = self._turno["respondedor"]["uid"] if self._turno else None
+
+        lineas = []
+        for i, p in enumerate(self._lista, 1):
+            if p["uid"] == uid_preg:
+                marca = " 🎤"
+            elif p["uid"] == uid_resp:
+                marca = " ⏳"
+            else:
+                marca = ""
+            lineas.append(f"  {i}. {p['mencion']}{marca}")
+
+        estado = ""
+        if self._turno:
+            if self._turno.get("esperando_texto"):
+                estado = "\n\n✏️ Esperando que el preguntador escriba su consigna..."
+            else:
+                estado = "\n\n🎤 Turno activo — esperando elección del preguntador."
+
+        texto = (
+            f"🎲 <b>Verdad o Reto — Participantes</b>\n\n"
+            f"👥 Total: <b>{len(self._lista)}</b>\n\n"
+            + "\n".join(lineas)
+            + estado
+        )
+        try:
+            m = self.bot.send_message(
+                cid, texto,
+                parse_mode="HTML",
+                message_thread_id=tid,
+            )
+            threading.Timer(
+                20.0,
+                lambda: self._borrar_seguro(cid, m.message_id),
+            ).start()
+        except Exception as e:
+            logger.error("[EVENTOS] Error en /participando: %s", e)
+
+    # ── /salir ────────────────────────────────────────────────────────────────
+
+    def cmd_salir_evento(self, message: telebot.types.Message) -> None:
+        """
+        /salir en EVENTOS — Te quita de la lista de Verdad o Reto.
+        Si el thread no es EVENTOS, ignora silenciosamente.
+        """
+        if message.chat.id != CANAL_ID or get_thread_id(message) != EVENTOS:
+            return  # Silencioso: puede ser /salir de ROLES
+
+        cid = message.chat.id
+        tid = get_thread_id(message)
+        uid = message.from_user.id
+
+        try:
+            self.bot.delete_message(cid, message.message_id)
+        except Exception:
+            pass
+
+        if not any(p["uid"] == uid for p in self._lista):
+            self._temp(cid, "⚠️ No estás en la lista del juego.", tid)
+            return
+
+        nombre = next(p["nombre"] for p in self._lista if p["uid"] == uid)
+
+        # Si el que sale forma parte del turno activo, cancelar el turno
+        if self._turno is not None:
+            uids_en_turno = {
+                self._turno["preguntador"]["uid"],
+                self._turno["respondedor"]["uid"],
+            }
+            if uid in uids_en_turno:
+                self._cancelar_turno_activo()
+                self._temp(
+                    cid,
+                    f"👋 {nombre} salió del juego.\n"
+                    "⏭️ El turno activo fue cancelado porque era parte de él.",
+                    tid,
+                    delay=10.0,
+                )
+                self._lista = [p for p in self._lista if p["uid"] != uid]
+                return
+
+        self._lista = [p for p in self._lista if p["uid"] != uid]
+        logger.info("[VoR] %s (%s) salió. Quedan %s.", nombre, uid, len(self._lista))
+
+        self._temp(
+            cid,
+            f"👋 {nombre} salió del juego.\n"
+            f"👥 Participantes: <b>{len(self._lista)}</b>",
+            tid,
+            delay=8.0,
+        )
+
     # ── Callback: elección del preguntador ───────────────────────────────────
 
     def callback_vor(self, call: types.CallbackQuery) -> None:
@@ -405,7 +706,7 @@ class EventHandlers:
         Gestiona vor:auto_verdad, vor:auto_reto y vor:escribir.
         Solo el preguntador sorteado puede presionar los botones.
         """
-        partes = call.data.split(":")   # ["vor", "accion", "uid"]
+        partes = call.data.split(":")
         if len(partes) != 3:
             self.bot.answer_callback_query(call.id)
             return
@@ -416,7 +717,6 @@ class EventHandlers:
         cid                = call.message.chat.id
         tid                = getattr(call.message, "message_thread_id", None)
 
-        # Solo el preguntador sorteado puede interactuar
         if uid_caller != uid_preguntador:
             self.bot.answer_callback_query(
                 call.id,
@@ -456,7 +756,9 @@ class EventHandlers:
             self._turno = None
 
         elif accion == "escribir":
-            # Marcar que esperamos texto y editar el mensaje quitando botones
+            # Marcar que esperamos texto y editar el mensaje quitando botones.
+            # A partir de acá, _es_texto_del_preguntador devolverá True para
+            # el próximo mensaje de texto del preguntador en este chat/thread.
             self._turno["esperando_texto"] = True
             try:
                 self.bot.edit_message_text(
@@ -479,8 +781,14 @@ class EventHandlers:
         """
         Captura el siguiente mensaje del preguntador cuando eligió
         "Escribir la mía" y lo publica formateado para todos.
+
+        Este handler es registrado PRIMERO en _register_handlers para tener
+        prioridad sobre cualquier catch-all de texto de otros módulos.
+        El filtro _es_texto_del_preguntador garantiza que solo activa cuando
+        corresponde exactamente.
         """
-        if self._turno is None:
+        # Doble-check defensivo por si el estado cambió entre el filtro y acá
+        if self._turno is None or not self._turno.get("esperando_texto"):
             return
 
         t         = self._turno
@@ -491,7 +799,7 @@ class EventHandlers:
         if not contenido:
             return
 
-        # Borrar el mensaje original del preguntador para no duplicar en el canal
+        # Borrar el mensaje del preguntador para no duplicar en el canal
         try:
             self.bot.delete_message(cid, message.message_id)
         except Exception:
@@ -506,116 +814,8 @@ class EventHandlers:
             t["preguntador"]["mencion"], t["respondedor"]["mencion"],
         )
         logger.info(
-            "[VoR] Texto personalizado publicado por uid %s.",
-            t["preguntador"]["uid"],
+            "[VoR] Texto personalizado publicado por uid %s: %r",
+            t["preguntador"]["uid"], contenido[:60],
         )
+        # Liberar el turno
         self._turno = None
-
-    # ── /participando ─────────────────────────────────────────────────────────
-
-    def cmd_participando(self, message: telebot.types.Message) -> None:
-        """Muestra quiénes están en la lista y el estado del turno activo."""
-        if not self._verificar_canal_eventos(message):
-            return
-
-        cid = message.chat.id
-        tid = get_thread_id(message)
-
-        try:
-            self.bot.delete_message(cid, message.message_id)
-        except Exception:
-            pass
-
-        if not self._lista:
-            self._temp(
-                cid,
-                "📋 No hay ningún juego activo.\n"
-                "Usá <code>/participar</code> para iniciar uno.",
-                tid,
-            )
-            return
-
-        uid_preg = self._turno["preguntador"]["uid"] if self._turno else None
-        uid_resp = self._turno["respondedor"]["uid"] if self._turno else None
-
-        lineas = []
-        for i, p in enumerate(self._lista, 1):
-            if p["uid"] == uid_preg:
-                marca = " 🎤"
-            elif p["uid"] == uid_resp:
-                marca = " ⏳"
-            else:
-                marca = ""
-            lineas.append(f"  {i}. {p['mencion']}{marca}")
-
-        texto = (
-            f"🎲 <b>Verdad o Reto — Participantes</b>\n\n"
-            f"👥 Total: <b>{len(self._lista)}</b>\n\n"
-            + "\n".join(lineas)
-        )
-        if self._turno:
-            texto += "\n\n<i>🎤 = eligiendo  |  ⏳ = respondiendo</i>"
-
-        try:
-            m = self.bot.send_message(
-                cid, texto,
-                parse_mode="HTML",
-                message_thread_id=tid,
-            )
-            threading.Timer(
-                20.0,
-                lambda: self._borrar_seguro(cid, m.message_id),
-            ).start()
-        except Exception as e:
-            logger.error("[EVENTOS] Error en /participando: %s", e)
-
-    # ── /salir ────────────────────────────────────────────────────────────────
-
-    def cmd_salir_evento(self, message: telebot.types.Message) -> None:
-        """
-        /salir en EVENTOS — quita al usuario de la lista.
-        Si el thread no es EVENTOS, ignora silenciosamente para no
-        interferir con role_handlers (/salir en ROLES).
-        """
-        if get_thread_id(message) != EVENTOS:
-            return  # dejar que lo maneje role_handlers
-
-        cid = message.chat.id
-        tid = get_thread_id(message)
-        uid = message.from_user.id
-
-        try:
-            self.bot.delete_message(cid, message.message_id)
-        except Exception:
-            pass
-
-        user_info = user_service.get_user_info(uid)
-        if not user_info:
-            self._temp(cid, MSG_USUARIO_NO_REGISTRADO, tid)
-            return
-
-        antes = len(self._lista)
-        self._lista = [p for p in self._lista if p["uid"] != uid]
-
-        if len(self._lista) < antes:
-            nombre  = user_info.get("nombre") or message.from_user.first_name
-            mencion = self._nombre_display(message, user_info)
-            logger.info("[VoR] %s (%s) salió. Quedan: %s", nombre, uid, len(self._lista))
-
-            extra = ""
-            if self._turno and (
-                uid == self._turno["preguntador"]["uid"]
-                or uid == self._turno["respondedor"]["uid"]
-            ):
-                self._turno = None
-                extra = "\n⚠️ <i>El turno activo fue cancelado porque un jugador salió.</i>"
-
-            self._temp(
-                cid,
-                f"👋 {mencion} salió del juego.\n"
-                f"👥 Participantes restantes: <b>{len(self._lista)}</b>{extra}",
-                tid,
-                delay=8.0,
-            )
-        else:
-            self._temp(cid, "⚠️ No estás en la lista del juego actual.", tid)
