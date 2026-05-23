@@ -729,9 +729,7 @@ Soy tu asistente para gestionar roles, Cosmos y mucho más.
         user_info = user_service.get_user_info(uid)
         if not user_info:
             m = self.bot.send_message(
-                cid,
-                "⚠️ No estás registrado. Usa /registrar",
-                message_thread_id=tid,
+                cid, "⚠️ No estás registrado. Usa /registrar", message_thread_id=tid,
             )
             time.sleep(5)
             try:
@@ -755,11 +753,15 @@ Soy tu asistente para gestionar roles, Cosmos y mucho más.
         ultima_recompensa = user_info.get("ultima_recompensa_diaria", "—") or "—"
 
         from funciones.user_experience import exp_requerida_usuario
-        xp_req = exp_requerida_usuario(nivel)
-        estadia     = _tiempo_en_grupo(registro) if registro else "—"
-        cuenta_tipo = "VIP" if str(nickname).upper() == "VIP" else "Normal"
-        clase_display = "idol" if clase == "idol" else "Usuario"
+        xp_req  = exp_requerida_usuario(nivel)
+        estadia = _tiempo_en_grupo(registro) if registro else "—"
 
+        # ── Barra de XP ───────────────────────────────────────────────────────
+        xp_pct   = min(experiencia / xp_req, 1.0) if xp_req > 0 else 0
+        bloques  = int(xp_pct * 10)
+        barra_xp = "█" * bloques + "░" * (10 - bloques)
+
+        # ── Menciones y badges ────────────────────────────────────────────────
         username_raw = message.from_user.username
         mencion = (
             f"@{username_raw}"
@@ -767,36 +769,50 @@ Soy tu asistente para gestionar roles, Cosmos y mucho más.
             else f'<a href="tg://user?id={uid}">{nombre}</a>'
         )
 
-        idol_linea = (
-            f"\n                ⋆ {idol_nombre}⋆"
-            if (clase == "idol" and idol_nombre)
-            else ""
-        )
+        vip_txt = "  ✦ VIP" if str(nickname).upper() == "VIP" else ""
 
-        # ── Texto con formato estético ────────────────────────────────────────
+        # ── Clase + idol ──────────────────────────────────────────────────────
+        if clase == "idol" and idol_nombre:
+            clase_txt = f"Idol  ·  ⭐ {idol_nombre}"
+        else:
+            clase_txt = "Usuario"
+
+        # ── CEO (mercado) ─────────────────────────────────────────────────────
+        ceo_bloque = ""
+        try:
+            from funciones.mercado_service import mercado_service
+            ceos = mercado_service.get_ceos_de_usuario(uid)
+            if ceos:
+                grupos = "  ·  ".join(c["nombre"] for c in ceos)
+                ceo_bloque = (
+                    f"\n━━━━━━━━━━━━━━━━━━━━\n\n"
+                    f"👑  CEO de: <b>{grupos}</b>"
+                )
+        except Exception:
+            pass
+
+        # ── Texto del perfil ──────────────────────────────────────────────────
         texto = (
-            "｡･:*:･ﾟ★,｡･:*:･ﾟ☆   ｡･:*:･ﾟ★,｡･:*:･ﾟ☆\n"
-            "｡ﾟﾟ･｡･ﾟﾟ｡\n"
-            f"ﾟ。[ <b>{nombre}</b> ]\n"
-            f"<i>𝑪𝒖𝒆𝒏𝒕𝒂 {cuenta_tipo}!</i>\n"
-            f"*.·:·.☽✧    Nivel: {nivel}  Exp: {experiencia} / {xp_req}    ✧☾.·:·.*\n"
-            "     ₊‧.°.⋆ •˚₊‧⋆.\n"
-            f"⊹₊ㆍ✿ㆍ{mencion}ㆍ✿ㆍ₊⊹\n"
-            f"      ⊹ ˚ . <i>𝑪𝒍𝒂𝒔𝒆: {clase_display}</i> ｡ﾟ⋆ ⊹"
-            f"{idol_linea}\n"
-            "                    *.·:·.☽✧    ✦    ✧☾.·:·.*\n"
-            f" <i>𝑬𝒔𝒕𝒂𝒅𝒊́𝒂:</i> {estadia} (desde {registro or '—'})\n"
-            f"  <i>𝑼𝒍𝒕𝒊𝒎𝒐 𝑷𝒐𝒔𝒕</i> ➵ {ultima_recompensa}\n"
-            f"   <i>𝑪𝒐𝒔𝒎𝒐𝒔</i> ➵ {wallet}\n"
-            f"     <i>𝑹𝒐𝒍𝒆𝒔 𝒕𝒐𝒕𝒂𝒍𝒆𝒔</i> ➵ {rol_hist}\n"
-            f"      <i>𝑹𝒐𝒍𝒆𝒔 𝒅𝒆𝒍 𝒎𝒆𝒔</i> ➵ {jugando}\n"
-            f"       <i>𝑷𝒖𝒏𝒕𝒐𝒔</i> ➵ {puntos}\n"
-            "        <i>Pase de batalla</i> ➵ Próximamente\n\n"
-            "☞* . °•★|•°∵ Universe ∵°•|☆•° . *\n"
-            "༄ ⋆ 🌙 ｡˚ Disfruta tu estancia! 🧷 ✧ ˚."
+            f"✦ · ⋆⋅☆⋅⋆ · UNIVERSE · ⋆⋅☆⋅⋆ · ✦\n\n"
+            f"<b>{nombre}</b>{vip_txt}\n"
+            f"{mencion}\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"🎭  <b>{clase_txt}</b>\n"
+            f"📊  Nivel <b>{nivel}</b>\n"
+            f"⚡  <code>{barra_xp}</code>  {experiencia} / {xp_req} XP\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"💰  Cosmos         <b>{wallet:,} ✨</b>\n"
+            f"🎭  Roles del mes   <b>{jugando}</b>\n"
+            f"📜  Roles totales   <b>{rol_hist}</b>\n"
+            f"⭐  Puntos          <b>{puntos}</b>\n"
+            f"🕐  Estadía          <b>{estadia}</b>\n"
+            f"📅  Último post     <b>{ultima_recompensa}</b>"
+            f"{ceo_bloque}\n\n"
+            f"✦ · ✧˖° Universe °˖✧ · ✦"
         )
 
         # ── Intentar obtener foto de perfil ───────────────────────────────────
+        # (sistema de fotos sin cambios)
         foto_enviada = False
         try:
             from typing import cast
@@ -819,7 +835,6 @@ Soy tu asistente para gestionar roles, Cosmos y mucho más.
         if not foto_enviada:
             m = self.bot.send_message(cid, texto, parse_mode="HTML", message_thread_id=tid)
             threading.Timer(30.0, _borrar_perfil, args=(self.bot, cid, m.message_id)).start()
-
 def setup(bot: telebot.TeleBot):
     """Función para registrar los handlers"""
     BasicUserHandlers(bot)

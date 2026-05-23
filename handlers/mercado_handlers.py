@@ -50,6 +50,7 @@ class MercadoHandlers:
         self.bot.register_message_handler(self.cmd_vender,          commands=["vender"])
         self.bot.register_message_handler(self.cmd_portfolio,       commands=["portfolio"])
         self.bot.register_message_handler(self.cmd_ranking_mercado, commands=["ranking_mercado"])
+        self.bot.register_message_handler(self.cmd_portfolio,       commands=["portafolio"])   # alias
 
     # ── Utilidades ────────────────────────────────────────────────────────────
 

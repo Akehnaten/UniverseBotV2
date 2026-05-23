@@ -30,6 +30,7 @@ from config import (
     OPENROUTER_API_KEY,
 )
 from utils.thread_utils import get_thread_id
+from utils.juan_utils import juan_tracker
 from database import db_manager
 
 logger = logging.getLogger(__name__)
@@ -467,15 +468,18 @@ def _enviar_respuesta(bot, message, respuesta: str | None, chat_id: int, thread_
         return
     if respuesta.startswith("sticker::"):
         try:
-            bot.send_sticker(chat_id, respuesta[9:], reply_to_message_id=message.message_id)
+            m = bot.send_sticker(chat_id, respuesta[9:], reply_to_message_id=message.message_id)
+            juan_tracker.mark_conversational(chat_id, m.message_id)
         except Exception as e:
             logger.warning(f"[JUAN] send_sticker falló: {e}")
         return
     try:
-        bot.reply_to(message, respuesta)
+        m = bot.reply_to(message, respuesta)
+        juan_tracker.mark_conversational(chat_id, m.message_id)
     except Exception:
         try:
-            bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
+            m = bot.send_message(chat_id, respuesta, message_thread_id=thread_id)
+            juan_tracker.mark_conversational(chat_id, m.message_id)
         except Exception as e:
             logger.error(f"[JUAN] envío falló: {e}")
 
@@ -492,11 +496,16 @@ def _menciona_a_juan(message) -> bool:
 
 
 def _es_reply_a_juan(message) -> bool:
-    return (
-        message.reply_to_message is not None
-        and message.reply_to_message.from_user is not None
-        and (message.reply_to_message.from_user.username or "").lower() == BOT_USERNAME.lower()
-    )
+    """
+    True solo si el mensaje es un reply a uno de los mensajes CONVERSACIONALES
+    de Juan (marcados con juan_tracker.mark_conversational).
+    Replies a slots, casino, pokémon, carreras, etc. → False.
+    """
+    if not (message.reply_to_message and message.reply_to_message.from_user):
+        return False
+    if (message.reply_to_message.from_user.username or "").lower() != BOT_USERNAME.lower():
+        return False
+    return juan_tracker.is_conversational_reply(message)
 
 
 def _deberia_responder_juan(message) -> bool:
