@@ -152,6 +152,49 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ LevelUp callbacks: {e}", exc_info=True)
 
+    # ── 2. NUEVOS JUEGOS ─────────────────────────────────────────────────────
+
+    try:
+        from handlers.blackjack_handlers import BlackjackHandlers
+        BlackjackHandlers(bot)
+        handlers_initialized.append("Blackjack")
+        logger.info("✅ Blackjack handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Blackjack handlers: {e}", exc_info=True)
+
+    try:
+        from handlers.duelo_handlers import DueloHandlers
+        DueloHandlers(bot)
+        handlers_initialized.append("Duelo")
+        logger.info("✅ Duelo handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Duelo handlers: {e}", exc_info=True)
+
+    try:
+        from handlers.carreras_handlers import CarrerasHandlers
+        CarrerasHandlers(bot)
+        handlers_initialized.append("Carreras")
+        logger.info("✅ Carreras handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Carreras handlers: {e}", exc_info=True)
+
+    try:
+        from handlers.ahorcado_handlers import AhorcadoHandlers
+        AhorcadoHandlers(bot)
+        handlers_initialized.append("Ahorcado")
+        logger.info("✅ Ahorcado handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Ahorcado handlers: {e}", exc_info=True)
+
+    try:
+        from handlers.mercado_handlers import MercadoHandlers
+        MercadoHandlers(bot)
+        handlers_initialized.append("Mercado")
+        logger.info("✅ Mercado handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Mercado handlers: {e}", exc_info=True)
+
+    # ── 3. Event handlers al final (content_types sin filtro de comando) ─────
     try:
         from handlers.event_handlers import EventHandlers
         EventHandlers(bot)
