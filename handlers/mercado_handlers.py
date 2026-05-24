@@ -44,15 +44,18 @@ class MercadoHandlers:
         mercado_service.iniciar_loop(notif_callback=self._notificar)
 
     def _register_handlers(self) -> None:
-        self.bot.register_message_handler(self.cmd_mercado,         commands=["mercado"])
-        self.bot.register_message_handler(self.cmd_activo,          commands=["activo"])
-        self.bot.register_message_handler(self.cmd_comprar,         commands=["comprar"])
-        self.bot.register_message_handler(self.cmd_vender,          commands=["vender"])
-        self.bot.register_message_handler(self.cmd_portfolio,       commands=["portfolio"])
-        self.bot.register_message_handler(self.cmd_ranking_mercado, commands=["ranking_mercado"])
-        self.bot.register_message_handler(self.cmd_ceo,             commands=["ceo"])
-        self.bot.register_message_handler(self.cmd_ceos,            commands=["ceos"])
-        self.bot.register_message_handler(self.cmd_portfolio,       commands=["portafolio"])   # alias
+        def _wrap(fn):
+            return lambda m: self._safe(fn, m)
+
+        self.bot.register_message_handler(_wrap(self.cmd_mercado),         commands=["mercado"])
+        self.bot.register_message_handler(_wrap(self.cmd_activo),          commands=["activo"])
+        self.bot.register_message_handler(_wrap(self.cmd_comprar),         commands=["comprar"])
+        self.bot.register_message_handler(_wrap(self.cmd_vender),          commands=["vender"])
+        self.bot.register_message_handler(_wrap(self.cmd_portfolio),       commands=["portfolio"])
+        self.bot.register_message_handler(_wrap(self.cmd_ranking_mercado), commands=["ranking_mercado"])
+        self.bot.register_message_handler(_wrap(self.cmd_ceo),             commands=["ceo"])
+        self.bot.register_message_handler(_wrap(self.cmd_ceos),            commands=["ceos"])
+        self.bot.register_message_handler(_wrap(self.cmd_portfolio),       commands=["portafolio"])
 
     # ── Utilidades ────────────────────────────────────────────────────────────
 
@@ -76,6 +79,15 @@ class MercadoHandlers:
         if message.message_thread_id == MERCADO_THREAD:
             return True
         self._del(message.chat.id, message.message_id)
+        try:
+            m = self.bot.send_message(
+                message.chat.id,
+                "📊 Este comando solo funciona en el canal de Mercado.",
+                message_thread_id=message.message_thread_id,
+            )
+            threading.Timer(6.0, lambda: self._del(message.chat.id, m.message_id)).start()
+        except Exception:
+            pass
         return False
 
     def _get_nombre(self, uid: int) -> str:
@@ -157,14 +169,13 @@ class MercadoHandlers:
     # ── /activo ───────────────────────────────────────────────────────────────
 
     def cmd_activo(self, message: telebot.types.Message) -> None:
-        if not self._solo_mercado(message):
-            return
         cid = message.chat.id
+        tid = message.message_thread_id
         self._del(cid, message.message_id)
 
         parts = (message.text or "").split()
         if len(parts) < 2:
-            self._err(cid, "❌ Uso: <code>/activo [SIMBOLO]</code>  ej: <code>/activo BTS</code>")
+            self._err(cid, "❌ Uso: <code>/activo [SIMBOLO]</code>  ej: <code>/activo BTS</code>", tid)
             return
 
         activo = mercado_service.get_activo(parts[1].upper())
@@ -204,7 +215,7 @@ class MercadoHandlers:
             f"👑 Para ser CEO:    <b>{acciones_ceo:,} acciones</b> (~{costo_ceo_est:,} ✨)"
             f"{ceo_linea}",
             parse_mode="HTML",
-            message_thread_id=MERCADO_THREAD,
+            message_thread_id=tid,
         )
         self._del_after(cid, m.message_id, 60.0)
 
@@ -359,16 +370,15 @@ class MercadoHandlers:
         """/ceo [SIM] — info CEO de un grupo específico."""
         import math as _math
         cid = message.chat.id
+        tid = message.message_thread_id
         self._del(cid, message.message_id)
-        if not self._solo_mercado(message):
-            return
         parts = (message.text or "").split()
         if len(parts) < 2:
-            self._mostrar_tabla_ceos(cid)
+            self._mostrar_tabla_ceos(cid, tid)
             return
         activo = mercado_service.get_activo(parts[1].upper())
         if not activo:
-            self._err(cid, f"❌ Activo <b>{parts[1].upper()}</b> no encontrado. Usá /mercado.")
+            self._err(cid, f"❌ Activo <b>{parts[1].upper()}</b> no encontrado. Usá /mercado.", tid)
             return
         acciones_ceo = _math.ceil(activo.supply_total * 0.51)
         costo_est    = int(acciones_ceo * activo.precio_actual)
@@ -398,7 +408,7 @@ class MercadoHandlers:
             f"{activo.tier_emoji} <b>{activo.nombre} ({activo.simbolo})</b>\n"
             f"Supply total: <b>{activo.supply_total:,} acciones</b>\n\n"
             f"{ceo_bloque}",
-            parse_mode="HTML", message_thread_id=MERCADO_THREAD,
+            parse_mode="HTML", message_thread_id=tid,
         )
         self._del_after(cid, m.message_id, 60.0)
 
@@ -407,12 +417,11 @@ class MercadoHandlers:
     def cmd_ceos(self, message: telebot.types.Message) -> None:
         """/ceos — tabla de CEOs y umbrales de todos los grupos."""
         cid = message.chat.id
+        tid = message.message_thread_id
         self._del(cid, message.message_id)
-        if not self._solo_mercado(message):
-            return
-        self._mostrar_tabla_ceos(cid)
+        self._mostrar_tabla_ceos(cid, tid)
 
-    def _mostrar_tabla_ceos(self, cid: int) -> None:
+    def _mostrar_tabla_ceos(self, cid: int, tid=None) -> None:
         import math as _math
         activos = mercado_service.get_activos()
         lineas  = ["👑 <b>CEOs DEL MERCADO DE COSMOS</b>\n"]
@@ -439,7 +448,7 @@ class MercadoHandlers:
         )
         m = self.bot.send_message(
             cid, "\n".join(lineas),
-            parse_mode="HTML", message_thread_id=MERCADO_THREAD,
+            parse_mode="HTML", message_thread_id=tid or MERCADO_THREAD,
         )
         self._del_after(cid, m.message_id, 120.0)
 
