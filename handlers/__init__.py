@@ -194,6 +194,14 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Mercado handlers: {e}", exc_info=True)
 
+    try:
+        from handlers.mercado_ofertas_handlers import MercadoOfertasHandlers
+        MercadoOfertasHandlers(bot)
+        handlers_initialized.append("MercadoOfertas")
+        logger.info("✅ Mercado Ofertas handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Mercado Ofertas handlers: {e}", exc_info=True)
+
     # ── 3. Event handlers al final (content_types sin filtro de comando) ─────
     try:
         from handlers.event_handlers import EventHandlers
