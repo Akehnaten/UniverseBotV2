@@ -2,14 +2,19 @@
 """
 funciones/ahorcado_service.py
 ════════════════════════════════════════════════════════════════════════════════
-Motor de Ahorcado para UniverseBot V2.0
+Motor de Ahorcado — UniverseBot V2.0
 
-Características:
-  - Una partida activa por thread_id (el grupo debate la letra a probar)
-  - Animación ASCII del muñeco que se construye con cada error
-  - Solo /letra X puede proponer letras (el comando filtra la interacción)
-  - Iniciador puede poner su propia palabra o usar una aleatoria temática
-  - Recompensa en cosmos a quienes acertaron letras al ganar la partida
+Fuentes de palabras (en orden de prioridad):
+  1. Palabra específica del iniciador  (/ahorcado PALABRA)
+  2. Generador Groq                    (/ahorcado ia)
+  3. Banco estático de 863 palabras    (/ahorcado)
+
+Banco: 15 categorías — kpop, animales, países, comidas, deportes,
+tecnología, historia, ciencia, música, películas, videojuegos,
+mitología, profesiones, arquitectura, palabras difíciles.
+
+Anti-repetición: se lleva un registro de palabras ya usadas por thread.
+Cuando se agotan todas, el registro se reinicia automáticamente.
 ════════════════════════════════════════════════════════════════════════════════
 """
 from __future__ import annotations
@@ -17,117 +22,56 @@ from __future__ import annotations
 import logging
 import random
 import threading
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
+
+from funciones.ahorcado_words import BANCO, TODAS
 
 logger = logging.getLogger(__name__)
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 
 MAX_ERRORES     = 6
-RECOMPENSA_BASE = 100   # Cosmos por participar en la victoria
-
-# ─── Palabras temáticas K-pop (ampliable desde config/JSON) ──────────────────
-
-PALABRAS_KPOP = [
-    "BLACKPINK", "JENNIE", "JISOO", "ROSE", "LISA",
-    "BANGTAN", "JUNGKOOK", "TAEHYUNG", "JIMIN", "NAMJOON", "SUGA", "JHOPE", "JIN",
-    "TWICE", "MOMO", "SANA", "MINA", "NAYEON", "JIHYO", "CHAEYOUNG", "TZUYU",
-    "STRAY KIDS", "FELIX", "HYUNJIN", "BANGCHAN",
-    "ATEEZ", "HONGJOONG", "YUNHO", "WOOYOUNG",
-    "SEVENTEEN", "MINGYU", "JEONGHAN", "SEUNGCHEOL",
-    "AESPA", "KARINA", "WINTER", "NINGNING", "GISELLE",
-    "NEWJEANS", "HANNI", "MINJI", "DANIELLE", "HAERIN", "HYEIN",
-    "IVE", "WONYOUNG", "YUJ IN",
-    "PHOTOCARD", "COMEBACK", "LIGHTSTICK", "FANSIGN", "DAESANG",
-    "IDOL", "TRAINEE", "DEBUT", "MAKNAE", "SASAENG", "SARANGHAE",
-    "INKIGAYO", "MUBANK", "MCOUNTDOWN",
-]
+RECOMPENSA_BASE = 1    # Cosmos por letra correcta acertada
 
 
 # ─── ASCII Art del muñeco ─────────────────────────────────────────────────────
-# Cada elemento de la lista corresponde a un error (0 = sin errores)
 
 HORCA_FRAMES = [
-    # 0 errores — solo la horca vacía
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |       \n"
-        " |       \n"
-        " |       \n"
-        "_|_      "
-    ),
-    # 1 error — cabeza
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |     O \n"
-        " |       \n"
-        " |       \n"
-        "_|_      "
-    ),
-    # 2 errores — cuerpo
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |     O \n"
-        " |     | \n"
-        " |       \n"
-        "_|_      "
-    ),
-    # 3 errores — brazo izquierdo
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |     O \n"
-        " |    /| \n"
-        " |       \n"
-        "_|_      "
-    ),
-    # 4 errores — ambos brazos
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |     O \n"
-        " |    /|\\n"
-        " |       \n"
-        "_|_      "
-    ),
-    # 5 errores — pierna izquierda
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |     O \n"
-        " |    /|\\\n"
-        " |    /  \n"
-        "_|_      "
-    ),
-    # 6 errores — MUERTO 💀
-    (
-        "  _____  \n"
-        " |     | \n"
-        " |     O \n"
-        " |    /|\\\n"
-        " |    / \\\n"
-        "_|_      "
-    ),
+    "  _____  \n |     | \n |       \n |       \n |       \n_|_      ",
+    "  _____  \n |     | \n |     O \n |       \n |       \n_|_      ",
+    "  _____  \n |     | \n |     O \n |     | \n |       \n_|_      ",
+    "  _____  \n |     | \n |     O \n |    /| \n |       \n_|_      ",
+    "  _____  \n |     | \n |     O \n |    /|\\\n |       \n_|_      ",
+    "  _____  \n |     | \n |     O \n |    /|\\\n |    /  \n_|_      ",
+    "  _____  \n |     | \n |     O \n |    /|\\\n |    / \\\n_|_      ",
 ]
+
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
+
+def _normalizar(texto: str) -> str:
+    """Convierte a mayúsculas y elimina tildes/diacríticos."""
+    nfkd = unicodedata.normalize("NFD", texto.upper())
+    return "".join(c for c in nfkd if unicodedata.category(c) != "Mn")
 
 
 # ─── Partida ──────────────────────────────────────────────────────────────────
 
 @dataclass
 class PartidaAhorcado:
-    thread_id:     int
-    palabra:       str                     # Palabra en MAYÚSCULAS sin tildes
-    iniciador_id:  int
-    iniciador_nombre: str
-    letras_correctas: Set[str]             = field(default_factory=set)
-    letras_incorrectas: Set[str]           = field(default_factory=set)
-    participantes:   Dict[int, int]        = field(default_factory=dict)  # user_id → letras acertadas
-    activa:          bool                  = True
-    message_id:      Optional[int]         = None   # ID del mensaje del panel en el grupo
+    thread_id:          int
+    palabra:            str
+    categoria:          str
+    iniciador_id:       int
+    iniciador_nombre:   str
+    letras_correctas:   Set[str]          = field(default_factory=set)
+    letras_incorrectas: Set[str]          = field(default_factory=set)
+    participantes:      Dict[int, int]    = field(default_factory=dict)
+    activa:             bool              = True
+    message_id:         Optional[int]     = None
+    generada_por_ia:    bool              = False
 
     @property
     def errores(self) -> int:
@@ -142,7 +86,6 @@ class PartidaAhorcado:
         return self.errores >= MAX_ERRORES
 
     def display_palabra(self) -> str:
-        """Muestra la palabra con guiones bajos en letras no descubiertas."""
         return " ".join(
             c if (c in self.letras_correctas or c == " ") else "_"
             for c in self.palabra
@@ -152,21 +95,22 @@ class PartidaAhorcado:
         return HORCA_FRAMES[self.errores]
 
     def render_panel(self) -> str:
-        """Genera el texto completo del panel de la partida."""
-        horca    = self.render_frame()
-        palabra  = self.display_palabra()
-        correctas   = " ".join(sorted(self.letras_correctas)) or "—"
-        incorrectas = " ".join(sorted(self.letras_incorrectas)) or "—"
-        vidas_restantes = MAX_ERRORES - self.errores
+        horca           = self.render_frame()
+        palabra_display = self.display_palabra()
+        correctas       = " ".join(sorted(self.letras_correctas)) or "—"
+        incorrectas     = " ".join(sorted(self.letras_incorrectas)) or "—"
+        vidas           = MAX_ERRORES - self.errores
+        cat_txt         = f"  <i>Categoría: {self.categoria}</i>" if self.categoria else ""
+        ia_txt          = "  <i>✨ Generada por IA</i>" if self.generada_por_ia else ""
 
         return (
-            f"🔤 <b>AHORCADO — Universe Bot</b>\n"
+            f"🔤 <b>AHORCADO — Universe Bot</b>{cat_txt}{ia_txt}\n"
             f"<i>Iniciado por {self.iniciador_nombre}</i>\n\n"
             f"<code>{horca}</code>\n\n"
-            f"📝 Palabra: <code>{palabra}</code>\n\n"
-            f"✅ Letras correctas:    {correctas}\n"
-            f"❌ Letras incorrectas: {incorrectas}\n"
-            f"❤️ Vidas: <b>{'🟥' * self.errores}{'🟩' * vidas_restantes}</b>\n\n"
+            f"📝 Palabra:  <code>{palabra_display}</code>\n\n"
+            f"✅ Correctas:    {correctas}\n"
+            f"❌ Incorrectas: {incorrectas}\n"
+            f"❤️ Vidas: <b>{'🟥' * self.errores}{'🟩' * vidas}</b>\n\n"
             f"<i>Usá <code>/letra X</code> para proponer una letra</i>"
         )
 
@@ -174,11 +118,85 @@ class PartidaAhorcado:
 # ─── Servicio ─────────────────────────────────────────────────────────────────
 
 class AhorcadoService:
-    """Gestiona partidas de ahorcado, una por thread. Singleton thread-safe."""
+    """Gestiona partidas de Ahorcado (una por thread). Singleton thread-safe."""
 
     def __init__(self) -> None:
-        self._partidas: Dict[int, PartidaAhorcado] = {}
+        self._partidas:      Dict[int, PartidaAhorcado] = {}
+        self._usadas:        Dict[int, Set[str]]        = {}   # {thread_id: palabras ya usadas}
         self._lock = threading.Lock()
+
+    # ── Selección de palabra ──────────────────────────────────────────────────
+
+    def _palabra_del_banco(self, thread_id: int) -> Tuple[str, str]:
+        """
+        Elige una palabra no usada del banco estático.
+        Cuando se agotan todas, reinicia el registro del thread.
+        Retorna (palabra, categoria).
+        """
+        usadas = self._usadas.setdefault(thread_id, set())
+
+        # Filtrar disponibles
+        disponibles = [(p, cat) for cat, words in BANCO.items()
+                       for p in words if p not in usadas]
+
+        # Si se agotaron, reiniciar
+        if not disponibles:
+            logger.info("[AHORCADO] Thread %s: banco agotado, reiniciando.", thread_id)
+            self._usadas[thread_id] = set()
+            disponibles = [(p, cat) for cat, words in BANCO.items() for p in words]
+
+        palabra, categoria = random.choice(disponibles)
+        self._usadas[thread_id].add(palabra)
+        return palabra, categoria
+
+    def _palabra_groq(self) -> Tuple[str, str]:
+        """
+        Genera una palabra aleatoria usando Groq.
+        Retorna (palabra_normalizada, "IA").
+        Si Groq falla, cae al banco estático.
+        """
+        try:
+            from config import GROQ_API_KEY
+            from groq import Groq
+
+            categorias = [
+                "animal", "país", "ciudad", "comida", "deporte",
+                "película", "serie de TV", "videojuego", "ciencia",
+                "profesión", "instrumento musical", "personaje histórico",
+                "mitología", "tecnología", "planta o flor",
+            ]
+            categoria = random.choice(categorias)
+            client = Groq(api_key=GROQ_API_KEY)
+
+            resp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        f"Dame UNA SOLA palabra en español de la categoría: {categoria}. "
+                        "Requisitos: entre 4 y 15 letras, en mayúsculas, sin tildes, "
+                        "sin explicación ni texto adicional, solo la palabra. "
+                        "Puede ser un nombre propio. No uses artículos."
+                    ),
+                }],
+                max_tokens=20,
+                temperature=1.0,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            # Tomar solo la primera palabra si devolvió varias
+            palabra = raw.split()[0] if raw else ""
+            palabra = _normalizar(palabra)
+
+            if 4 <= len(palabra) <= 20 and palabra.replace(" ", "").isalpha():
+                logger.info("[AHORCADO] Groq generó: %s (%s)", palabra, categoria)
+                return palabra, f"IA — {categoria}"
+
+        except Exception as exc:
+            logger.warning("[AHORCADO] Groq falló, usando banco estático: %s", exc)
+
+        return self._palabra_del_banco(0)   # fallback
+
+    # ── API pública ───────────────────────────────────────────────────────────
 
     def nueva_partida(
         self,
@@ -186,31 +204,34 @@ class AhorcadoService:
         iniciador_id:     int,
         iniciador_nombre: str,
         palabra:          Optional[str] = None,
+        usar_ia:          bool = False,
     ) -> Tuple[Optional[PartidaAhorcado], str]:
-        """
-        Inicia una partida nueva en el thread indicado.
-
-        Si palabra es None, se elige una aleatoria del banco K-pop.
-        La palabra se normaliza a MAYÚSCULAS.
-
-        Returns:
-            (partida, "")           — partida creada.
-            (None,   mensaje_error) — ya había una activa.
-        """
         with self._lock:
             if thread_id in self._partidas and self._partidas[thread_id].activa:
-                return None, "Ya hay una partida activa en este canal. Terminala primero con /cancelar_ahorcado."
+                return None, "Ya hay una partida activa. Terminala primero con /cancelar_ahorcado."
 
-            if not palabra:
-                palabra = random.choice(PALABRAS_KPOP)
+            generada_por_ia = False
 
-            palabra_norm = palabra.upper().strip()
+            if palabra:
+                # Palabra manual del iniciador
+                palabra_norm = _normalizar(palabra.strip())
+                categoria    = "personalizada"
+            elif usar_ia:
+                palabra_norm, categoria = self._palabra_groq()
+                generada_por_ia = True
+            else:
+                palabra_norm, categoria = self._palabra_del_banco(thread_id)
+
+            if not palabra_norm or len(palabra_norm) < 2:
+                return None, "La palabra no es válida."
 
             partida = PartidaAhorcado(
                 thread_id=thread_id,
                 palabra=palabra_norm,
+                categoria=categoria,
                 iniciador_id=iniciador_id,
                 iniciador_nombre=iniciador_nombre,
+                generada_por_ia=generada_por_ia,
             )
             self._partidas[thread_id] = partida
             return partida, ""
@@ -222,19 +243,12 @@ class AhorcadoService:
         nombre:    str,
         letra:     str,
     ) -> Tuple[Optional[PartidaAhorcado], str, bool]:
-        """
-        Propone una letra.
-
-        Returns:
-            (partida, mensaje, es_correcta)
-            Si la partida no existe o ya terminó, partida=None y mensaje describe el error.
-        """
         with self._lock:
             partida = self._partidas.get(thread_id)
             if not partida or not partida.activa:
                 return None, "No hay partida activa en este canal.", False
 
-            letra = letra.upper().strip()
+            letra = _normalizar(letra).strip()
 
             if len(letra) != 1 or not letra.isalpha():
                 return partida, "❌ Solo se aceptan letras individuales (A-Z).", False
@@ -246,12 +260,11 @@ class AhorcadoService:
 
             if es_correcta:
                 partida.letras_correctas.add(letra)
-                # Registrar participante
                 partida.participantes[user_id] = partida.participantes.get(user_id, 0) + 1
                 apariciones = partida.palabra.count(letra)
                 if partida.ganada:
                     partida.activa = False
-                return partida, f"✅ <b>{letra}</b> — ¡Correcta! Aparece {apariciones} vez/veces.", True
+                return partida, f"✅ <b>{letra}</b> — ¡Correcta! Aparece <b>{apariciones}</b> vez/veces.", True
             else:
                 partida.letras_incorrectas.add(letra)
                 if partida.perdida:
@@ -272,6 +285,11 @@ class AhorcadoService:
     def cerrar_partida(self, thread_id: int) -> None:
         with self._lock:
             self._partidas.pop(thread_id, None)
+
+    def palabras_disponibles(self, thread_id: int) -> int:
+        """Cuántas palabras del banco quedan sin usar en este thread."""
+        usadas = self._usadas.get(thread_id, set())
+        return len(TODAS) - len(usadas)
 
 
 # ─── Singleton ────────────────────────────────────────────────────────────────
