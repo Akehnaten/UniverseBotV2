@@ -222,8 +222,15 @@ class PhotocardsHandlers:
         albums = photocards_service.obtener_albums_disponibles()
         markup = types.InlineKeyboardMarkup(row_width=1)
         for alb in albums:
+            total     = alb["total_cartas"]
+            obtenidas = len(photocards_service.get_cartas_usuario_en_album(uid, alb["key"]))
+            completa  = total > 0 and obtenidas >= total
+            if completa:
+                label = f"Completa {alb['name']}  ({total}/{total})"
+            else:
+                label = f"Abrir {alb['name']}  ({obtenidas}/{total} cartas)"
             markup.add(types.InlineKeyboardButton(
-                f"🎴 {alb['name']}  ({alb['total_cartas']} cartas)",
+                label,
                 callback_data=f"pc_abrir:{uid}:{alb['key']}",
             ))
         markup.add(types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_menu:{uid}"))
@@ -235,6 +242,26 @@ class PhotocardsHandlers:
         volver = types.InlineKeyboardMarkup().add(
             types.InlineKeyboardButton("⬅️ Volver", callback_data=f"pc_sobres:{uid}")
         )
+
+        # ── Bloquear si la colección ya está completa ─────────────────
+        total_album   = photocards_service.get_total_album(album_key)
+        cartas_unicas = len(photocards_service.get_cartas_usuario_en_album(uid, album_key))
+        if total_album > 0 and cartas_unicas >= total_album:
+            nombre_album = photocards_service.config_albums.get(album_key, {}).get("name", album_key)
+            markup_ok = types.InlineKeyboardMarkup(row_width=1)
+            markup_ok.add(
+                types.InlineKeyboardButton("Mi coleccion", callback_data=f"pc_coleccion:{uid}"),
+                types.InlineKeyboardButton("Volver", callback_data=f"pc_sobres:{uid}"),
+            )
+            self._edit(
+                call,
+                "Ya completaste esta coleccion! \n\n"
+                f"Tenes las {total_album} cartas unicas de {nombre_album}.\n\n"
+                "No podes comprar mas sobres de esta coleccion.",
+                markup_ok,
+            )
+            return
+
         saldo = economy_service.get_balance(uid)
         if saldo < COSTO_SOBRE:
             self._edit(call, f"❌ Necesitás <b>{COSTO_SOBRE}</b> cosmos, tenés <b>{saldo}</b>.", volver)

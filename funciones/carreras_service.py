@@ -30,7 +30,8 @@ logger = logging.getLogger(__name__)
 DURACION_APUESTAS = 180        # Segundos para apostar antes de la carrera
 PISTA_LONGITUD    = 18         # Casillas de la pista (pasos)
 CASA_CUT          = 0.10       # 10 % para la "casa"
-PAGO_MINIMO_MULT  = 1.5        # Multiplicador mínimo garantizado
+PAGO_MINIMO_MULT  = 1.5   # Multiplicador mínimo garantizado (piso de ganancia)
+PAGO_MAXIMO_MULT  = 8.0   # Multiplicador máximo permitido   (techo anti-asymetría)
 
 # ─── Caballos ─────────────────────────────────────────────────────────────────
 
@@ -213,33 +214,40 @@ class CarrerasService:
         apuestas: List[ApuestaCarrera],
     ) -> Dict[int, int]:
         """
-        Sistema pari-mutuel:
-          pool_neto = total × (1 - CASA_CUT)
-          Cada ganador recibe: (su_apuesta / total_apostado_en_ganador) × pool_neto
-          Mínimo garantizado: apuesta × PAGO_MINIMO_MULT
+        Sistema pari-mutuel con odds dinámicos y topes:
+
+          multiplicador_raw = pool_neto / total_apostado_en_ganador
+          multiplicador     = clamp(multiplicador_raw, PAGO_MINIMO_MULT, PAGO_MAXIMO_MULT)
+          pago              = apuesta × multiplicador
+
+        Ejemplo con pool 10.400✨, un ganador apostó 10.000✨:
+          mult_raw = 9.360 / 10.000 = 0.936  → se aplica piso → 1.5× → pago 15.000✨
+
+        Ejemplo con pool 10.400✨, un ganador apostó 100✨:
+          mult_raw = 9.360 / 100   = 93.6×   → se aplica techo → 8× → pago 800✨
+          (antes hubiera cobrado 9.360✨ — 93× su apuesta)
 
         Returns:
-            {user_id: pago_total (incluye devolución de apuesta)}
+            {user_id: pago_total}
         """
         pool_total = sum(a.cosmos for a in apuestas)
         if pool_total == 0:
             return {}
 
-        pool_neto = int(pool_total * (1 - CASA_CUT))
-
-        ganadores    = [a for a in apuestas if a.caballo_idx == ganador_idx]
-        total_ganad  = sum(a.cosmos for a in ganadores)
+        pool_neto   = int(pool_total * (1 - CASA_CUT))
+        ganadores   = [a for a in apuestas if a.caballo_idx == ganador_idx]
+        total_ganad = sum(a.cosmos for a in ganadores)
 
         pagos: Dict[int, int] = {}
         for a in ganadores:
             if total_ganad > 0:
-                parte  = int((a.cosmos / total_ganad) * pool_neto)
+                mult_raw = pool_neto / total_ganad
             else:
-                parte  = 0
-            # Garantizar mínimo
-            minimo = int(a.cosmos * PAGO_MINIMO_MULT)
-            pago   = max(parte, minimo)
-            pagos[a.user_id] = pago
+                mult_raw = PAGO_MINIMO_MULT
+
+            # Aplicar piso y techo
+            multiplicador = max(PAGO_MINIMO_MULT, min(PAGO_MAXIMO_MULT, mult_raw))
+            pagos[a.user_id] = int(a.cosmos * multiplicador)
 
         return pagos
 
