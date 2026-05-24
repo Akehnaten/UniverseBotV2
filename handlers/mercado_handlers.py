@@ -50,6 +50,8 @@ class MercadoHandlers:
         self.bot.register_message_handler(self.cmd_vender,          commands=["vender"])
         self.bot.register_message_handler(self.cmd_portfolio,       commands=["portfolio"])
         self.bot.register_message_handler(self.cmd_ranking_mercado, commands=["ranking_mercado"])
+        self.bot.register_message_handler(self.cmd_ceo,             commands=["ceo"])
+        self.bot.register_message_handler(self.cmd_ceos,            commands=["ceos"])
         self.bot.register_message_handler(self.cmd_portfolio,       commands=["portafolio"])   # alias
 
     # ── Utilidades ────────────────────────────────────────────────────────────
@@ -174,6 +176,16 @@ class MercadoHandlers:
         pos   = ((activo.precio_actual - activo.precio_minimo) / rango * 100) if rango > 0 else 50.0
         barra = self._barra(pos)
 
+        import math as _math
+        acciones_ceo  = _math.ceil(activo.supply_total * 0.51)
+        costo_ceo_est = int(acciones_ceo * activo.precio_actual)
+        disponibles   = mercado_service.get_acciones_disponibles(activo.simbolo)
+        ceo_info      = mercado_service.get_ceo(activo.simbolo)
+        ceo_linea     = (
+            f"\n👑 CEO: <b>{ceo_info['nombre']}</b> ({ceo_info['porcentaje']:.1f}%)"
+            if ceo_info else "\n👑 CEO: <i>Sin CEO — ¡posición libre!</i>"
+        )
+
         m = self.bot.send_message(
             cid,
             f"{activo.tier_emoji} <b>{activo.nombre} ({activo.simbolo})</b>\n"
@@ -185,7 +197,12 @@ class MercadoHandlers:
             f"📉 Mínimo hist.:    <b>{activo.precio_minimo:,.0f} ✨</b>\n"
             f"<code>{barra}</code>\n\n"
             f"📉 Volatilidad:     <b>{activo.volatilidad*100:.0f}%</b>/ciclo\n"
-            f"💸 Dividendo yield: <b>{activo.yield_diario*100:.1f}%</b>/día",
+            f"💸 Dividendo yield: <b>{activo.yield_diario*100:.1f}%</b>/día\n\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📦 Supply total:    <b>{activo.supply_total:,} acciones</b>\n"
+            f"🛒 Disponibles:     <b>{disponibles:,} acciones</b>\n"
+            f"👑 Para ser CEO:    <b>{acciones_ceo:,} acciones</b> (~{costo_ceo_est:,} ✨)"
+            f"{ceo_linea}",
             parse_mode="HTML",
             message_thread_id=MERCADO_THREAD,
         )
@@ -333,6 +350,96 @@ class MercadoHandlers:
 
         m = self.bot.send_message(
             cid, "\n".join(lineas), parse_mode="HTML", message_thread_id=MERCADO_THREAD
+        )
+        self._del_after(cid, m.message_id, 120.0)
+
+    # ── /ceo ─────────────────────────────────────────────────────────────────
+
+    def cmd_ceo(self, message: telebot.types.Message) -> None:
+        """/ceo [SIM] — info CEO de un grupo específico."""
+        import math as _math
+        cid = message.chat.id
+        self._del(cid, message.message_id)
+        if not self._solo_mercado(message):
+            return
+        parts = (message.text or "").split()
+        if len(parts) < 2:
+            self._mostrar_tabla_ceos(cid)
+            return
+        activo = mercado_service.get_activo(parts[1].upper())
+        if not activo:
+            self._err(cid, f"❌ Activo <b>{parts[1].upper()}</b> no encontrado. Usá /mercado.")
+            return
+        acciones_ceo = _math.ceil(activo.supply_total * 0.51)
+        costo_est    = int(acciones_ceo * activo.precio_actual)
+        disponibles  = mercado_service.get_acciones_disponibles(activo.simbolo)
+        ceo_info     = mercado_service.get_ceo(activo.simbolo)
+        if ceo_info:
+            ceo_bloque = (
+                f"👑 <b>CEO: {ceo_info['nombre']}</b>\n"
+                f"   Acciones: <b>{ceo_info['cantidad']:,}</b> ({ceo_info['porcentaje']:.1f}%)\n"
+                f"   CEO desde: <i>{str(ceo_info['fecha_desde'])[:10]}</i>"
+            )
+            if ceo_info.get("mensaje"):
+                ceo_bloque += f"\n   💬 <i>\"{ceo_info['mensaje']}\"</i>"
+            ceo_bloque += (
+                f"\n\n⚔️ Para destronar necesitás <b>{acciones_ceo:,} acciones</b> "
+                f"(~{costo_est:,} ✨)"
+            )
+        else:
+            ceo_bloque = (
+                f"👑 <b>Sin CEO</b> — ¡la posición está libre!\n\n"
+                f"🎯 Necesitás <b>{acciones_ceo:,} acciones</b>\n"
+                f"   Costo estimado: <b>~{costo_est:,} ✨</b>\n"
+                f"   Disponibles ahora: <b>{disponibles:,}</b>"
+            )
+        m = self.bot.send_message(
+            cid,
+            f"{activo.tier_emoji} <b>{activo.nombre} ({activo.simbolo})</b>\n"
+            f"Supply total: <b>{activo.supply_total:,} acciones</b>\n\n"
+            f"{ceo_bloque}",
+            parse_mode="HTML", message_thread_id=MERCADO_THREAD,
+        )
+        self._del_after(cid, m.message_id, 60.0)
+
+    # ── /ceos ─────────────────────────────────────────────────────────────────
+
+    def cmd_ceos(self, message: telebot.types.Message) -> None:
+        """/ceos — tabla de CEOs y umbrales de todos los grupos."""
+        cid = message.chat.id
+        self._del(cid, message.message_id)
+        if not self._solo_mercado(message):
+            return
+        self._mostrar_tabla_ceos(cid)
+
+    def _mostrar_tabla_ceos(self, cid: int) -> None:
+        import math as _math
+        activos = mercado_service.get_activos()
+        lineas  = ["👑 <b>CEOs DEL MERCADO DE COSMOS</b>\n"]
+        tier_actual = None
+        for a in activos:
+            if a.tier != tier_actual:
+                tier_actual = a.tier
+                lineas.append(f"\n{TIER_EMOJI.get(a.tier,'')} <b>{a.tier} CAP</b>")
+            acciones_ceo = _math.ceil(a.supply_total * 0.51)
+            costo_est    = int(acciones_ceo * a.precio_actual)
+            ceo_info     = mercado_service.get_ceo(a.simbolo)
+            estado = (
+                f"👑 {ceo_info['nombre']} ({ceo_info['porcentaje']:.0f}%)"
+                if ceo_info else "<i>Libre</i>"
+            )
+            lineas.append(
+                f"<b>{a.simbolo}</b>  {a.nombre}\n"
+                f"   CEO: {estado}\n"
+                f"   Para CEO: <b>{acciones_ceo:,} acc.</b>  ~{costo_est:,} ✨"
+            )
+        lineas.append(
+            "\n<i>💡 <code>/ceo [SIM]</code> para detalle · "
+            "<code>/activo [SIM]</code> para precio y disponibles</i>"
+        )
+        m = self.bot.send_message(
+            cid, "\n".join(lineas),
+            parse_mode="HTML", message_thread_id=MERCADO_THREAD,
         )
         self._del_after(cid, m.message_id, 120.0)
 
