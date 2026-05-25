@@ -31,7 +31,7 @@ from funciones.mercado_service import TIER_EMOJI, mercado_service
 
 logger = logging.getLogger(__name__)
 
-MERCADO_THREAD = 2553
+MERCADO_THREAD = 342521
 
 
 class MercadoHandlers:
