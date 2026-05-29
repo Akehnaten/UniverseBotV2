@@ -269,8 +269,18 @@ class BlackjackHandlers:
                 pass
             return
 
+        # Partida existe pero ya terminó (ej: doble callback por tap rápido).
+        # Liquidar si aún no se hizo (cerrar_partida es idempotente: retorna
+        # False si ya no estaba en el dict, así sabemos si debemos pagar).
         if partida.estado != EstadoBJ.EN_CURSO:
             self.bot.answer_callback_query(call.id, "La partida ya terminó.")
+            user_info = user_service.get_user_info(uid)
+            nombre    = user_info.get("nombre", "Usuario") if user_info else "Usuario"
+            cid       = call.message.chat.id
+            tid       = getattr(call.message, "message_thread_id", None)
+            # Solo liquidar si la partida todavía está registrada (evita doble pago)
+            if blackjack_service.get_partida(uid):
+                self._liquidar(partida, nombre, cid, tid)
             return
 
         # ── Obtener nombre ────────────────────────────────────────────────────
@@ -305,6 +315,16 @@ class BlackjackHandlers:
 
         if error or not partida:
             self.bot.answer_callback_query(call.id, error or "Error interno.", show_alert=True)
+            # Si el service devolvió None, la partida quedó en un estado
+            # desconocido. Cerrarla y reembolsar para no dejar al usuario bloqueado.
+            if not partida:
+                partida_huerfana = blackjack_service.get_partida(uid)
+                if partida_huerfana:
+                    economy_service.add_credits(
+                        uid, partida_huerfana.apuesta_efectiva, "blackjack_reembolso_error"
+                    )
+                    blackjack_service.cerrar_partida(uid)
+                    logger.warning("[BJ] Partida huérfana cerrada y reembolsada | uid=%s", uid)
             return
 
         # ── Actualizar panel ──────────────────────────────────────────────────

@@ -263,6 +263,44 @@ class MercadoService:
                 pass
 
     def _seed_activos(self) -> None:
+        # ── Migración única: fusionar STAY → SKZ si el duplicado llegó a la BD ──
+        # Versiones anteriores del seed tenían "STAY" como símbolo de Stray Kids.
+        # Si existe en la BD lo fusionamos en SKZ (portfolio + precio histórico)
+        # antes de insertar/actualizar cualquier activo.
+        stay_rows = db_manager.execute_query(
+            "SELECT precio_actual FROM MERCADO_ACTIVOS WHERE simbolo='STAY'"
+        )
+        if stay_rows:
+            logger.info("[MERCADO] Migrando STAY → SKZ (duplicado detectado)...")
+            # 1. Fusionar portfolio: si alguien tenía STAY, sumar a SKZ
+            db_manager.execute_update(
+                """INSERT INTO MERCADO_PORTFOLIO (userID, simbolo, cantidad, costo_total)
+                   SELECT userID, 'SKZ', cantidad, costo_total FROM MERCADO_PORTFOLIO
+                   WHERE simbolo='STAY'
+                   ON CONFLICT(userID, simbolo) DO UPDATE SET
+                       cantidad    = cantidad    + excluded.cantidad,
+                       costo_total = costo_total + excluded.costo_total"""
+            )
+            # 2. Reasignar CEO si el CEO era de STAY
+            db_manager.execute_update(
+                """UPDATE MERCADO_CEO SET simbolo='SKZ'
+                   WHERE simbolo='STAY'
+                   AND NOT EXISTS (SELECT 1 FROM MERCADO_CEO WHERE simbolo='SKZ')"""
+            )
+            db_manager.execute_update("DELETE FROM MERCADO_CEO WHERE simbolo='STAY'")
+            # 3. Limpiar eventos log del duplicado
+            db_manager.execute_update(
+                "DELETE FROM MERCADO_EVENTOS_LOG WHERE simbolo='STAY'"
+            )
+            # 4. Eliminar portfolio huérfano y el activo duplicado
+            db_manager.execute_update(
+                "DELETE FROM MERCADO_PORTFOLIO WHERE simbolo='STAY'"
+            )
+            db_manager.execute_update(
+                "DELETE FROM MERCADO_ACTIVOS WHERE simbolo='STAY'"
+            )
+            logger.info("[MERCADO] Migración STAY → SKZ completada.")
+
         for a in _ACTIVOS_SEED:
             supply = _SUPPLY_TOTAL.get(a["simbolo"], 1000)
             existente = db_manager.execute_query(
