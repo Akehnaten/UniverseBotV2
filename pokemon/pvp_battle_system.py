@@ -69,6 +69,8 @@ from pokemon.battle_engine import (
     activate_weather,
     activate_terrain,
     tick_field_turns,
+    tick_side_effects,
+    order_speed,
     # ── Datos de movimientos ─────────────────────────────────────────────────
     MOVE_EFFECTS,
     SECONDARY_AILMENTS,
@@ -164,6 +166,9 @@ class PvPSide:
     crit_stage:       int = 0   # etapa de golpe crítico (Gen 6+: 0/1/2/3)
     confusion_turns:  int = 0
     leechseeded:      bool = False
+    # ── Viento Afín (duplica la velocidad del bando mientras dure) ───────────
+    tailwind:         bool = False
+    tailwind_turns:   int  = 0
     # Mensajes de Telegram
     dm_message_id:        Optional[int] = None  # panel texto + botones (SIEMPRE texto)
     rival_sprite_msg_id:  Optional[int] = None  # foto del rival  (arriba en DM)
@@ -245,6 +250,9 @@ class PvPBattle:
     side2:       PvPSide           # el retado
     state:       PvPState = PvPState.ACTIVE
     turn_number: int = 0
+    # Guard de reentrancia: evita que el path de submit y el de timeout
+    # ejecuten _resolve_turn simultáneamente (doble incremento de turno).
+    _resolving:  bool = field(default=False, repr=False)
     # Campo de batalla (compartido entre bandos)
     weather:         Optional[str] = None
     weather_turns:   int = 0
@@ -888,6 +896,13 @@ class PvPManager:
 
             side.pending_action = action
             should_resolve = battle.both_chose()
+            # Tomar el "derecho" a resolver de forma atómica: solo un caller
+            # (submit o timeout) puede resolver este turno.
+            if should_resolve:
+                if battle._resolving:
+                    should_resolve = False
+                else:
+                    battle._resolving = True
 
         if should_resolve:
             self._cancel_turn_timers(battle)
@@ -910,6 +925,18 @@ class PvPManager:
         if not side:
             return
 
+        # CRÍTICO: cancelar cualquier timer previo de ESTE bando antes de
+        # armar uno nuevo. Sin esto, _resolve_turn (que arma timers para ambos
+        # bandos) seguido de un submit del rival dejaba dos timers vivos para
+        # el mismo lado, lo que podía disparar _resolve_turn dos veces y
+        # duplicar el incremento de turn_number.
+        if side.action_timer:
+            try:
+                side.action_timer.cancel()
+            except Exception:
+                pass
+            side.action_timer = None
+
         def _timeout():
             if battle.state != PvPState.ACTIVE:
                 return
@@ -920,7 +947,18 @@ class PvPManager:
             logger.info(f"[PVP] Timeout de turno para {user_id}")
             p = side.get_active_pokemon()
             default_move = (p.movimientos[0] if p and p.movimientos else "tackle")
-            side.pending_action = {"type": "move", "value": default_move}
+            with self._lock:
+                # Re-chequear bajo el lock: el rival pudo haber enviado su
+                # acción justo ahora y disparado la resolución.
+                if side.pending_action is not None:
+                    return
+                side.pending_action = {"type": "move", "value": default_move}
+                should_resolve = battle.both_chose()
+                if should_resolve:
+                    if battle._resolving:
+                        should_resolve = False
+                    else:
+                        battle._resolving = True
             try:
                 bot.send_message(
                     user_id,
@@ -929,7 +967,7 @@ class PvPManager:
                 )
             except Exception:
                 pass
-            if battle.both_chose():
+            if should_resolve:
                 self._cancel_turn_timers(battle)
                 self._resolve_turn(battle, bot)
 
@@ -972,16 +1010,19 @@ class PvPManager:
             p1 = s1.get_active_pokemon()
             p2 = s2.get_active_pokemon()
 
-            # Determinar orden por velocidad (Trick Room lo invierte)
-            spd1 = BattleUtils.effective_speed(
+            # Determinar orden por velocidad (Trick Room lo invierte;
+            # Viento Afín duplica la velocidad del bando que lo activó)
+            spd1 = order_speed(
                 p1.stats.get("vel", 50) if p1 else 50,
                 s1.stat_stages.get("vel", 0),
                 s1.status,
+                getattr(s1, "tailwind", False),
             ) if p1 else 0
-            spd2 = BattleUtils.effective_speed(
+            spd2 = order_speed(
                 p2.stats.get("vel", 50) if p2 else 50,
                 s2.stat_stages.get("vel", 0),
                 s2.status,
+                getattr(s2, "tailwind", False),
             ) if p2 else 0
 
             trick_room = getattr(battle, "trick_room", False)
@@ -1058,6 +1099,10 @@ class PvPManager:
 
         except Exception as e:
             logger.error(f"[PVP] Error en _resolve_turn: {e}", exc_info=True)
+        finally:
+            # Liberar el guard de reentrancia SIEMPRE, para que el próximo
+            # turno (o el reintento tras un error) pueda resolverse.
+            battle._resolving = False
 
     def _execute_action(
         self,
@@ -1142,7 +1187,7 @@ class PvPManager:
 
         turn_log.append(f"\n⚔️ ¡<b>{atk_name}</b> usó <b>{move_es}</b>!\n")
 
-        if not check_can_move(proxy, is_player=True, actor_name=atk_name, log=turn_log):
+        if not check_can_move(proxy, is_player=True, actor_name=atk_name, log=turn_log, move_key=move_key):
             return False
 
         if check_confusion(
@@ -1501,6 +1546,33 @@ class PvPManager:
             t_key, t_turns = effect["terrain"]
             activate_terrain(proxy, t_key, t_turns, atk_name, log)
 
+        # ── Salas (Espacio Raro / Sala Trampa, Gravedad, etc.) ────────────────
+        if "room" in effect:
+            from pokemon.battle_engine import ROOM_INFO
+            room_attr  = effect["room"]
+            turns_attr = room_attr + "_turns"
+            emoji, nombre, default_turns = ROOM_INFO.get(room_attr, ("", room_attr, 5))
+            if getattr(battle, room_attr, False):
+                setattr(battle, room_attr, False)
+                setattr(battle, turns_attr, 0)
+                log.append(f"  {emoji} <i>{nombre} terminó antes de tiempo.</i>\n")
+            else:
+                setattr(battle, room_attr, True)
+                setattr(battle, turns_attr, default_turns)
+                log.append(f"  {emoji} ¡<b>{nombre}</b> entró en efecto por {default_turns} turnos!\n")
+
+        # ── Viento Afín: duplica la velocidad del BANDO ATACANTE ──────────────
+        if "tailwind" in effect:
+            if attacker_side.tailwind:
+                log.append(f"  💨 ¡El Viento Afín de {atk_name} ya estaba activo!\n")
+            else:
+                attacker_side.tailwind = True
+                attacker_side.tailwind_turns = effect["tailwind"]
+                log.append(
+                    f"  💨 ¡<b>{atk_name}</b> invocó Viento Afín! "
+                    f"Su velocidad se duplica por {effect['tailwind']} turnos.\n"
+                )
+
         if "crit_stage" in effect:
             crit_target, crit_delta = effect["crit_stage"]
             side = attacker_side if crit_target == "self" else defender_side
@@ -1641,6 +1713,13 @@ class PvPManager:
                     side.sleep_turns = proxy.player_sleep_turns
 
         tick_field_turns(battle, log)
+        # Viento Afín es por-bando: descontar una vez por turno cada lado.
+        p1n = battle.side1.get_active_pokemon()
+        p2n = battle.side2.get_active_pokemon()
+        tick_side_effects(battle.side1, log,
+                          side_name=(p1n.mote or p1n.nombre) if p1n else "El bando 1")
+        tick_side_effects(battle.side2, log,
+                          side_name=(p2n.mote or p2n.nombre) if p2n else "El bando 2")
 
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -1692,6 +1771,7 @@ class PvPManager:
         except Exception as exc:
             if "message is not modified" not in str(exc):
                 logger.warning(f"[PVP] handle_fight_action edit error: {exc}")
+                self._resend_dm_panel(side, bot, txt, mk)
         return True
 
     def handle_back_action(self, user_id: int, bot) -> bool:
@@ -1717,6 +1797,7 @@ class PvPManager:
         except Exception as exc:
             if "message is not modified" not in str(exc):
                 logger.warning(f"[PVP] handle_back_action edit error: {exc}")
+                self._resend_dm_panel(side, bot, txt, mk)
         return True
 
     def handle_team_pvp(self, user_id: int, bot) -> bool:
@@ -1790,9 +1871,23 @@ class PvPManager:
         except Exception as exc:
             if "message is not modified" not in str(exc):
                 logger.warning(f"[PVP] handle_team_pvp edit error: {exc}")
+                self._resend_dm_panel(side, bot, txt, mk)
         return True
 
-    def handle_forfeit_pvp(self, user_id: int, bot) -> bool:
+    def _resend_dm_panel(self, side, bot, txt, mk):
+        """
+        Recupera el panel DM cuando una edición falla (mensaje borrado,
+        demasiado viejo, id obsoleto tras reinicio del bot). Sin esto, el
+        menú quedaba invisible y el usuario debía reiniciar la app de Telegram.
+        """
+        try:
+            msg = bot.send_message(
+                side.user_id, txt, parse_mode="HTML", reply_markup=mk,
+            )
+            side.dm_message_id = msg.message_id
+            logger.info(f"[PVP] Panel DM reenviado para {side.user_id} tras fallo de edición.")
+        except Exception as e:
+            logger.error(f"[PVP] No se pudo reenviar panel DM {side.user_id}: {e}")
         """Procesa la rendición de un jugador."""
         battle = self.get_battle_for(user_id)
         if not battle or battle.state != PvPState.ACTIVE:

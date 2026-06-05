@@ -8,7 +8,7 @@ Comandos de consulta (cualquier hilo):
   /ceo    [SIM]         — CEO de un grupo / tabla completa
   /ceos                 — Tabla completa de CEOs
 
-Comandos de operación (solo hilo MERCADO_THREAD = 2553):
+Comandos de operación (solo hilo MERCADO_THREAD = 342521):
   /mercado              — Precios actuales
   /comprar [SIM] [N]    — Compra acciones
   /vender  [SIM] [N]    — Vende acciones
@@ -143,14 +143,20 @@ class MercadoHandlers:
                 if a.tier != tier_actual:
                     tier_actual = a.tier
                     lineas.append(f"\n{TIER_EMOJI.get(a.tier,'')} <b>{a.tier} CAP</b>")
+                disp = mercado_service.get_acciones_disponibles(a.simbolo)
+                if disp <= 0:
+                    disp_txt = "🔴 <b>AGOTADO</b>"
+                else:
+                    disp_txt = f"🛒 Disp: <b>{disp:,}</b>/{a.supply_total:,}"
                 lineas.append(
                     f"{a.emoji_tendencia} <b>{a.simbolo}</b>  {a.nombre}\n"
                     f"   💰 <b>{a.precio_actual:,.0f} ✨</b>  "
-                    f"<i>hoy: {a.variacion_diaria_pct:+.1f}%  última hora: {a.variacion_pct:+.1f}%</i>"
+                    f"<i>hoy: {a.variacion_diaria_pct:+.1f}%  últ. hora: {a.variacion_pct:+.1f}%</i>\n"
+                    f"   {disp_txt}"
                 )
             lineas.append(
                 "\n<i>Precios actualizados cada hora.</i>\n"
-                "💡 <code>/activo [SIM]</code> · <code>/ceos</code>"
+                "💡 <code>/activo [SIM]</code> · <code>/comprar [SIM] [n]</code> · <code>/ceos</code>"
             )
             m = self.bot.send_message(
                 cid, "\n".join(lineas),
@@ -325,13 +331,15 @@ class MercadoHandlers:
                 return
             activo  = mercado_service.get_activo(parts[1].upper())
             div_est = int(activo.precio_actual * cantidad * activo.yield_diario) if activo else 0
+            disp_rest = mercado_service.get_acciones_disponibles(parts[1].upper())
             m = self.bot.send_message(
                 cid,
                 f"✅ <b>{nombre}</b> compró <b>{cantidad} acciones</b> de "
                 f"<b>{activo.nombre if activo else parts[1]}</b>\n"
                 f"💸 Costo:           <b>{int(costo):,} ✨</b>\n"
                 f"📊 Precio unitario: <b>{activo.precio_actual:,.0f} ✨</b>\n"
-                f"💰 Dividendo/día:   <b>~{div_est:,} ✨</b>",
+                f"💰 Dividendo/día:   <b>~{div_est:,} ✨</b>\n"
+                f"🛒 Quedan disponibles: <b>{disp_rest:,}</b>",
                 parse_mode="HTML", message_thread_id=MERCADO_THREAD,
             )
             self._del_after(cid, m.message_id, 30.0)

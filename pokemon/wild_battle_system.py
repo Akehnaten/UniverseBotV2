@@ -365,6 +365,11 @@ class BattleData:
     # Espacios (pseudo-climas que no se solapan con weather)
     trick_room:      bool = False
     trick_room_turns: int = 0
+    # Viento Afín por bando
+    player_tailwind:       bool = False
+    player_tailwind_turns: int  = 0
+    wild_tailwind:         bool = False
+    wild_tailwind_turns:   int  = 0
     gravity:         bool = False
     gravity_turns:   int = 0
     magic_room:      bool = False
@@ -818,6 +823,17 @@ def _apply_residual_effects(battle, log: list) -> None:
 
     # ── Tick del campo (clima y terreno) — ya lo hace tick_field_turns ────────
     tick_field_turns(battle, log)
+
+    # ── Viento Afín por bando (una vez por turno) ─────────────────────────────
+    for _pref, _who in (("player", "Tu Pokémon"), ("wild", "El rival")):
+        if getattr(battle, f"{_pref}_tailwind", False):
+            _rem = getattr(battle, f"{_pref}_tailwind_turns", 0)
+            if _rem > 0:
+                _rem -= 1
+                setattr(battle, f"{_pref}_tailwind_turns", _rem)
+                if _rem <= 0:
+                    setattr(battle, f"{_pref}_tailwind", False)
+                    log.append(f"\n💨 <i>El Viento Afín de {_who} se disipó.</i>\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPERS DE HAZARDS (wild_battle_system)
@@ -1369,6 +1385,7 @@ class WildBattleManager:
 
 
             # ── Siguientes veces: editar solo el mensaje de texto ────────────
+            edit_ok = False
             try:
                 bot.edit_message_text(
                     text=text,
@@ -1377,9 +1394,28 @@ class WildBattleManager:
                     parse_mode="HTML",
                     reply_markup=keyboard
                 )
+                edit_ok = True
             except Exception as e:
-                if "message is not modified" not in str(e):
-                    logger.debug(f"[BATTLE] No se pudo editar mensaje de texto: {e}")
+                if "message is not modified" in str(e):
+                    # El contenido no cambió pero el menú SIGUE presente: ok.
+                    edit_ok = True
+                else:
+                    logger.debug(f"[BATTLE] No se pudo editar el menú: {e}")
+
+            # RECUPERACIÓN: si la edición falló (mensaje borrado, demasiado
+            # viejo, id obsoleto tras reinicio del bot, etc.), el menú quedaría
+            # invisible y el usuario tendría que reiniciar la app. En su lugar,
+            # reenviamos un mensaje nuevo y actualizamos message_id.
+            if not edit_ok:
+                try:
+                    tmsg = bot.send_message(
+                        battle.user_id, text,
+                        parse_mode="HTML", reply_markup=keyboard
+                    )
+                    battle.message_id = tmsg.message_id
+                    logger.info("[BATTLE] Menú reenviado tras fallo de edición.")
+                except Exception as e2:
+                    logger.error(f"[BATTLE] No se pudo reenviar el menú: {e2}")
 
             self._start_turn_timer(battle, battle.user_id, bot)
 
@@ -2108,7 +2144,8 @@ class WildBattleManager:
 
             # ── ¿Puede actuar el salvaje? ─────────────────────────────────
             if not check_can_move(battle, is_player=False,
-                                   actor_name=wild.nombre, log=log):
+                                   actor_name=wild.nombre, log=log,
+                                   move_key=move):
                 return log
 
             # ── Confusión del salvaje ─────────────────────────────────────
@@ -2170,7 +2207,6 @@ class WildBattleManager:
                     apply_hazard_move_effect(_w_haz_eff, _wh_atk, _wh_def, wild.nombre, log)
                     _set_wild_hazards(battle, _wh_atk)
                     _set_player_hazards(battle, _wh_def)
-                battle.turn_number += 1
                 battle._last_enemy_entry = f"{wild.nombre} usó {move_es}"
                 return log
 
@@ -2185,7 +2221,6 @@ class WildBattleManager:
             type_eff = movimientos_service._calcular_efectividad(move_tipo, player_tipos)
             if type_eff == 0.0:
                 log.append(f"  🚫 ¡No afecta a {player.mote or player.nombre}!\n")
-                battle.turn_number += 1
                 battle._last_enemy_entry = f"{wild.nombre} usó {move_es}"
                 return log
 
@@ -2283,7 +2318,6 @@ class WildBattleManager:
                         apply_ailment(battle, _ail, target_is_wild=False,
                                       target_name=(player.mote or player.nombre), log=log)
 
-            battle.turn_number += 1
             _enemy_txt = f"{wild.nombre} salvaje usó {move_es}"
             if daño:
                 _enemy_txt += f", hizo {daño} de daño"
@@ -2668,8 +2702,9 @@ class WildBattleManager:
                 _pp_val = _pp_val.get("actual", 1)
             if int(_pp_val) <= 0:
                 log.append(f"❌ ¡<b>{nombre_es}</b> no tiene PP!\n")
+                # No se gastó el turno: solo refrescar UI. _send_battle_menu
+                # (programado dentro de _refresh_battle_ui) arranca el timer.
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
-                self._start_turn_timer(battle, user_id, bot)
                 return True
  
             # ── Verificar precisión ───────────────────────────────────────────
@@ -2679,9 +2714,8 @@ class WildBattleManager:
                 log.append(f"⚡ <b>{p_name}</b> usó <b>{nombre_es}</b>... ¡pero falló!\n")
                 enemy_log = self._execute_wild_turn(battle)
                 log.extend(enemy_log)
-                battle.turn_number += 1
+                # _refresh_battle_ui → _send_battle_menu arranca el timer.
                 self._refresh_battle_ui(battle, user_id, bot, extra_log=log)
-                self._start_turn_timer(battle, user_id, bot)
                 return True
  
             # ── Descontar PP ──────────────────────────────────────────────────
@@ -2694,11 +2728,15 @@ class WildBattleManager:
                 battle.player_stat_stages.get("vel", 0),
                 battle.player_status,
             )
+            if getattr(battle, "player_tailwind", False):
+                player_vel *= 2
             wild_vel = BattleUtils.effective_speed(
                 wild.stats.get("vel", 50),
                 battle.wild_stat_stages.get("vel", 0),
                 battle.wild_status,
             )
+            if getattr(battle, "wild_tailwind", False):
+                wild_vel *= 2
  
             if player_vel == wild_vel:
                 wild_first = random.random() < 0.5
@@ -2731,6 +2769,11 @@ class WildBattleManager:
  
                 sync_player_side(p_side, battle, persist=True)
                 sync_wild_side(w_side, wild, battle)
+ 
+                # Persistir Viento Afin (el adapter no lo conoce):
+                if getattr(p_side, "tailwind", False) and not battle.player_tailwind:
+                    battle.player_tailwind = True
+                    battle.player_tailwind_turns = getattr(p_side, "tailwind_turns", 4)
  
                 player_damage = p_side.hp_max - p_side.hp_actual
                 return ko

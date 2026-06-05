@@ -25,14 +25,15 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from database import db_manager
 from funciones import economy_service
+
+logger = logging.getLogger(__name__)
+
 try:
     from funciones.mercado_events import EVENTOS_POSITIVOS, EVENTOS_NEGATIVOS
 except ImportError:
     logger.warning("[MERCADO] mercado_events.py no encontrado — eventos K-pop desactivados.")
     EVENTOS_POSITIVOS = []
     EVENTOS_NEGATIVOS = []
-
-logger = logging.getLogger(__name__)
 
 # ─── Constantes ───────────────────────────────────────────────────────────────
 
@@ -45,6 +46,12 @@ COMPRA_MIN          = 1
 COMPRA_MAX          = 10_000
 CEO_UMBRAL          = 0.51    # 51% para ser CEO
 CEO_DIVIDENDO_BONUS = 0.50    # +50% sobre el yield base
+
+# ── Mecánica de mercado nueva ──────────────────────────────────────────────
+VENTA_SPREAD        = 0.98    # se vende al 98% del precio (fricción bid/ask)
+CEO_HISTERESIS      = 0.49    # se pierde el CEO recién al bajar de 49% (no 51%)
+IMPACTO_DEMANDA_MAX = 0.15    # tope de movimiento de precio por presión neta/tick
+PRESION_ESCALA      = 1.0     # sensibilidad: presión = volumen_neto / supply
 
 TIER_EMOJI = {"HYPER": "💎", "LARGE": "🥇", "MID": "🥈", "SMALL": "🥉"}
 
@@ -246,6 +253,27 @@ class MercadoService:
                 mensaje     TEXT    DEFAULT NULL
             )
         """)
+        # Historial de operaciones (auditoría + vista de usuario)
+        db_manager.execute_update("""
+            CREATE TABLE IF NOT EXISTS MERCADO_TRANSACCIONES (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp   TEXT    NOT NULL,
+                userID      INTEGER NOT NULL,
+                simbolo     TEXT    NOT NULL,
+                tipo        TEXT    NOT NULL,
+                cantidad    INTEGER NOT NULL,
+                precio_unit REAL    NOT NULL,
+                total       INTEGER NOT NULL
+            )
+        """)
+        # Volumen neto acumulado por activo desde el último tick de precios.
+        # Positivo = más compras (sube precio); negativo = más ventas (baja).
+        db_manager.execute_update("""
+            CREATE TABLE IF NOT EXISTS MERCADO_PRESION (
+                simbolo      TEXT PRIMARY KEY,
+                volumen_neto INTEGER NOT NULL DEFAULT 0
+            )
+        """)
 
     def _migrate_db(self) -> None:
         cols = [
@@ -402,7 +430,10 @@ class MercadoService:
                 "porcentaje":     pct * 100,
             }
         else:
-            if ceo_actual and int(ceo_actual["user_id"]) == user_id:
+            # Histéresis: solo se pierde el CEO al caer por DEBAJO de 49%,
+            # no apenas baja de 51%. Evita el spam de takeover cuando dos
+            # usuarios oscilan alrededor del umbral comprando/vendiendo.
+            if ceo_actual and int(ceo_actual["user_id"]) == user_id and pct < CEO_HISTERESIS:
                 db_manager.execute_update("DELETE FROM MERCADO_CEO WHERE simbolo=?", (simbolo,))
                 return {
                     "tipo":         "perdida",
@@ -509,17 +540,18 @@ class MercadoService:
             next_tick = time.time() + INTERVALO_PRECIOS
 
     def _loop_dividendos(self) -> None:
-        next_tick = time.time() + INTERVALO_DIVIDENDO
+        # Anclado a fecha de calendario (no a uptime): si el bot reinicia,
+        # no se saltea ni se duplica el pago del día.
         while self._running:
-            sleep = next_tick - time.time()
-            if sleep > 0:
-                time.sleep(min(sleep, 60))
-                continue
+            time.sleep(300)  # revisar cada 5 min
             try:
-                self._pagar_dividendos()
+                hoy    = date.today().isoformat()
+                ultimo = self._get_config("ultimo_dividendo_fecha", "")
+                if hoy != ultimo:
+                    self._pagar_dividendos()
+                    self._set_config("ultimo_dividendo_fecha", hoy)
             except Exception as exc:
-                logger.error("[MERCADO] _pagar_dividendos: %s", exc, exc_info=True)
-            next_tick = time.time() + INTERVALO_DIVIDENDO
+                logger.error("[MERCADO] _loop_dividendos: %s", exc, exc_info=True)
 
     def _loop_reporte(self) -> None:
         while self._running:
@@ -541,6 +573,10 @@ class MercadoService:
         ahora = datetime.now().isoformat()
         hoy   = date.today().isoformat()
 
+        # Presión de oferta/demanda acumulada desde el último tick.
+        presion_rows = db_manager.execute_query("SELECT simbolo, volumen_neto FROM MERCADO_PRESION")
+        presion = {r["simbolo"]: int(r["volumen_neto"]) for r in presion_rows}
+
         for row in rows:
             simbolo    = row["simbolo"]
             nombre     = row["nombre"]
@@ -549,9 +585,19 @@ class MercadoService:
             p_max      = float(row["precio_maximo"] or precio_ant)
             p_min      = float(row["precio_minimo"] or precio_ant)
             p_apertura = float(row["precio_apertura"] or precio_ant)
+            supply     = int(row["supply_total"] or 1000)
 
             z      = random.gauss(0, 1)
             factor = math.exp(vol * z)
+
+            # ── Presión de oferta/demanda ──────────────────────────────────
+            # volumen_neto / supply da la fracción del flotante negociada este
+            # ciclo. Más compras que ventas empuja el precio arriba y viceversa.
+            vol_neto = presion.get(simbolo, 0)
+            if vol_neto and supply > 0:
+                impacto_demanda = (vol_neto / supply) * PRESION_ESCALA
+                impacto_demanda = max(-IMPACTO_DEMANDA_MAX, min(IMPACTO_DEMANDA_MAX, impacto_demanda))
+                factor *= (1 + impacto_demanda)
 
             evento_texto = None
             impacto_pct  = 0.0
@@ -597,6 +643,8 @@ class MercadoService:
                     except Exception as exc:
                         logger.warning("[MERCADO] notif_cb evento: %s", exc)
 
+        # Reiniciar la presión para el próximo ciclo.
+        db_manager.execute_update("DELETE FROM MERCADO_PRESION")
         logger.info("[MERCADO] Precios actualizados.")
 
     def _resetear_precio_apertura(self) -> None:
@@ -790,6 +838,48 @@ class MercadoService:
 
     # ── Operaciones ───────────────────────────────────────────────────────────
 
+    def _log_transaccion(
+        self, user_id: int, simbolo: str, tipo: str,
+        cantidad: int, precio_unit: float, total: int,
+    ) -> None:
+        """Registra una operación en el historial (no crítico: nunca rompe la op)."""
+        try:
+            db_manager.execute_update(
+                """INSERT INTO MERCADO_TRANSACCIONES
+                   (timestamp, userID, simbolo, tipo, cantidad, precio_unit, total)
+                   VALUES (?,?,?,?,?,?,?)""",
+                (datetime.now().isoformat(), user_id, simbolo, tipo,
+                 cantidad, float(precio_unit), int(total)),
+            )
+        except Exception as exc:
+            logger.warning("[MERCADO] _log_transaccion: %s", exc)
+
+    def _registrar_presion(self, simbolo: str, delta_volumen: int) -> None:
+        """
+        Acumula volumen neto (compras positivas, ventas negativas) por activo.
+        El tick de precios lo consume para mover el precio según oferta/demanda.
+        """
+        try:
+            db_manager.execute_update(
+                """INSERT INTO MERCADO_PRESION (simbolo, volumen_neto)
+                   VALUES (?,?)
+                   ON CONFLICT(simbolo) DO UPDATE SET
+                       volumen_neto = volumen_neto + excluded.volumen_neto""",
+                (simbolo, int(delta_volumen)),
+            )
+        except Exception as exc:
+            logger.warning("[MERCADO] _registrar_presion: %s", exc)
+
+    def get_historial(self, user_id: int, limite: int = 15) -> List[Dict]:
+        """Últimas operaciones del usuario, más recientes primero."""
+        rows = db_manager.execute_query(
+            """SELECT timestamp, simbolo, tipo, cantidad, precio_unit, total
+               FROM MERCADO_TRANSACCIONES
+               WHERE userID=? ORDER BY id DESC LIMIT ?""",
+            (user_id, limite),
+        )
+        return rows or []
+
     def comprar(
         self, user_id: int, simbolo: str, cantidad: int, nombre_usuario: str = ""
     ) -> Tuple[bool, str, Optional[float], Optional[Dict]]:
@@ -797,71 +887,99 @@ class MercadoService:
         if not (COMPRA_MIN <= cantidad <= COMPRA_MAX):
             return False, f"Cantidad entre {COMPRA_MIN} y {COMPRA_MAX:,}.", None, None
 
-        activo = self.get_activo(simbolo)
-        if not activo:
-            return False, f"Activo <b>{simbolo}</b> no encontrado. Usá /mercado.", None, None
+        # El lock serializa la secuencia leer-disponibles → cobrar → asignar,
+        # evitando que dos compras simultáneas superen el supply o se pisen.
+        with self._lock:
+            activo = self.get_activo(simbolo)
+            if not activo:
+                return False, f"Activo <b>{simbolo}</b> no encontrado. Usá /mercado.", None, None
 
-        # Verificar supply disponible
-        disponibles = self.get_acciones_disponibles(simbolo)
-        if cantidad > disponibles:
-            return False, (
-                f"No hay suficientes acciones disponibles.\n"
-                f"Disponibles: <b>{disponibles}</b>  |  Querés comprar: <b>{cantidad}</b>\n"
-                f"<i>Acercate al CEO si querés negociar.</i>"
-            ), None, None
+            # Verificar supply disponible (dentro del lock)
+            disponibles = self.get_acciones_disponibles(simbolo)
+            if disponibles <= 0:
+                return False, (
+                    f"<b>{simbolo}</b> está <b>agotado</b>: no quedan acciones libres.\n"
+                    f"<i>Probá comprarle a un tenedor con /ofertas {simbolo}.</i>"
+                ), None, None
+            if cantidad > disponibles:
+                return False, (
+                    f"No hay suficientes acciones disponibles.\n"
+                    f"Disponibles: <b>{disponibles:,}</b>  |  Querés comprar: <b>{cantidad:,}</b>\n"
+                    f"<i>Comprá hasta {disponibles:,} o buscá ofertas con /ofertas {simbolo}.</i>"
+                ), None, None
 
-        costo = math.ceil(activo.precio_actual * cantidad)
-        saldo = economy_service.get_balance(user_id)
-        if saldo < costo:
-            return False, f"Saldo insuficiente.\nCosto: <b>{costo:,} ✨</b>  |  Tenés: <b>{saldo:,} ✨</b>", None, None
+            costo = math.ceil(activo.precio_actual * cantidad)
+            saldo = economy_service.get_balance(user_id)
+            if saldo < costo:
+                return False, f"Saldo insuficiente.\nCosto: <b>{costo:,} ✨</b>  |  Tenés: <b>{saldo:,} ✨</b>", None, None
 
-        if not economy_service.subtract_credits(user_id, costo, f"mercado_compra_{simbolo}"):
-            return False, "Error al descontar cosmos.", None, None
+            if not economy_service.subtract_credits(user_id, costo, f"mercado_compra_{simbolo}"):
+                return False, "Error al descontar cosmos.", None, None
 
-        db_manager.execute_update(
-            """INSERT INTO MERCADO_PORTFOLIO (userID, simbolo, cantidad, costo_total)
-               VALUES (?,?,?,?)
-               ON CONFLICT(userID, simbolo) DO UPDATE SET
-                   cantidad=cantidad+excluded.cantidad,
-                   costo_total=costo_total+excluded.costo_total""",
-            (user_id, simbolo, cantidad, float(costo)),
-        )
+            # Asignar acciones; si falla, revertir el cobro para no robar cosmos.
+            try:
+                filas = db_manager.execute_update(
+                    """INSERT INTO MERCADO_PORTFOLIO (userID, simbolo, cantidad, costo_total)
+                       VALUES (?,?,?,?)
+                       ON CONFLICT(userID, simbolo) DO UPDATE SET
+                           cantidad=cantidad+excluded.cantidad,
+                           costo_total=costo_total+excluded.costo_total""",
+                    (user_id, simbolo, cantidad, float(costo)),
+                )
+                if not filas:
+                    raise RuntimeError("INSERT/UPDATE de portfolio no afectó filas")
+            except Exception as exc:
+                economy_service.add_credits(user_id, costo, f"reversion_compra_{simbolo}")
+                logger.error("[MERCADO] comprar: portfolio falló, cobro revertido: %s", exc)
+                return False, "Error al registrar la compra. El cobro fue revertido.", None, None
 
-        ceo_event = self._check_ceo(simbolo, user_id, nombre_usuario)
-        return True, "", float(costo), ceo_event
+            # Registrar transacción y precio reactivo (oferta/demanda)
+            self._log_transaccion(user_id, simbolo, "compra", cantidad, activo.precio_actual, costo)
+            self._registrar_presion(simbolo, cantidad)
+
+            ceo_event = self._check_ceo(simbolo, user_id, nombre_usuario)
+            return True, "", float(costo), ceo_event
 
     def vender(
         self, user_id: int, simbolo: str, cantidad: int, nombre_usuario: str = ""
     ) -> Tuple[bool, str, Optional[float], Optional[Dict]]:
         simbolo = simbolo.upper()
-        activo  = self.get_activo(simbolo)
-        if not activo:
-            return False, f"Activo <b>{simbolo}</b> no encontrado.", None, None
+        if cantidad < 1:
+            return False, "La cantidad debe ser al menos 1.", None, None
 
-        rows = db_manager.execute_query(
-            "SELECT cantidad, costo_total FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?",
-            (user_id, simbolo),
-        )
-        disponibles = int(rows[0]["cantidad"]) if rows else 0
-        if disponibles < cantidad:
-            return False, f"Tenés <b>{disponibles}</b> acciones, querés vender <b>{cantidad}</b>.", None, None
+        with self._lock:
+            activo = self.get_activo(simbolo)
+            if not activo:
+                return False, f"Activo <b>{simbolo}</b> no encontrado.", None, None
 
-        ingreso    = int(activo.precio_actual * cantidad)
-        costo_prop = (cantidad / disponibles) * float(rows[0]["costo_total"])
-
-        if cantidad == disponibles:
-            db_manager.execute_update(
-                "DELETE FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?", (user_id, simbolo)
+            rows = db_manager.execute_query(
+                "SELECT cantidad, costo_total FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?",
+                (user_id, simbolo),
             )
-        else:
-            db_manager.execute_update(
-                "UPDATE MERCADO_PORTFOLIO SET cantidad=cantidad-?, costo_total=costo_total-? WHERE userID=? AND simbolo=?",
-                (cantidad, costo_prop, user_id, simbolo),
-            )
+            disponibles = int(rows[0]["cantidad"]) if rows else 0
+            if disponibles < cantidad:
+                return False, f"Tenés <b>{disponibles:,}</b> acciones, querés vender <b>{cantidad:,}</b>.", None, None
 
-        economy_service.add_credits(user_id, ingreso, f"mercado_venta_{simbolo}")
-        ceo_event = self._check_ceo(simbolo, user_id, nombre_usuario)
-        return True, "", float(ingreso), ceo_event
+            # Spread: se vende a ~98% del precio (fricción anti day-trading).
+            ingreso    = max(1, int(activo.precio_actual * cantidad * VENTA_SPREAD))
+            costo_prop = (cantidad / disponibles) * float(rows[0]["costo_total"])
+
+            if cantidad == disponibles:
+                db_manager.execute_update(
+                    "DELETE FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?", (user_id, simbolo)
+                )
+            else:
+                db_manager.execute_update(
+                    "UPDATE MERCADO_PORTFOLIO SET cantidad=cantidad-?, costo_total=costo_total-? WHERE userID=? AND simbolo=?",
+                    (cantidad, costo_prop, user_id, simbolo),
+                )
+
+            economy_service.add_credits(user_id, ingreso, f"mercado_venta_{simbolo}")
+            self._log_transaccion(user_id, simbolo, "venta", cantidad, activo.precio_actual, ingreso)
+            self._registrar_presion(simbolo, -cantidad)
+
+            ceo_event = self._check_ceo(simbolo, user_id, nombre_usuario)
+            return True, "", float(ingreso), ceo_event
 
 
 # ─── Singleton ────────────────────────────────────────────────────────────────

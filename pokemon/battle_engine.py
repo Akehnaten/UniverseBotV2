@@ -18,10 +18,25 @@ from __future__ import annotations
 
 import logging
 import random
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_key(text: str) -> str:
+    """
+    Normaliza un nombre (habilidad, movimiento, objeto) para comparación:
+    minúsculas, sin espacios, guiones ni acentos.
+    'Intimidación' -> 'intimidacion', 'Electrogénesis' -> 'electrogenesis'.
+    """
+    if not text:
+        return ""
+    t = text.lower().replace(" ", "").replace("-", "").replace("_", "")
+    # Quitar acentos/diacríticos (NFKD descompone á -> a + tilde combinante)
+    t = unicodedata.normalize("NFKD", t)
+    return "".join(c for c in t if not unicodedata.combining(c))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -436,25 +451,51 @@ def determine_turn_order(
     priority_b: int = 0,
     status_a: Optional[str] = None,
     status_b: Optional[str] = None,
+    tailwind_a: bool = False,
+    tailwind_b: bool = False,
+    trick_room: bool = False,
 ) -> bool:
     """
     Determina si el bando A actúa primero en el turno.
 
     Considera:
-      1. Prioridad del movimiento (Ataque Rápido = 1, etc.).
-      2. Velocidad efectiva con etapas aplicadas y parálisis (-50%).
-      3. Empate exacto → aleatorio (50 / 50).
+      1. Prioridad del movimiento (Ataque Rápido = 1, etc.). SIEMPRE manda,
+         incluso bajo Espacio Raro (Trick Room solo invierte la velocidad).
+      2. Velocidad efectiva con etapas, parálisis (-50%) y Viento Afín (×2).
+      3. Espacio Raro: invierte SOLO la comparación de velocidad.
+      4. Empate exacto → aleatorio (50 / 50).
     """
     if priority_a != priority_b:
         return priority_a > priority_b
 
-    eff_a = BattleUtils.effective_speed(speed_a, stages_a, status_a)
-    eff_b = BattleUtils.effective_speed(speed_b, stages_b, status_b)
+    eff_a = order_speed(speed_a, stages_a, status_a, tailwind_a)
+    eff_b = order_speed(speed_b, stages_b, status_b, tailwind_b)
 
     if eff_a == eff_b:
         return random.random() < 0.5
 
+    # Bajo Espacio Raro el más LENTO actúa primero.
+    if trick_room:
+        return eff_a < eff_b
     return eff_a > eff_b
+
+
+def order_speed(
+    base_speed: int,
+    stage: int,
+    status: Optional[str] = None,
+    tailwind: bool = False,
+) -> float:
+    """
+    Velocidad efectiva para DECIDIR EL ORDEN del turno.
+    Igual que BattleUtils.effective_speed pero aplica Viento Afín (×2)
+    encima de etapas y parálisis. Úsese en todos los sistemas al ordenar.
+    """
+    vel = BattleUtils.effective_speed(base_speed, stage, status)
+    if tailwind:
+        vel *= 2
+    return vel
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLIMAS
@@ -647,6 +688,20 @@ def activate_terrain(
     log.append(f"\n  {emoji} ¡<b>{nombre}</b> cubrió el campo de batalla!\n")
 
 
+def tick_side_effects(side, log: list, side_name: str = None) -> None:
+    """
+    Decrementa efectos que pertenecen a UN BANDO (no al campo), una vez por
+    turno. Por ahora: Viento Afín. Llamar para cada bando al final del turno.
+    """
+    if getattr(side, "tailwind", False) and getattr(side, "tailwind_turns", 0) > 0:
+        side.tailwind_turns -= 1
+        if side.tailwind_turns <= 0:
+            side.tailwind = False
+            side.tailwind_turns = 0
+            who = side_name or getattr(side, "name", "El bando")
+            log.append(f"\n💨 <i>El Viento Afín de {who} se disipó.</i>\n")
+
+
 def tick_field_turns(battle, log: list) -> None:
     """
     Decrementa los contadores de clima, terreno y salas al final de cada turno.
@@ -830,16 +885,26 @@ def _apply_status_first_tick(
 def _get_status_name(ailment: str) -> str:
     return {"psn": "Veneno", "tox": "Tóxico", "brn": "Quemadura"}.get(ailment, ailment)
 
+# Movimientos que SÍ pueden ejecutarse mientras el Pokémon está dormido.
+# (claves normalizadas: sin espacios ni guiones, en minúsculas)
+SLEEP_USABLE_MOVES = {"sleeptalk", "snore"}  # Sonámbulo, Ronquido
+
+
 def check_can_move(
     battle,
     is_player: bool,
     actor_name: str,
     log: list,
+    move_key: str = None,
 ) -> bool:
     """
     Verifica si el actor puede actuar según su status.
     Retorna True si PUEDE moverse.
     Modifica battle in-place (reduce sleep_turns, puede curar frz).
+
+    move_key: clave del movimiento que se intenta usar (en cualquier formato;
+    se normaliza internamente). Necesario para permitir Sonámbulo/Ronquido
+    mientras se está dormido.
     """
     status = battle.player_status if is_player else battle.wild_status
 
@@ -876,6 +941,14 @@ def check_can_move(
             else:
                 battle.wild_status = None
             log.append(f"  ☀️ ¡{actor_name} se despertó!\n")
+            return True
+        # Sigue dormido: solo Sonámbulo / Ronquido pueden ejecutarse.
+        mk = (move_key or "").lower().replace(" ", "").replace("-", "")
+        if mk in SLEEP_USABLE_MOVES:
+            log.append(
+                f"  💤 ¡{actor_name} está dormido, pero usó "
+                f"{MOVE_NAMES_ES.get(mk, mk.title())}!\n"
+            )
             return True
         log.append(f"  💤 ¡{actor_name} está dormido!\n")
         return False
@@ -1229,6 +1302,8 @@ MOVE_EFFECTS: dict = {
     "gravity":        {"room": "gravity"},
     "magicroom":      {"room": "magic_room"},
     "wonderroom":     {"room": "wonder_room"},
+    # ── Viento Afín (duplica la velocidad del bando por 4 turnos) ─────────────
+    "tailwind":       {"tailwind": 4},
     # ── Neblina (resetea etapas) ──────────────────────────────────────────────
     "haze":           {"haze": True},
     # ── Huida / Teletransporte ────────────────────────────────────────────────
@@ -2601,6 +2676,9 @@ __all__ = [
     "activate_weather",
     "activate_terrain",
     "tick_field_turns",
+    "tick_side_effects",
+    "order_speed",
+    "normalize_key",
     # ── Ailments y turn flow ─────────────────────────────────────────────────
     "can_apply_ailment_in_field",
     "apply_ailment",
@@ -2700,6 +2778,9 @@ class UniversalSide:
     berry_eaten:     bool = False   # True si ya consumió alguna baya en esta batalla
     # Flash Fire / Colector: True tras absorber un movimiento de Fuego
     flash_fire_active: bool = False
+    # ── Viento Afín (duplica velocidad del bando mientras dure) ───────────────
+    tailwind:        bool = False
+    tailwind_turns:  int  = 0
 # ─────────────────────────────────────────────────────────────────────────────
 # _BattleShim — adapta dos UniversalSide al protocolo "wild/player" del motor
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2915,7 +2996,7 @@ def apply_move(
         return False
 
     shim = _BattleShim(field, attacker, defender)
-    if not check_can_move(shim, is_player=True, actor_name=attacker.name, log=log):
+    if not check_can_move(shim, is_player=True, actor_name=attacker.name, log=log, move_key=mk):
         return False
 
     if check_confusion(shim, is_player=True, actor_name=attacker.name, actor_level=attacker.level,
@@ -3292,6 +3373,18 @@ def _apply_status_effect(
             setattr(field, turns_attr, default_turns)
             log.append(f"  {emoji} ¡<b>{nombre}</b> entró en efecto por {default_turns} turnos!\n")
 
+    # Viento Afín: duplica la velocidad del BANDO ATACANTE por N turnos.
+    if "tailwind" in effect:
+        if getattr(attacker, "tailwind", False):
+            log.append(f"  💨 ¡El Viento Afín de {attacker.name} ya estaba activo!\n")
+        else:
+            attacker.tailwind = True
+            attacker.tailwind_turns = effect["tailwind"]
+            log.append(
+                f"  💨 ¡<b>{attacker.name}</b> invocó Viento Afín! "
+                f"Su velocidad se duplica por {effect['tailwind']} turnos.\n"
+            )
+
     # Neblina (Haze): resetea todas las etapas
     if effect.get("haze"):
         for side in (attacker, defender):
@@ -3619,7 +3712,7 @@ def apply_entry_ability(
     """
     if not entering.ability:
         return
-    hab  = entering.ability.lower().replace(" ", "").replace("-", "")
+    hab  = normalize_key(entering.ability)
     shim = _BattleShim(field, entering, opponent)
 
     # ── Impostor (Ditto) ──────────────────────────────────────────────────────
@@ -3649,10 +3742,10 @@ def apply_entry_ability(
 
     # ── Terrenos de entrada ───────────────────────────────────────────────────
     _TERRENOS = {
-        "electrogénesis": ("electric", 5), "electricsurge": ("electric", 5),
-        "herbogénesis":   ("grassy",   5), "grassysurge":   ("grassy",   5),
-        "psicogénesis":   ("psychic",  5), "psychicsurge":  ("psychic",  5),
-        "nebulogénesis":  ("misty",    5), "mistysurge":    ("misty",    5),
+        "electrogenesis": ("electric", 5), "electricsurge": ("electric", 5),
+        "herbogenesis":   ("grassy",   5), "grassysurge":   ("grassy",   5),
+        "psicogenesis":   ("psychic",  5), "psychicsurge":  ("psychic",  5),
+        "nebulogenesis":  ("misty",    5), "mistysurge":    ("misty",    5),
     }
     if hab in _TERRENOS:
         t_key, t_turns = _TERRENOS[hab]

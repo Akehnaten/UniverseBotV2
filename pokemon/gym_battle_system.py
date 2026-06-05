@@ -176,6 +176,11 @@ class GymBattleData:
     terrain_turns:    int = 0
     trick_room:       bool = False
     trick_room_turns: int = 0
+    # Viento Afín por bando
+    player_tailwind:       bool = False
+    player_tailwind_turns: int  = 0
+    wild_tailwind:         bool = False
+    wild_tailwind_turns:   int  = 0
     gravity:          bool = False
     gravity_turns:    int = 0
     magic_room:       bool = False
@@ -451,7 +456,20 @@ class GymBattleManager:
                 reply_markup=keyboard,
             )
         except Exception as e:
-            logger.debug(f"[GYM] edit_message silenciado: {e}")
+            if "message is not modified" in str(e):
+                return
+            # Recuperación: la edición falló (mensaje borrado/viejo/id obsoleto).
+            # Reenviar para que el menú no quede invisible.
+            logger.debug(f"[GYM] edit falló, reenviando menú: {e}")
+            try:
+                sent = bot.send_message(
+                    battle.chat_id, text,
+                    parse_mode="HTML", reply_markup=keyboard,
+                )
+                battle.message_id = sent.message_id
+                logger.info("[GYM] Menú reenviado tras fallo de edición.")
+            except Exception as e2:
+                logger.error(f"[GYM] No se pudo reenviar el menú: {e2}")
 
     def _build_panel(
         self, battle: GymBattleData
@@ -829,9 +847,10 @@ class GymBattleManager:
             priority_b = npc_move_prio,
             status_a   = battle.player_status,
             status_b   = battle.wild_status,
+            tailwind_a = getattr(battle, "player_tailwind", False),
+            tailwind_b = getattr(battle, "wild_tailwind", False),
+            trick_room = getattr(battle, "trick_room", False),
         )
-        if battle.trick_room:
-            player_va_primero = not player_va_primero
  
         npc_fainted    = False
         player_fainted = False
@@ -855,7 +874,7 @@ class GymBattleManager:
  
             log.append(f"\n⚔️ <b>{p_name}</b> usó <b>{nombre_es}</b>!\n")
  
-            if not check_can_move(battle, is_player=True, actor_name=p_name, log=log):
+            if not check_can_move(battle, is_player=True, actor_name=p_name, log=log, move_key=mk_clean):
                 return
  
             if check_confusion(
@@ -1044,6 +1063,16 @@ class GymBattleManager:
             _set_gym_npc_hazards(battle, _def_h)
         battle.turn_number += 1
         tick_field_turns(battle, log)
+        # Viento Afín por bando (una vez por turno)
+        for _pref, _who in (("player", "Tu Pokémon"), ("wild", "El rival")):
+            if getattr(battle, f"{_pref}_tailwind", False):
+                _rem = getattr(battle, f"{_pref}_tailwind_turns", 0)
+                if _rem > 0:
+                    _rem -= 1
+                    setattr(battle, f"{_pref}_tailwind_turns", _rem)
+                    if _rem <= 0:
+                        setattr(battle, f"{_pref}_tailwind", False)
+                        log.append(f"\n💨 <i>El Viento Afín de {_who} se disipó.</i>\n")
         _apply_eot_status(battle, log)
  
         # ── Verificar resultado ───────────────────────────────────────────────
@@ -1206,12 +1235,13 @@ class GymBattleManager:
 
         log.append(f"\n⚔️ <b>{npc_name}</b> usó <b>{npc_nombre_es}</b>!\n")
 
-        # 2. Estados: Confusión y Restricciones de movimiento
-        if check_confusion(battle, is_player=False, actor_name=npc_name, actor_level=_npc.nivel, 
-                           actor_atq=_npc.stats.get("atq", 50), log=log):
+        # 2. Estados: restricción de movimiento (sueño, parálisis...) ANTES
+        #    que la confusión, siguiendo la convención de battle_engine.
+        if not check_can_move(battle, is_player=False, actor_name=npc_name, log=log, move_key=npc_mk_clean):
             return False
 
-        if not check_can_move(battle, is_player=False, actor_name=npc_name, log=log):
+        if check_confusion(battle, is_player=False, actor_name=npc_name, actor_level=_npc.nivel, 
+                           actor_atq=_npc.stats.get("atq", 50), log=log):
             return False
 
         # 3. Lógica de Focus Punch e interrupciones
@@ -1868,6 +1898,37 @@ def _apply_status_move(
     if terrain_entry:
         t_key, t_turns = terrain_entry
         activate_terrain(battle, t_key, t_turns, attacker_name, log)
+        applied = True
+
+    # Salas (Espacio Raro / Sala Trampa, Gravedad, etc.)
+    if "room" in effect:
+        from pokemon.battle_engine import ROOM_INFO
+        room_attr  = effect["room"]
+        turns_attr = room_attr + "_turns"
+        emoji, nombre, default_turns = ROOM_INFO.get(room_attr, ("", room_attr, 5))
+        if getattr(battle, room_attr, False):
+            setattr(battle, room_attr, False)
+            setattr(battle, turns_attr, 0)
+            log.append(f"  {emoji} <i>{nombre} terminó antes de tiempo.</i>\n")
+        else:
+            setattr(battle, room_attr, True)
+            setattr(battle, turns_attr, default_turns)
+            log.append(f"  {emoji} ¡<b>{nombre}</b> entró en efecto por {default_turns} turnos!\n")
+        applied = True
+
+    # Viento Afín: duplica la velocidad del BANDO ATACANTE
+    if "tailwind" in effect:
+        tw_attr   = "player_tailwind" if is_player else "wild_tailwind"
+        tw_turns  = "player_tailwind_turns" if is_player else "wild_tailwind_turns"
+        if getattr(battle, tw_attr, False):
+            log.append(f"  💨 ¡El Viento Afín de {attacker_name} ya estaba activo!\n")
+        else:
+            setattr(battle, tw_attr, True)
+            setattr(battle, tw_turns, effect["tailwind"])
+            log.append(
+                f"  💨 ¡<b>{attacker_name}</b> invocó Viento Afín! "
+                f"Su velocidad se duplica por {effect['tailwind']} turnos.\n"
+            )
         applied = True
 
     # Curación propia

@@ -4,7 +4,7 @@ handlers/mercado_ofertas_handlers.py
 ════════════════════════════════════════════════════════════════════════════════
 Handler del sistema P2P de Ofertas de Acciones — UniverseBot V2.0
 
-Todos los comandos funcionan en MERCADO_THREAD (2553).
+Todos los comandos funcionan en MERCADO_THREAD (342521).
 
 Comandos:
   /vender_acciones [SIM] [cant] [precio]    — Oferta pública
@@ -35,7 +35,7 @@ from funciones.mercado_ofertas_service import (
 
 logger = logging.getLogger(__name__)
 
-MERCADO_THREAD = 2553
+MERCADO_THREAD = 342521
 
 
 class MercadoOfertasHandlers:

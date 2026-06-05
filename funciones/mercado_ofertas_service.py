@@ -187,6 +187,18 @@ class MercadoOfertasService:
             (True, "", resumen_dict)   — éxito
             (False, mensaje, None)     — error
         """
+        # Serializar con las operaciones del mercado: comparten MERCADO_PORTFOLIO.
+        # Reusar el lock del servicio principal evita races entre /comprar,
+        # /vender y aceptar ofertas P2P (incl. dos compradores a la vez).
+        with mercado_service._lock:
+            return self._aceptar_oferta_locked(comprador_id, comprador_nombre, oferta_id)
+
+    def _aceptar_oferta_locked(
+        self,
+        comprador_id:     int,
+        comprador_nombre: str,
+        oferta_id:        int,
+    ) -> Tuple[bool, str, Optional[Dict]]:
         oferta = self._get_oferta(oferta_id)
         if not oferta:
             return False, f"Oferta #{oferta_id} no encontrada.", None
@@ -241,39 +253,49 @@ class MercadoOfertasService:
         if not economy_service.subtract_credits(comprador_id, total, f"compra_p2p_{simbolo}_{oferta_id}"):
             return False, "Error al descontar cosmos.", None
 
-        # 2. Pagar al vendedor
-        economy_service.add_credits(vendedor_id, total, f"venta_p2p_{simbolo}_{oferta_id}")
+        # 2-4. Transferencia atómica: pagar al vendedor y mover las acciones.
+        # Si algo falla a mitad, revertir TODO para no dejar a nadie sin
+        # cosmos ni acciones.
+        try:
+            economy_service.add_credits(vendedor_id, total, f"venta_p2p_{simbolo}_{oferta_id}")
 
-        # 3. Quitar acciones del vendedor
-        costo_prop = 0.0
-        rows_costo = db_manager.execute_query(
-            "SELECT costo_total FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?",
-            (vendedor_id, simbolo),
-        )
-        if rows_costo:
-            costo_total_v = float(rows_costo[0]["costo_total"])
-            costo_prop    = (cantidad / cant_vendedor) * costo_total_v
-
-        if cant_vendedor == cantidad:
-            db_manager.execute_update(
-                "DELETE FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?",
+            costo_prop = 0.0
+            rows_costo = db_manager.execute_query(
+                "SELECT costo_total FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?",
                 (vendedor_id, simbolo),
             )
-        else:
-            db_manager.execute_update(
-                "UPDATE MERCADO_PORTFOLIO SET cantidad=cantidad-?, costo_total=costo_total-? WHERE userID=? AND simbolo=?",
-                (cantidad, costo_prop, vendedor_id, simbolo),
-            )
+            if rows_costo:
+                costo_total_v = float(rows_costo[0]["costo_total"])
+                costo_prop    = (cantidad / cant_vendedor) * costo_total_v
 
-        # 4. Agregar acciones al comprador
-        db_manager.execute_update(
-            """INSERT INTO MERCADO_PORTFOLIO (userID, simbolo, cantidad, costo_total)
-               VALUES (?,?,?,?)
-               ON CONFLICT(userID, simbolo) DO UPDATE SET
-                   cantidad=cantidad+excluded.cantidad,
-                   costo_total=costo_total+excluded.costo_total""",
-            (comprador_id, simbolo, cantidad, float(total)),
-        )
+            if cant_vendedor == cantidad:
+                db_manager.execute_update(
+                    "DELETE FROM MERCADO_PORTFOLIO WHERE userID=? AND simbolo=?",
+                    (vendedor_id, simbolo),
+                )
+            else:
+                db_manager.execute_update(
+                    "UPDATE MERCADO_PORTFOLIO SET cantidad=cantidad-?, costo_total=costo_total-? WHERE userID=? AND simbolo=?",
+                    (cantidad, costo_prop, vendedor_id, simbolo),
+                )
+
+            db_manager.execute_update(
+                """INSERT INTO MERCADO_PORTFOLIO (userID, simbolo, cantidad, costo_total)
+                   VALUES (?,?,?,?)
+                   ON CONFLICT(userID, simbolo) DO UPDATE SET
+                       cantidad=cantidad+excluded.cantidad,
+                       costo_total=costo_total+excluded.costo_total""",
+                (comprador_id, simbolo, cantidad, float(total)),
+            )
+        except Exception as exc:
+            logger.error("[MERCADO] aceptar_oferta transfer falló, revirtiendo: %s", exc)
+            # Devolver cosmos al comprador y quitar el pago al vendedor.
+            try:
+                economy_service.add_credits(comprador_id, total, f"reversion_compra_p2p_{oferta_id}")
+                economy_service.subtract_credits(vendedor_id, total, f"reversion_venta_p2p_{oferta_id}")
+            except Exception as exc2:
+                logger.error("[MERCADO] reversión P2P también falló: %s", exc2)
+            return False, "Error al ejecutar la transacción. La operación fue revertida.", None
 
         # 5. Marcar oferta como completada
         db_manager.execute_update(
