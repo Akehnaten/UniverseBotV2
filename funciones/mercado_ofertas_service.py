@@ -146,21 +146,38 @@ class MercadoOfertasService:
             ), 0
 
         # ── Insertar oferta ───────────────────────────────────────────────────
-        # IMPORTANTE: usar execute_insert (devuelve lastrowid DENTRO de la misma
-        # conexión). Hacer execute_update + "SELECT last_insert_rowid()" por
-        # separado NO funciona: cada llamada abre su propia conexión, así que el
-        # SELECT corría en una conexión nueva y devolvía 0 → la oferta quedaba
-        # con id #0 y nadie podía aceptarla.
+        # Se usa una marca temporal única como huella para poder recuperar la
+        # fila exacta si execute_insert no devolviera el ID de forma fiable.
+        fecha_creacion = datetime.now().isoformat()
         oferta_id = db_manager.execute_insert(
             """INSERT INTO MERCADO_OFERTAS
                (vendedor_id, vendedor_nombre, comprador_id, comprador_nombre,
                 simbolo, cantidad, precio_unit, estado, fecha_creacion)
                VALUES (?,?,?,?,?,?,?,'activa',?)""",
             (vendedor_id, vendedor_nombre, comprador_id, comprador_nombre,
-             simbolo, cantidad, float(precio_unit), datetime.now().isoformat()),
+             simbolo, cantidad, float(precio_unit), fecha_creacion),
         )
+
+        # Red de seguridad: si execute_insert devolvió 0/None (p. ej. una versión
+        # vieja del gestor de BD o cualquier caso límite), recuperamos el ID REAL
+        # de la fila recién insertada por su huella (vendedor + fecha exacta).
+        # Así el número que se muestra SIEMPRE coincide con el de la base.
         if not oferta_id:
-            logger.error("[OFERTAS] crear_oferta: no se obtuvo ID de la nueva oferta.")
+            rows = db_manager.execute_query(
+                """SELECT id FROM MERCADO_OFERTAS
+                   WHERE vendedor_id=? AND fecha_creacion=?
+                   ORDER BY id DESC LIMIT 1""",
+                (vendedor_id, fecha_creacion),
+            )
+            oferta_id = int(rows[0]["id"]) if rows else 0
+            if oferta_id:
+                logger.warning(
+                    "[OFERTAS] execute_insert devolvió valor vacío; ID recuperado por huella: #%d",
+                    oferta_id,
+                )
+
+        if not oferta_id:
+            logger.error("[OFERTAS] crear_oferta: no se pudo determinar el ID de la nueva oferta.")
             return False, "Error al crear la oferta. Intentá de nuevo.", 0
 
         tipo = "directa" if comprador_id else "pública"

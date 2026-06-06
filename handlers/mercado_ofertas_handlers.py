@@ -177,6 +177,9 @@ class MercadoOfertasHandlers:
             if not ok:
                 self._err(cid, f"❌ {err}", MERCADO_THREAD)
                 return
+            if not oferta_id:
+                self._err(cid, "❌ No se pudo crear la oferta (ID inválido). Intentá de nuevo.", MERCADO_THREAD)
+                return
 
             activo = mercado_service.get_activo(parts[1].upper())
             total  = int(cantidad * precio_u)
@@ -248,6 +251,10 @@ class MercadoOfertasHandlers:
             )
             if not ok:
                 self._err(cid, f"❌ {err}", MERCADO_THREAD)
+                return
+            if not oferta_id:
+                # Nunca mostrar "#0": la oferta no quedó identificable.
+                self._err(cid, "❌ No se pudo crear la oferta (ID inválido). Intentá de nuevo.", MERCADO_THREAD)
                 return
 
             activo = mercado_service.get_activo(simbolo.upper())
