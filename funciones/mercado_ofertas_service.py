@@ -146,7 +146,12 @@ class MercadoOfertasService:
             ), 0
 
         # ── Insertar oferta ───────────────────────────────────────────────────
-        db_manager.execute_update(
+        # IMPORTANTE: usar execute_insert (devuelve lastrowid DENTRO de la misma
+        # conexión). Hacer execute_update + "SELECT last_insert_rowid()" por
+        # separado NO funciona: cada llamada abre su propia conexión, así que el
+        # SELECT corría en una conexión nueva y devolvía 0 → la oferta quedaba
+        # con id #0 y nadie podía aceptarla.
+        oferta_id = db_manager.execute_insert(
             """INSERT INTO MERCADO_OFERTAS
                (vendedor_id, vendedor_nombre, comprador_id, comprador_nombre,
                 simbolo, cantidad, precio_unit, estado, fecha_creacion)
@@ -154,9 +159,9 @@ class MercadoOfertasService:
             (vendedor_id, vendedor_nombre, comprador_id, comprador_nombre,
              simbolo, cantidad, float(precio_unit), datetime.now().isoformat()),
         )
-
-        rows = db_manager.execute_query("SELECT last_insert_rowid() as id")
-        oferta_id = int(rows[0]["id"]) if rows else 0
+        if not oferta_id:
+            logger.error("[OFERTAS] crear_oferta: no se obtuvo ID de la nueva oferta.")
+            return False, "Error al crear la oferta. Intentá de nuevo.", 0
 
         tipo = "directa" if comprador_id else "pública"
         logger.info(
