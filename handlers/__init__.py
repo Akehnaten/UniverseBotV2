@@ -210,6 +210,22 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Secret Hitler handlers: {e}", exc_info=True)
 
+    try:
+        from handlers.tateti_handler import setup_tateti_handler
+        setup_tateti_handler(bot)
+        handlers_initialized.append("TaTeTi")
+        logger.info("✅ Ta-Te-Ti handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Ta-Te-Ti handlers: {e}", exc_info=True)
+
+    try:
+        from tutifruti import setup_tutifruti_handler
+        setup_tutifruti_handler(bot)
+        handlers_initialized.append("TutiFruti")
+        logger.info("✅ Tuti Fruti handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Tuti Fruti handlers: {e}", exc_info=True)
+        
     # ── 3. Event handlers al final (content_types sin filtro de comando) ─────
     try:
         from handlers.event_handlers import EventHandlers
