@@ -80,22 +80,44 @@ def _asegurar_tabla() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _Ronda:
+    """
+    Mantiene el estado de toda la PARTIDA (varias rondas) y de la ronda en curso.
+      • Estado de partida (persiste entre rondas): jugadores, puntaje_acumulado,
+        letras_usadas, numero_ronda.
+      • Estado de ronda (se reinicia con nueva_ronda): letra, listos, editando,
+        form_msg, cola_validacion, votos, validez.
+    """
     def __init__(self, chat_id: int, creador: int):
         self.chat_id = chat_id
         self.creador = creador
-        self.letra: Optional[str] = None
         self.jugadores: dict[int, str] = {}        # uid -> nombre
         self.iniciada = False
-        self.listos: set[int] = set()              # quienes tocaron "listo para mí"
-        # Edición en curso por usuario en su DM: uid -> categoria que está escribiendo
+        # ── Estado acumulado de la partida ──
+        self.puntaje_acumulado: dict[int, int] = {}   # uid -> puntos totales
+        self.letras_usadas: set[str] = set()
+        self.numero_ronda = 0
+        # ── Estado de la ronda en curso ──
+        self.letra: Optional[str] = None
+        self.listos: set[int] = set()
         self.editando: dict[int, str] = {}
-        # message_id del formulario en el DM de cada usuario (para refrescarlo)
         self.form_msg: dict[int, int] = {}
-        # Validación: lista de items pendientes [(uid, nombre, categoria, palabra)]
         self.cola_validacion: list[tuple] = []
         self.idx_validacion = 0
-        self.votos: dict[tuple, dict[int, bool]] = {}   # (uid,cat) -> {votante: V/X}
-        self.validez: dict[int, dict[str, bool]] = {}   # resultado final
+        self.votos: dict[tuple, dict[int, bool]] = {}
+        self.validez: dict[int, dict[str, bool]] = {}
+        self.en_validacion = False
+
+    def nueva_ronda(self) -> None:
+        """Reinicia solo el estado de la ronda, conservando el acumulado."""
+        self.letra = None
+        self.listos = set()
+        self.editando = {}
+        self.form_msg = {}
+        self.cola_validacion = []
+        self.idx_validacion = 0
+        self.votos = {}
+        self.validez = {}
+        self.en_validacion = False
 
 
 class TutiFrutiHandler:
@@ -112,6 +134,7 @@ class TutiFrutiHandler:
         self.bot.register_message_handler(self.cmd_nuevo,    commands=["tf_nuevo"])
         self.bot.register_message_handler(self.cmd_unir,     commands=["tf_unir"])
         self.bot.register_message_handler(self.cmd_iniciar,  commands=["tf_iniciar"])
+        self.bot.register_message_handler(self.cmd_terminar, commands=["tf_terminar"])
         self.bot.register_message_handler(self.cmd_cancelar, commands=["tf_cancelar"])
         # La recepción de texto en el DM se hace con register_next_step_handler
         # (ver _cb_elegir_categoria), que tiene prioridad sobre los handlers
@@ -234,10 +257,10 @@ class TutiFrutiHandler:
         with self._lock:
             r = self._ronda
             if not r:
-                self._grupo_msg(message, "No hay ronda. Creá una con /tf_nuevo.")
+                self._grupo_msg(message, "No hay partida. Creá una con /tf_nuevo.")
                 return
             if r.iniciada:
-                self._grupo("La ronda ya está en curso.")
+                self._grupo("La partida ya está en curso.")
                 return
             if message.from_user.id != r.creador and not self._es_admin(message):
                 self._grupo("Solo el creador o un admin puede iniciar.")
@@ -247,26 +270,32 @@ class TutiFrutiHandler:
                 return
 
             r.iniciada = True
-            r.letra = random.choice(_LETRAS)
-            # Limpiar cualquier resto de tabla.
-            try:
-                db_manager.execute_update("DELETE FROM TUTIFRUTI_RESPUESTAS")
-            except Exception:
-                pass
-
             self._grupo(
-                f"🍓 <b>¡EMPIEZA EL TUTI FRUTI!</b>\n\n"
-                f"🔤 Letra: <b>{r.letra}</b>\n\n"
-                "Revisen su DM y completen las categorías. Cuando terminen, toquen "
-                "«✅ Listo para mí». Para cortar la ronda ya, «🏁 ¡Listo para todos!»."
+                "🍓 <b>¡EMPIEZA EL TUTI FRUTI!</b>\n\n"
+                "Se jugarán varias rondas. Los puntos se acumulan.\n"
+                "El creador puede cerrar el juego cuando quiera con /tf_terminar."
             )
-            # Enviar el formulario a cada jugador por DM.
-            for uid, nombre in r.jugadores.items():
-                self._enviar_formulario(uid)
+            self._arrancar_ronda()
 
-            self._timer = threading.Timer(_TIEMPO_RONDA, self._timeout_ronda)
-            self._timer.daemon = True
-            self._timer.start()
+    def cmd_terminar(self, message) -> None:
+        if not self._en_juegos(message):
+            return
+        with self._lock:
+            r = self._ronda
+            if not r or not r.iniciada:
+                self._grupo_msg(message, "No hay una partida en curso.")
+                return
+            if message.from_user.id != r.creador and not self._es_admin(message):
+                self._grupo("Solo el creador o un admin puede terminar el juego.")
+                return
+            if r.en_validacion:
+                self._grupo("Esperá a que termine la validación de la ronda actual "
+                            "y volvé a usar /tf_terminar.")
+                return
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
+            self._terminar_partida()
 
     def _enviar_formulario(self, uid: int) -> None:
         r = self._ronda
@@ -402,10 +431,18 @@ class TutiFrutiHandler:
                     r.cola_validacion.append((uid, r.jugadores.get(uid, "?"), cat, palabra))
 
         if not r.cola_validacion:
-            self._grupo("Nadie escribió ninguna respuesta. Ronda terminada sin puntajes.")
-            self._reset()
+            # Nadie escribió en esta ronda: no se corta la partida, se pasa a la
+            # siguiente letra (o se cierra si ya no quedan letras).
+            self._grupo("Nadie escribió nada en esta ronda. Pasamos a la siguiente.")
+            if len(r.letras_usadas) >= len(_LETRAS):
+                self._terminar_partida()
+            else:
+                self._timer = threading.Timer(4.0, self._siguiente_ronda_auto)
+                self._timer.daemon = True
+                self._timer.start()
             return
 
+        r.en_validacion = True
         self._grupo(
             "🗳 <b>VALIDACIÓN COMUNITARIA</b>\n\n"
             "Voten cada palabra: ✅ V si es válida, ❌ X si no. "
@@ -437,20 +474,102 @@ class TutiFrutiHandler:
         self._publicar_siguiente_validacion()
 
     def _finalizar(self) -> None:
+        """Cierra la RONDA: acumula puntos, muestra parciales y encadena la siguiente."""
         r = self._ronda
+        r.en_validacion = False
         respuestas = self._leer_todas()
         puntajes = scoring.calcular_puntajes(respuestas, r.validez)
-        totales = scoring.totales(puntajes)
+        totales_ronda = scoring.totales(puntajes)
 
-        ranking = sorted(totales.items(), key=lambda kv: kv[1], reverse=True)
+        # Acumular al marcador de la partida.
+        for uid in r.jugadores:
+            r.puntaje_acumulado[uid] = r.puntaje_acumulado.get(uid, 0) + totales_ronda.get(uid, 0)
+
+        # Ranking de ESTA ronda.
+        ranking_r = sorted(totales_ronda.items(), key=lambda kv: kv[1], reverse=True)
+        lineas_r = []
+        for uid, pts in ranking_r:
+            lineas_r.append(f"  {self._mencion(uid, r.jugadores.get(uid,'?'))}: {pts} pts")
+
+        # Marcador acumulado.
+        ranking_acum = sorted(r.puntaje_acumulado.items(), key=lambda kv: kv[1], reverse=True)
+        lineas_acum = []
+        for pos, (uid, total) in enumerate(ranking_acum, 1):
+            medalla = {1: "🥇", 2: "🥈", 3: "🥉"}.get(pos, f"{pos}.")
+            lineas_acum.append(f"{medalla} {self._mencion(uid, r.jugadores.get(uid,'?'))} — <b>{total}</b> pts")
+
+        self._grupo(
+            f"📊 <b>Resultado de la ronda {r.numero_ronda} (letra {r.letra})</b>\n"
+            + "\n".join(lineas_r)
+            + "\n\n🏆 <b>Marcador acumulado:</b>\n" + "\n".join(lineas_acum)
+        )
+
+        # ¿Quedan letras para seguir?
+        if len(r.letras_usadas) >= len(_LETRAS):
+            self._grupo("¡Se usaron todas las letras disponibles! Cierro la partida.")
+            self._terminar_partida()
+            return
+
+        # Encadenar la siguiente ronda automáticamente tras una breve pausa.
+        self._grupo(
+            "▶️ La siguiente ronda arranca en unos segundos…\n"
+            "Para cerrar el juego y ver el ganador final: /tf_terminar"
+        )
+        self._timer = threading.Timer(6.0, self._siguiente_ronda_auto)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _siguiente_ronda_auto(self) -> None:
+        with self._lock:
+            r = self._ronda
+            if not r or not r.iniciada:
+                return
+            self._arrancar_ronda()
+
+    def _arrancar_ronda(self) -> None:
+        """Sortea una letra nueva (sin repetir) y abre la fase de relleno."""
+        r = self._ronda
+        # Limpiar la tabla de respuestas de la ronda anterior.
+        try:
+            db_manager.execute_update("DELETE FROM TUTIFRUTI_RESPUESTAS")
+        except Exception:
+            pass
+        r.nueva_ronda()
+        disponibles = [l for l in _LETRAS if l not in r.letras_usadas]
+        r.letra = random.choice(disponibles)
+        r.letras_usadas.add(r.letra)
+        r.numero_ronda += 1
+
+        self._grupo(
+            f"🍓 <b>RONDA {r.numero_ronda} — Letra {r.letra}</b>\n\n"
+            "Revisen su DM y completen las categorías. Cuando terminen, «✅ Listo "
+            "para mí». Para cortar la ronda ya, «🏁 ¡Listo para todos!»."
+        )
+        for uid in r.jugadores:
+            self._enviar_formulario(uid)
+
+        self._timer = threading.Timer(_TIEMPO_RONDA, self._timeout_ronda)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _terminar_partida(self) -> None:
+        """Cierra TODA la partida: ranking final acumulado y limpieza."""
+        r = self._ronda
+        if not r.puntaje_acumulado:
+            self._grupo("La partida terminó sin puntajes registrados.")
+            self._reset()
+            return
+        ranking = sorted(r.puntaje_acumulado.items(), key=lambda kv: kv[1], reverse=True)
         lineas = []
         for pos, (uid, total) in enumerate(ranking, 1):
             medalla = {1: "🥇", 2: "🥈", 3: "🥉"}.get(pos, f"{pos}.")
             lineas.append(f"{medalla} {self._mencion(uid, r.jugadores.get(uid,'?'))} — <b>{total}</b> pts")
-
+        ganador_uid = ranking[0][0]
         self._grupo(
-            f"🏆 <b>RESULTADO — Letra {r.letra}</b>\n\n" + "\n".join(lineas) +
-            "\n\n¡Gracias por jugar! La tabla se reinició."
+            f"🎉 <b>¡FIN DEL TUTI FRUTI!</b>\n"
+            f"Se jugaron {r.numero_ronda} ronda(s).\n\n"
+            "🏆 <b>RANKING FINAL:</b>\n" + "\n".join(lineas) +
+            f"\n\n👑 ¡Gana {self._mencion(ganador_uid, r.jugadores.get(ganador_uid,'?'))}!"
         )
         self._reset()
 
