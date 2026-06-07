@@ -30,6 +30,7 @@ from telebot import types
 
 from config import MSG_USUARIO_NO_REGISTRADO
 from funciones import user_service
+from utils.thread_utils import get_thread_id
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +86,7 @@ class TaTeTiHandler:
             msg = message_or_call.message
         else:
             msg = message_or_call
-        return (msg.chat.id, getattr(msg, "message_thread_id", None))
+        return (msg.chat.id, get_thread_id(msg))
 
     def _mencion(self, uid: int, nombre: str) -> str:
         return f'<a href="tg://user?id={uid}">{nombre}</a>'

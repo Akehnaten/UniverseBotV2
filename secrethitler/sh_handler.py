@@ -47,6 +47,7 @@ except ImportError:
     SECRETHITLER = None  # el handler avisará si no está configurado
 
 from funciones import user_service
+from utils.thread_utils import get_thread_id
 from secrethitler.game_engine import (
     SecretHitlerGame, Jugador, Rol, Politica, Poder, Fase,
 )
@@ -99,7 +100,7 @@ class SecretHitlerHandler:
                 "⚠️ Secret Hitler no está configurado: falta SECRETHITLER en config.py",
             )
             return False
-        return getattr(message, "message_thread_id", None) == SECRETHITLER
+        return get_thread_id(message) == SECRETHITLER
 
     def _grupo(self, texto: str, **kw):
         return self.bot.send_message(
