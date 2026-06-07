@@ -202,6 +202,14 @@ def setup_all_handlers(bot):
     except Exception as e:
         logger.error(f"❌ Mercado Ofertas handlers: {e}", exc_info=True)
 
+    try:
+        from secrethitler import setup_secrethitler_handler
+        setup_secrethitler_handler(bot)
+        handlers_initialized.append("SecretHitler")
+        logger.info("✅ Secret Hitler handlers configurados")
+    except Exception as e:
+        logger.error(f"❌ Secret Hitler handlers: {e}", exc_info=True)
+
     # ── 3. Event handlers al final (content_types sin filtro de comando) ─────
     try:
         from handlers.event_handlers import EventHandlers
