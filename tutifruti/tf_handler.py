@@ -113,14 +113,9 @@ class TutiFrutiHandler:
         self.bot.register_message_handler(self.cmd_unir,     commands=["tf_unir"])
         self.bot.register_message_handler(self.cmd_iniciar,  commands=["tf_iniciar"])
         self.bot.register_message_handler(self.cmd_cancelar, commands=["tf_cancelar"])
-        # Texto en privado: lo usa el jugador para rellenar la categoría que está editando.
-        self.bot.register_message_handler(
-            self.on_dm_texto,
-            func=lambda m: (m.chat.type == "private"
-                            and self._ronda is not None
-                            and m.from_user.id in (self._ronda.editando if self._ronda else {})),
-            content_types=["text"],
-        )
+        # La recepción de texto en el DM se hace con register_next_step_handler
+        # (ver _cb_elegir_categoria), que tiene prioridad sobre los handlers
+        # globales de texto y no compite con otros sistemas (motes, guardería…).
         self.bot.register_callback_query_handler(
             self.on_callback, func=lambda c: c.data and c.data.startswith("tf_")
         )
@@ -346,21 +341,33 @@ class TutiFrutiHandler:
 
     # ── DM: el jugador escribe la respuesta de la categoría que está editando ──
 
-    def on_dm_texto(self, message) -> None:
+    def _recibir_palabra(self, message, uid_esperado: int, categoria: str) -> None:
+        """
+        Receptor de register_next_step_handler. Solo procesa si el autor es el
+        jugador esperado; si no, vuelve a registrar el paso y descarta.
+        """
+        # Guard: mensajes de sistema sin autor, o de otra persona.
+        if not message.from_user or message.from_user.id != uid_esperado:
+            try:
+                self.bot.register_next_step_handler_by_chat_id(
+                    uid_esperado,
+                    lambda m: self._recibir_palabra(m, uid_esperado, categoria))
+            except Exception:
+                pass
+            return
+
         with self._lock:
             r = self._ronda
-            if not r:
+            if not r or not r.iniciada:
                 return
             uid = message.from_user.id
-            cat = r.editando.get(uid)
-            if not cat:
-                return
             palabra = (message.text or "").strip()
-            # Validación de la letra inicial (suave: avisa pero deja escribir).
-            if palabra and r.letra and not scoring.normalizar(palabra).startswith(r.letra.lower()):
-                self._dm(uid, f"⚠️ Tu respuesta no empieza con «{r.letra}». Igual la guardé, "
-                              "pero puede ser invalidada por los demás.")
-            self._guardar_respuesta(uid, cat, palabra)
+            # Si tocó otro botón en vez de escribir, el texto vendría vacío: ignorar.
+            if palabra:
+                if r.letra and not scoring.normalizar(palabra).startswith(r.letra.lower()):
+                    self._dm(uid, f"⚠️ «{palabra}» no empieza con {r.letra}. La guardé igual, "
+                                  "pero pueden invalidarla en la votación.")
+                self._guardar_respuesta(uid, categoria, palabra)
             r.editando.pop(uid, None)
             # Refrescar el formulario.
             try:
@@ -474,7 +481,14 @@ class TutiFrutiHandler:
         cat = CATEGORIAS[idx]
         r.editando[uid] = cat
         self.bot.answer_callback_query(call.id, f"Escribí tu respuesta para {cat}.")
-        self._dm(uid, f"✏️ Escribí tu respuesta para <b>{cat}</b> (letra {r.letra}):")
+        m = self._dm(uid, f"✏️ Escribí tu respuesta para <b>{cat}</b> (letra {r.letra}):")
+        # Esperar el próximo mensaje de ESTE usuario en su DM. Tiene prioridad
+        # sobre los handlers de texto globales (motes, guardería, etc.).
+        try:
+            self.bot.register_next_step_handler_by_chat_id(
+                uid, lambda msg: self._recibir_palabra(msg, uid, cat))
+        except Exception as e:
+            logger.error(f"[TF] Error registrando next_step {uid}: {e}")
 
     def _cb_listo(self, call, r) -> None:
         uid = call.from_user.id
