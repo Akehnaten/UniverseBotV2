@@ -106,6 +106,7 @@ class _Ronda:
         self.votos: dict[tuple, dict[int, bool]] = {}
         self.validez: dict[int, dict[str, bool]] = {}
         self.en_validacion = False
+        self.recepcion_cerrada = False
 
     def nueva_ronda(self) -> None:
         """Reinicia solo el estado de la ronda, conservando el acumulado."""
@@ -118,6 +119,7 @@ class _Ronda:
         self.votos = {}
         self.validez = {}
         self.en_validacion = False
+        self.recepcion_cerrada = False
 
 
 class TutiFrutiHandler:
@@ -390,6 +392,12 @@ class TutiFrutiHandler:
             if not r or not r.iniciada:
                 return
             uid = message.from_user.id
+            # Si la recepción ya cerró (alguien tocó "listo para todos" o se acabó
+            # el tiempo), no se aceptan más respuestas.
+            if r.recepcion_cerrada:
+                self._dm(uid, "🏁 La ronda ya se cerró, no se pueden cargar más "
+                              "respuestas. Volvé al canal de juegos para revisarlas.")
+                return
             palabra = (message.text or "").strip()
             # Si tocó otro botón en vez de escribir, el texto vendría vacío: ignorar.
             if palabra:
@@ -414,12 +422,41 @@ class TutiFrutiHandler:
                 self._grupo("⏱ Se acabó el tiempo de la ronda.")
                 self._cerrar_recepcion()
 
+    def _cerrar_formularios(self, motivo: str) -> None:
+        """
+        Quita los botones del formulario de cada jugador y les avisa que la
+        ronda se cerró, para que no sigan llenando categorías.
+        """
+        r = self._ronda
+        r.recepcion_cerrada = True
+        r.editando = {}   # invalida cualquier edición en curso
+        for uid in r.jugadores:
+            msg_id = r.form_msg.get(uid)
+            if msg_id:
+                try:
+                    # Editar el formulario para quitar los botones.
+                    self.bot.edit_message_text(
+                        f"🏁 <b>Ronda cerrada.</b>\n{motivo}\n\n"
+                        "Volvé al canal de juegos para revisar las respuestas "
+                        "de todos. 👀",
+                        uid, msg_id, parse_mode="HTML")
+                except Exception:
+                    # Si no se puede editar, al menos avisar por DM.
+                    self._dm(uid, f"🏁 La ronda se cerró. {motivo}\n"
+                                  "Volvé al canal de juegos para revisar las respuestas.")
+
     def _cerrar_recepcion(self) -> None:
         """Pasa de la fase de relleno a la validación comunitaria."""
         r = self._ronda
+        if r.recepcion_cerrada:
+            return  # ya se cerró (evita doble cierre por timer + botón)
         if self._timer:
             self._timer.cancel()
             self._timer = None
+
+        # Cerrar los formularios de todos ANTES de leer las respuestas, para que
+        # no entren palabras tardías mientras armamos la cola.
+        self._cerrar_formularios("Se están comparando las respuestas en el canal.")
 
         todas = self._leer_todas()
         # Construir cola de validación AGRUPADA POR CATEGORÍA: primero todos los
@@ -592,10 +629,20 @@ class TutiFrutiHandler:
                 self.bot.answer_callback_query(call.id, "No hay ronda activa.")
                 return
             if data.startswith("tf_cat_"):
+                if r.recepcion_cerrada:
+                    self.bot.answer_callback_query(
+                        call.id, "La ronda ya se cerró.", show_alert=True)
+                    return
                 self._cb_elegir_categoria(call, r)
             elif data == "tf_listo":
+                if r.recepcion_cerrada:
+                    self.bot.answer_callback_query(call.id, "La ronda ya se cerró.")
+                    return
                 self._cb_listo(call, r)
             elif data == "tf_listotodos":
+                if r.recepcion_cerrada:
+                    self.bot.answer_callback_query(call.id, "La ronda ya se cerró.")
+                    return
                 self._cb_listo_todos(call, r)
             elif data.startswith("tf_v_"):
                 self._cb_validar(call, r)
@@ -636,7 +683,10 @@ class TutiFrutiHandler:
             self.bot.answer_callback_query(call.id, "No estás en esta ronda.")
             return
         self.bot.answer_callback_query(call.id, "Cortaste la ronda 🏁")
-        self._grupo(f"🏁 {self._mencion(uid, r.jugadores[uid])} cortó la ronda. ¡Tiempo!")
+        self._grupo(
+            f"🏁 {self._mencion(uid, r.jugadores[uid])} gritó <b>¡BASTA!</b>\n"
+            "Se cerraron los formularios. Todos al canal a comparar las respuestas. 👀"
+        )
         self._cerrar_recepcion()
 
     def _cb_validar(self, call, r) -> None:
