@@ -422,10 +422,11 @@ class TutiFrutiHandler:
             self._timer = None
 
         todas = self._leer_todas()
-        # Construir cola de validación: solo palabras no vacías.
+        # Construir cola de validación AGRUPADA POR CATEGORÍA: primero todos los
+        # "Nombre", luego todos los "Animal", etc. (como en el juego de mesa).
         r.cola_validacion = []
-        for uid, fila in todas.items():
-            for cat in CATEGORIAS:
+        for cat in CATEGORIAS:
+            for uid, fila in todas.items():
                 palabra = (fila.get(cat) or "").strip()
                 if palabra:
                     r.cola_validacion.append((uid, r.jugadores.get(uid, "?"), cat, palabra))
@@ -457,13 +458,21 @@ class TutiFrutiHandler:
             self._finalizar()
             return
         uid, nombre, cat, palabra = r.cola_validacion[r.idx_validacion]
+
+        # Si arrancamos una categoría nueva, anunciarla como encabezado.
+        es_primera = r.idx_validacion == 0
+        cat_anterior = (r.cola_validacion[r.idx_validacion - 1][2]
+                        if not es_primera else None)
+        if es_primera or cat != cat_anterior:
+            self._grupo(f"📋 <b>Revisando categoría: {cat}</b>")
+
         kb = types.InlineKeyboardMarkup(row_width=2)
         kb.add(
             types.InlineKeyboardButton("✅ V", callback_data="tf_v_1"),
             types.InlineKeyboardButton("❌ X", callback_data="tf_v_0"),
         )
         self._grupo(
-            f"<b>{cat}</b> ({self._mencion(uid, nombre)})\n"
+            f"{self._mencion(uid, nombre)}\n"
             f"➡️ <b>{palabra}</b>\n\n"
             f"({r.idx_validacion + 1}/{len(r.cola_validacion)})  ✅ 0 · ❌ 0",
             reply_markup=kb)
@@ -660,8 +669,8 @@ class TutiFrutiHandler:
                 types.InlineKeyboardButton("❌ X", callback_data="tf_v_0"),
             )
             self.bot.edit_message_text(
-                f"<b>{cat}</b> ({self._mencion(uid_dueno, nombre)})\n"
-                f"➡️ <b>{palabra}</b>\n\n"
+                f"{self._mencion(uid_dueno, nombre)}\n"
+                f"➡️ <b>{palabra}</b>  <i>({cat})</i>\n\n"
                 f"({r.idx_validacion + 1}/{len(r.cola_validacion)})  ✅ {v} · ❌ {x}",
                 call.message.chat.id, call.message.message_id,
                 parse_mode="HTML", reply_markup=kb)
