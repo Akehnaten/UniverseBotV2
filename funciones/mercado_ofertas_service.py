@@ -368,6 +368,76 @@ class MercadoOfertasService:
         )
         return True, ""
 
+    # ── Rechazar oferta ─────────────────────────────────────────────────────────
+
+    def rechazar_oferta(self, user_id: int, oferta_id: int) -> Tuple[bool, str]:
+        """
+        El destinatario de una oferta DIRECTA la rechaza.
+
+        Al marcarla como 'rechazada' deja de contar en _shares_en_oferta,
+        de modo que las acciones del vendedor vuelven a quedar disponibles.
+
+        Returns:
+            (True, "")          — rechazada correctamente
+            (False, mensaje)    — error
+        """
+        oferta = self._get_oferta(oferta_id)
+        if not oferta:
+            return False, f"Oferta #{oferta_id} no encontrada."
+        # Solo las ofertas directas tienen destinatario; las públicas no se rechazan.
+        if not oferta.get("comprador_id"):
+            return False, "Las ofertas públicas no se rechazan; solo el vendedor puede cancelarlas."
+        if int(oferta["comprador_id"]) != user_id:
+            return False, "Esta oferta directa no es para vos."
+        if oferta["estado"] != "activa":
+            return False, f"La oferta #{oferta_id} ya no está activa."
+        db_manager.execute_update(
+            "UPDATE MERCADO_OFERTAS SET estado='rechazada', fecha_cierre=? WHERE id=?",
+            (datetime.now().isoformat(), oferta_id),
+        )
+        logger.info(
+            "[OFERTAS] #%d rechazada por destinatario %d | vendedor=%s %s ×%d",
+            oferta_id, user_id, oferta["vendedor_nombre"],
+            oferta["simbolo"], int(oferta["cantidad"]),
+        )
+        return True, ""
+
+    # ── Mantenimiento: barrer ofertas vencidas ───────────────────────────────────
+
+    def barrer_expiradas(self) -> int:
+        """
+        Marca como 'expirada' toda oferta directa activa cuyo plazo venció.
+
+        La expiración antes solo se evaluaba al intentar aceptar una oferta;
+        si nadie la tocaba, quedaba 'activa' para siempre y congelaba las
+        acciones del vendedor. Este barrido las libera sin intervención.
+
+        Devuelve la cantidad de ofertas expiradas en esta pasada.
+        """
+        rows = db_manager.execute_query(
+            """SELECT id, fecha_creacion FROM MERCADO_OFERTAS
+               WHERE estado='activa' AND comprador_id IS NOT NULL""",
+        )
+        if not rows:
+            return 0
+        ahora     = datetime.now()
+        limite    = timedelta(hours=OFERTA_EXPIRA_HORAS)
+        expiradas = 0
+        for r in rows:
+            try:
+                creada = datetime.fromisoformat(r["fecha_creacion"])
+            except Exception:
+                continue
+            if ahora - creada > limite:
+                db_manager.execute_update(
+                    "UPDATE MERCADO_OFERTAS SET estado='expirada', fecha_cierre=? WHERE id=?",
+                    (ahora.isoformat(), int(r["id"])),
+                )
+                expiradas += 1
+        if expiradas:
+            logger.info("[OFERTAS] barrer_expiradas: %d oferta(s) marcadas como expiradas.", expiradas)
+        return expiradas
+
     # ── Consultas ─────────────────────────────────────────────────────────────
 
     def get_ofertas_publicas(self, simbolo: Optional[str] = None) -> List[Dict]:

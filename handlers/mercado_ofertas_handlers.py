@@ -23,6 +23,7 @@ import threading
 from typing import Optional
 
 import telebot
+from telebot import types
 
 from config import CANAL_ID, MSG_USUARIO_NO_REGISTRADO
 from database import db_manager
@@ -52,6 +53,12 @@ class MercadoOfertasHandlers:
         self.bot.register_message_handler(self.cmd_ofertas_recibidas, commands=["ofertas_recibidas"])
         self.bot.register_message_handler(self.cmd_comprar_oferta,    commands=["comprar_oferta"])
         self.bot.register_message_handler(self.cmd_cancelar_oferta,   commands=["cancelar_oferta"])
+        self.bot.register_message_handler(self.cmd_rechazar_oferta,   commands=["rechazar_oferta"])
+        # Botones inline ✅/❌ de las ofertas directas
+        self.bot.register_callback_query_handler(
+            self.cb_oferta,
+            func=lambda c: bool(c.data) and c.data.startswith("mof:"),
+        )
 
     # ── Utilidades ────────────────────────────────────────────────────────────
 
@@ -137,6 +144,108 @@ class MercadoOfertasHandlers:
             self.bot.send_message(CANAL_ID, texto, parse_mode="HTML", message_thread_id=MERCADO_THREAD)
         except Exception:
             pass
+
+    # ── Teclado inline de oferta directa ────────────────────────────────────────
+
+    def _kb_oferta_directa(self, oferta_id: int, target_id: int) -> types.InlineKeyboardMarkup:
+        """
+        Botones ✅ Aceptar / ❌ Rechazar para el destinatario de una oferta directa.
+
+        callback_data: mof:<accion>:<oferta_id>:<target_id>
+          · accion ∈ {acc, rej}
+          · target_id permite verificar que solo el destinatario use los botones.
+        """
+        kb = types.InlineKeyboardMarkup(row_width=2)
+        kb.add(
+            types.InlineKeyboardButton(
+                "✅ Aceptar", callback_data=f"mof:acc:{oferta_id}:{target_id}"
+            ),
+            types.InlineKeyboardButton(
+                "❌ Rechazar", callback_data=f"mof:rej:{oferta_id}:{target_id}"
+            ),
+        )
+        return kb
+
+    def cb_oferta(self, call: telebot.types.CallbackQuery) -> None:
+        """Procesa los botones ✅/❌ de las ofertas directas."""
+        try:
+            partes = (call.data or "").split(":")
+            # mof:<accion>:<oferta_id>:<target_id>
+            if len(partes) != 4:
+                self.bot.answer_callback_query(call.id, "Botón inválido.")
+                return
+            _, accion, oferta_id_s, target_id_s = partes
+            oferta_id = int(oferta_id_s)
+            target_id = int(target_id_s)
+            uid = call.from_user.id
+
+            # Solo el destinatario de la oferta puede usar estos botones.
+            if uid != target_id:
+                self.bot.answer_callback_query(
+                    call.id, "🚫 Esta oferta no es para vos.", show_alert=True
+                )
+                return
+
+            if not db_manager.user_exists(uid):
+                self.bot.answer_callback_query(call.id, "Registrate primero.", show_alert=True)
+                return
+
+            nombre = self._get_nombre(uid)
+
+            if accion == "rej":
+                ok, err = mercado_ofertas_service.rechazar_oferta(uid, oferta_id)
+                if not ok:
+                    self.bot.answer_callback_query(call.id, f"❌ {err}", show_alert=True)
+                    return
+                self.bot.answer_callback_query(call.id, "Oferta rechazada.")
+                self._editar_cerrada(call, f"❌ Oferta #{oferta_id} rechazada por <b>{nombre}</b>.")
+                return
+
+            if accion == "acc":
+                ok, err, resumen = mercado_ofertas_service.aceptar_oferta(uid, nombre, oferta_id)
+                if not ok:
+                    self.bot.answer_callback_query(call.id, f"❌ {err}", show_alert=True)
+                    return
+                self.bot.answer_callback_query(call.id, "¡Trato cerrado!")
+                self._editar_cerrada(
+                    call,
+                    f"✅ <b>¡Trato cerrado! — Oferta #{oferta_id}</b>\n\n"
+                    f"📦 <b>{resumen['nombre_activo']} ({resumen['simbolo']})</b>\n"
+                    f"   {resumen['cantidad']} acciones × <b>{resumen['precio_unit']:,.0f} ✨</b>/acc\n"
+                    f"   Total: <b>{resumen['total']:,} ✨</b>\n\n"
+                    f"💸 <b>{resumen['vendedor_nombre']}</b> recibió {resumen['total']:,} ✨\n"
+                    f"📈 <b>{resumen['comprador_nombre']}</b> recibió {resumen['cantidad']} acciones",
+                )
+                if resumen.get("ceo_event"):
+                    self._anunciar_ceo(resumen["ceo_event"])
+                return
+
+            self.bot.answer_callback_query(call.id, "Acción desconocida.")
+        except Exception as exc:
+            logger.error("[OFERTAS] cb_oferta: %s", exc, exc_info=True)
+            try:
+                self.bot.answer_callback_query(call.id, "❌ Error inesperado.", show_alert=True)
+            except Exception:
+                pass
+
+    def _editar_cerrada(self, call: telebot.types.CallbackQuery, texto: str) -> None:
+        """Reemplaza el mensaje de la oferta por el resultado y quita los botones."""
+        try:
+            self.bot.edit_message_text(
+                texto,
+                chat_id=call.message.chat.id,
+                message_id=call.message.message_id,
+                parse_mode="HTML",
+            )
+        except Exception:
+            # Si no se puede editar (p. ej. mensaje viejo), al menos respondemos.
+            try:
+                self.bot.send_message(
+                    call.message.chat.id, texto,
+                    parse_mode="HTML", message_thread_id=MERCADO_THREAD,
+                )
+            except Exception:
+                pass
 
     # ── /vender_acciones ──────────────────────────────────────────────────────
 
@@ -272,10 +381,12 @@ class MercadoOfertasHandlers:
                 f"📦 <b>{activo.nombre if activo else simbolo} ({simbolo.upper()})</b>\n"
                 f"   {cantidad} acciones × <b>{precio_u:,.0f} ✨</b>/acc\n"
                 f"   Total: <b>{total:,} ✨</b>{diferencia}\n\n"
-                f"<b>{target_nombre}</b>, podés aceptar con "
-                f"<code>/comprar_oferta {oferta_id}</code>\n"
+                f"<b>{target_nombre}</b>, respondé con los botones de abajo "
+                f"(o <code>/comprar_oferta {oferta_id}</code> / "
+                f"<code>/rechazar_oferta {oferta_id}</code>).\n"
                 f"<i>Expira en {OFERTA_EXPIRA_HORAS} horas.</i>",
                 parse_mode="HTML", message_thread_id=MERCADO_THREAD,
+                reply_markup=self._kb_oferta_directa(oferta_id, target_id),
             )
         except Exception as exc:
             logger.error("[OFERTAS] cmd_vender_a: %s", exc, exc_info=True)
@@ -379,7 +490,8 @@ class MercadoOfertasHandlers:
                     f"<b>#{o['id']}</b>  {o['simbolo']}  de <b>{o['vendedor_nombre']}</b>\n"
                     f"   {o['cantidad']} acc. × {float(o['precio_unit']):,.0f} ✨  |  "
                     f"Total: <b>{total:,} ✨</b>\n"
-                    f"   ✅ <code>/comprar_oferta {o['id']}</code>"
+                    f"   ✅ <code>/comprar_oferta {o['id']}</code>   "
+                    f"❌ <code>/rechazar_oferta {o['id']}</code>"
                 )
             m = self.bot.send_message(
                 cid, "\n\n".join(lineas),
@@ -471,4 +583,46 @@ class MercadoOfertasHandlers:
             self._del_after(cid, m.message_id, 10.0)
         except Exception as exc:
             logger.error("[OFERTAS] cmd_cancelar_oferta: %s", exc, exc_info=True)
+            self._err(cid, f"❌ Error: <code>{exc}</code>", MERCADO_THREAD)
+
+    # ── /rechazar_oferta ──────────────────────────────────────────────────────
+
+    def cmd_rechazar_oferta(self, message: telebot.types.Message) -> None:
+        """
+        /rechazar_oferta [ID]
+        El destinatario de una oferta directa la rechaza, liberando las
+        acciones reservadas del vendedor.
+        """
+        if not self._solo_mercado(message):
+            return
+        cid = message.chat.id
+        uid = message.from_user.id
+        self._del(cid, message.message_id)
+        try:
+            if not db_manager.user_exists(uid):
+                self._err(cid, MSG_USUARIO_NO_REGISTRADO, MERCADO_THREAD)
+                return
+            parts = (message.text or "").split()
+            if len(parts) < 2:
+                self._err(cid, "❌ Uso: <code>/rechazar_oferta [ID]</code>", MERCADO_THREAD)
+                return
+            try:
+                oferta_id = int(parts[1])
+            except ValueError:
+                self._err(cid, "❌ El ID debe ser un número.", MERCADO_THREAD)
+                return
+
+            ok, err = mercado_ofertas_service.rechazar_oferta(uid, oferta_id)
+            if not ok:
+                self._err(cid, f"❌ {err}", MERCADO_THREAD)
+                return
+            nombre = self._get_nombre(uid)
+            m = self.bot.send_message(
+                cid,
+                f"❌ Oferta <b>#{oferta_id}</b> rechazada por <b>{nombre}</b>.",
+                parse_mode="HTML", message_thread_id=MERCADO_THREAD,
+            )
+            self._del_after(cid, m.message_id, 10.0)
+        except Exception as exc:
+            logger.error("[OFERTAS] cmd_rechazar_oferta: %s", exc, exc_info=True)
             self._err(cid, f"❌ Error: <code>{exc}</code>", MERCADO_THREAD)

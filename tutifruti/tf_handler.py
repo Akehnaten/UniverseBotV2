@@ -418,8 +418,13 @@ class TutiFrutiHandler:
 
     def _timeout_ronda(self) -> None:
         with self._lock:
-            if self._ronda and self._ronda.iniciada and not self._ronda.cola_validacion:
-                self._grupo("⏱ Se acabó el tiempo de la ronda.")
+            r = self._ronda
+            if r and r.iniciada and not r.recepcion_cerrada and not r.cola_validacion:
+                self._grupo(
+                    "⏱ <b>¡Se acabó el tiempo!</b>\n"
+                    "Se bloquearon los formularios. Solo cuenta lo que alcanzaron "
+                    "a cargar. Todos al canal a comparar las respuestas. 👀"
+                )
                 self._cerrar_recepcion()
 
     def _cerrar_formularios(self, motivo: str) -> None:
@@ -657,6 +662,13 @@ class TutiFrutiHandler:
         r.editando[uid] = cat
         self.bot.answer_callback_query(call.id, f"Escribí tu respuesta para {cat}.")
         m = self._dm(uid, f"✏️ Escribí tu respuesta para <b>{cat}</b> (letra {r.letra}):")
+        # Limpiar cualquier paso pendiente de una categoría tocada antes sin
+        # escribir: así solo queda activa la ÚLTIMA categoría que el usuario
+        # tocó, y su próxima palabra va a ésta y no a una anterior.
+        try:
+            self.bot.clear_step_handler_by_chat_id(uid)
+        except Exception:
+            pass
         # Esperar el próximo mensaje de ESTE usuario en su DM. Tiene prioridad
         # sobre los handlers de texto globales (motes, guardería, etc.).
         try:

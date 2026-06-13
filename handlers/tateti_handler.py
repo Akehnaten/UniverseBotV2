@@ -59,7 +59,6 @@ class _Partida:
     turno: int = 0                       # uid de quien tiene el turno
     message_id: Optional[int] = None     # mensaje del tablero (para editarlo)
     iniciada: bool = False
-    rival_objetivo: Optional[int] = None # si fue desafío dirigido a alguien
 
 
 class TaTeTiHandler:
@@ -136,26 +135,20 @@ class TaTeTiHandler:
 
             nombre = user_service.get_user_info(uid).get("nombre") or message.from_user.first_name
 
-            # ¿Desafío dirigido? (responder a alguien o mencionar)
-            rival_uid = None
-            if message.reply_to_message and message.reply_to_message.from_user:
-                rival_uid = message.reply_to_message.from_user.id
-
+            # El desafío es SIEMPRE abierto: cualquiera puede aceptarlo tocando
+            # "Unirse". (No se usa reply_to_message para dirigirlo, porque en
+            # grupos con topics ese campo aparece de forma fantasma y bloquearía
+            # a todos.)
             p = _Partida(
                 chat_id=cid, thread_id=tid,
                 jugador_x=uid, nombre_x=nombre, turno=uid,
-                rival_objetivo=rival_uid,
             )
             self._partidas[clave] = p
 
             kb = types.InlineKeyboardMarkup()
             kb.add(types.InlineKeyboardButton("✋ Unirse", callback_data="ttt_join"))
-            if rival_uid:
-                txt = (f"🎮 <b>Ta-Te-Ti</b>\n\n{self._mencion(uid, nombre)} desafía a "
-                       f'<a href="tg://user?id={rival_uid}">alguien</a>. ¡Tocá Unirse!')
-            else:
-                txt = (f"🎮 <b>Ta-Te-Ti</b>\n\n{self._mencion(uid, nombre)} busca rival. "
-                       "¡El primero en tocar Unirse juega!")
+            txt = (f"🎮 <b>Ta-Te-Ti</b>\n\n{self._mencion(uid, nombre)} busca rival. "
+                   "¡El primero en tocar Unirse juega!")
             m = self.bot.send_message(cid, txt, parse_mode="HTML",
                                       message_thread_id=tid, reply_markup=kb)
             p.message_id = m.message_id
@@ -213,9 +206,6 @@ class TaTeTiHandler:
             return
         if uid == p.jugador_x:
             self.bot.answer_callback_query(call.id, "No podés jugar contra vos mismo.", show_alert=True)
-            return
-        if p.rival_objetivo and uid != p.rival_objetivo:
-            self.bot.answer_callback_query(call.id, "Este desafío es para otra persona.", show_alert=True)
             return
         if not user_service.get_user_info(uid):
             self.bot.answer_callback_query(call.id, "No estás registrado.", show_alert=True)
